@@ -1,0 +1,585 @@
+/*
+httpapi 套件的組裝層：把設定、MySQL 連線、Redis session 與前端靜態檔案組成
+一個可直接交給 http.ListenAndServe 的 http.Handler。
+
+對外介面只有 Server、NewServer 與 (*Server).Handler；requireLogin、
+frontendRoot、safeStaticFileServer 等其餘符號都是套件內部實作細節，
+不供其他套件依賴。
+
+關鍵設計決策：
+
+ 1. 路由集中在 Handler() 一處註冊。Go 1.22+ 的 ServeMux 樣式分兩類：不含
+    尾斜線者（如 "/forum"）為完全比對，含尾斜線者（如 "/forum/"）為子樹比對。
+    子樹樣式會吃掉該前綴下所有未被更具體樣式攔截的路徑，所以部分 handler 必須
+    在函式內部自行比對 r.URL.Path，未定義的子路徑才不會被誤當成有效請求。
+ 2. 驗證與授權分兩層：requireLogin 負責「是誰」，requireAdminForum（在
+    forum_admin_handlers.go）負責「能不能」。因此 /api/admin/* 路由刻意不掛
+    requireLogin，改由各 handler 自行呼叫 requireAdminForum，避免出現兩套
+    重複的權限判斷。
+ 3. 中介層採「包裹 handler」而非 http.Server 全域包裹，唯一套在整棵 mux
+    外層的只有 Refresh 與 LoggingMiddleware，理由見 Handler() 末尾。
+ 4. 前端檔案路徑不寫死：frontendRoot、frontendAssetPath、frontendAssetsRoot
+    會依執行檔位置與工作目錄試多組候選路徑，兼顧 go run、編譯後 binary 與
+    容器部署三種啟動方式。
+*/
+
+package httpapi
+
+import (
+	"context"
+	"database/sql"
+	"forum/forum/auth"
+	"forum/forum/config"
+	"forum/forum/es"
+	"forum/forum/logger"
+	"forum/forum/session"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// Server 收攏所有 HTTP handler 需要的依賴。全部欄位由 NewServer 填入，
+// 而 handler 一律以 method value（s.handleXxx）的形式傳給 ServeMux，
+// 因此測試時可以只填少數欄位、其餘留 nil，不必建置真實的 DB 或 Redis。
+type Server struct {
+	// cfg 為啟動時載入的設定快照，以值型別持有，避免外部在執行期竄改。
+	// 供 IsAdminEmail、TrustedOrigins、FilesServer 內外部 URL 轉換等使用。
+	cfg config.Config
+	// db 為 *sql.DB 連線池，供貼文、留言、檢舉與帳號狀態查詢共用。
+	// 本檔不負責關閉它，連線生命週期由 main 控管。
+	db *sql.DB
+	// sessions 包裝 Redis session：token 產生、cookie 寫入、sliding expiration
+	// 與身分解析都經由它，handler 不直接操作 session key。
+	sessions *session.Manager
+	// 限流器依「端點成本」分成三組，各自獨立的額度。分成三組的理由見
+	// config.RateLimitRequests 的說明：圖片上傳會呼叫外部服務並在 Redis
+	// 建立 token，OAuth 會產生站外導向，而留言只是寫一行 MySQL，混用同一份
+	// 額度的結果必然是「要嘛放行上傳轟炸、要嘛把留言一起擋掉」。
+	// 三者都是 nil-safe 的：未建立時對應的 Middleware 不會被掛上（見 Handler）。
+	writeRateLimiter  *RateLimiter
+	uploadRateLimiter *RateLimiter
+	authRateLimiter   *RateLimiter
+	// mediaRedis 與 sessions 共用同一個 Redis client，但用途不同：這裡只用於
+	// 媒體存取 token 的簽發與釋放（handleForumImageTokensRelease），
+	// 另外也供 /healthz 做存活探測，因此允許為 nil（探測時會略過 Redis）。
+	mediaRedis *redis.Client
+	// es 是 Elasticsearch 的傳輸層，供貼文搜尋與索引維護使用（search.go）。
+	// 允許為 nil：未在設定檔填 ES_URL 時 NewServer 會讓它保持 nil，
+	// 搜尋則整條走 MySQL LIKE（見 search.go 的降級說明），/healthz 也略過它。
+	es *es.Client
+}
+
+// NewServer 以依賴注入的方式組裝 Server。cfg、db、sessions、redisClient 都由
+// main 在啟動時建立，redisClient 同時作為 session 儲存與媒體 token 儲存。
+// 回傳值不會啟動任何背景 goroutine —— 限流的定期清理由呼叫端另外以
+// StartRateLimitCleanup 啟動，刻意不藏在建構子裡，讓「何時開始有背景工作」
+// 是一個明確的決定。Handler() 每次呼叫都會重新建立一份 ServeMux，因此可
+// 安全地重複呼叫，但實務上只在 main 呼叫一次。
+//
+// es.Client 刻意不當成參數：它只是 cfg.ESURL 與 cfg.ESIndex 兩個字串的
+// 組裝結果，沒有連線要在這裡建立（es.Client 內部是 http.Client，沒有
+// dial），因此在這裡就地建構能讓「設定檔有沒有填 ES_URL」成為唯一的事實來源。
+// 填了就是啟用，沒填 s.es 保持 nil、搜尋退回 MySQL（見 search.go）。
+func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisClient *redis.Client) *Server {
+	srv := &Server{
+		cfg:               cfg,
+		db:                db,
+		sessions:          sessions,
+		writeRateLimiter:  NewRateLimiter(cfg.RateLimitRequests, cfg.RateLimitWindow),
+		uploadRateLimiter: NewRateLimiter(cfg.RateLimitUploadRequests, cfg.RateLimitUploadWindow),
+		authRateLimiter:   NewRateLimiter(cfg.RateLimitAuthRequests, cfg.RateLimitAuthWindow),
+		mediaRedis:        redisClient,
+	}
+	if cfg.ESURL != "" {
+		srv.es = es.New(cfg.ESURL, cfg.ESIndex)
+	}
+	return srv
+}
+
+// StartRateLimitCleanup 為三個限流器啟動定期清理的背景 goroutine。
+//
+// 存在的理由：限流器的 hits map 只會在 Allow 時把某個 key 的 slice 縮短，
+// 卻不會刪掉 key 本身。對一個長期運作、公開入口會被爬蟲掃過的論壇，
+// 這個 map 會只增不減（見 ratelimit.go 檔頭的記憶體成長說明）。
+//
+// interval 傳 0 代表讓每個限流器採用自己的預設（見 StartCleanup）；
+// 呼叫端若想讓清理頻率跟視窗長度一致，應傳入與 RateLimitWindow 同一個量級的
+// 時間值 —— 太频繁只是徒增鎖競爭，太稀疏則舊 key 存活較久。
+//
+// 這個函式必須在 NewServer 之後、開始服務之前呼叫。ctx 取消時三個 goroutine
+// 都會停止，因此未來接上 graceful shutdown 不需要再改動這裡。
+//
+// 這裡刻意只回傳、不等待：StartCleanup 本身會立刻返回。
+func (s *Server) StartRateLimitCleanup(ctx context.Context, interval time.Duration) {
+	limiters := []*RateLimiter{s.writeRateLimiter, s.uploadRateLimiter, s.authRateLimiter}
+	for _, limiter := range limiters {
+		if limiter != nil {
+			limiter.StartCleanup(ctx, interval)
+		}
+	}
+}
+
+// rateLimit 把限流中介層掛到 handler 上，但放行 GET 請求。
+//
+// 為什麼要這個薄包裝而不是在 Handler 裡直接呼叫 limiter.Middleware：
+//  1. nil-safe。測試常以 struct literal 構造 Server 而不填這三個欄位
+//     （見 forum_handlers_test.go），若直接呼叫 nil 指標的 Middleware 會在
+//     建構路由時就 panic，讓那些測試完全跑不起來。
+//  2. 集中表達意圖：Handler 裡每一條掛限流的路由都寫成 s.rateLimit(
+//     s.writeRateLimiter, s.handleXxx)，一眼看得出「這條受哪一組額度管」。
+//
+// 為什麼放行 GET：內容端點的 GET 是公開讀取（貼文列表、留言），匿名訪客與
+// 「載入更多」都會打到。限流它們會直接壞掉首頁，判斷標準與
+// requireLoginForWrite 相同：會改動資料的方法才需要保護。
+//
+// 不適用於本身即為 GET 的端點 —— 那種情況必須用 rateLimitAllMethods，
+// 否則限流會變成完全無作用的裝飾品（見該函式的說明）。
+func (s *Server) rateLimit(limiter *RateLimiter, next http.HandlerFunc) http.HandlerFunc {
+	return s.applyRateLimit(limiter, next, true)
+}
+
+// rateLimitAllMethods 限流所有 HTTP 方法，包含 GET。
+//
+// 存在的唯一理由：/auth/google 與 /auth/callback 本身「就是」GET 導向
+// （OAuth 授權碼流程是整頁導向，不是表單 POST）。若對它們套用會放行 GET 的
+// rateLimit，限流器永遠不會被觸發，設定檔裡的 RATE_LIMIT_AUTH_* 會變成
+// 沒有任何作用的死設定 —— 這正是本專案先前 RATE_LIMIT_REQUESTS 的處境，
+// 不可重蹈。
+//
+// 這裡用「所有方法都限流」而不是「只擋 GET」是安全的：OAuth 流程的使用者
+// 只會導向一次，正常使用不會撞到預設的 10 次 / 分鐘。
+func (s *Server) rateLimitAllMethods(limiter *RateLimiter, next http.HandlerFunc) http.HandlerFunc {
+	return s.applyRateLimit(limiter, next, false)
+}
+
+// applyRateLimit 是上述兩個函式的共同實作。skipGet 決定 GET 是否直接放行。
+//
+// 把判斷集中在這裡（而不是複製到兩個函式）是為了讓「哪些端點該用哪一個」
+// 成為唯一需要決定的事：內容端點用 rateLimit，GET 端點用 rateLimitAllMethods。
+func (s *Server) applyRateLimit(limiter *RateLimiter, next http.HandlerFunc, skipGet bool) http.HandlerFunc {
+	if limiter == nil {
+		return next
+	}
+	if !skipGet {
+		return limiter.Middleware(next)
+	}
+	// 走 limiter.Middleware 的完整流程（含 Retry-After 與 429），
+	// 因此包一層只做方法判斷，而不是自己呼叫 Allow —— 那樣會漏掉
+	// Retry-After 的計算與取整。
+	limited := limiter.Middleware(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			next(w, r)
+			return
+		}
+		limited(w, r)
+	})
+}
+
+// requireLogin 驗證「請求者是否為有效會話」，不通過時導向登入頁並附上
+// return 參數，讓登入完成後能回到原本想造訪的頁面。
+//
+// 回應型態刻意分成兩種：
+//   - 完全沒有會話：瀏覽器直接造訪頁面時需要的是重新導向而不是 JSON 錯誤，
+//     因此回 303 See Other，避免使用者看到一段原始 JSON。
+//   - 已登入但被停權：回 401，呼叫端多半是 XHR，前端據此提示並跳出登入。
+//
+// 副作用：每個通過此關的請求都會多查一次 forum_users.status。
+func (s *Server) requireLogin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		email := s.sessions.ResolveUser(r)
+		if email == "" {
+			// 帶上 RequestURI（path + query）而非只有 path，使用者回到原頁時
+			// 篩選條件等狀態才不會遺失；QueryEscape 避免目標網址本身的參數
+			// 污染登入頁網址。return 值在 auth.HandleLogin 會再經
+			// isSafeReturnPath 驗證，非站內路徑會被丟棄。
+			location := "/forum/login?return=" + url.QueryEscape(r.RequestURI)
+			w.Header().Set("Location", location)
+			// 303 而非 302：確保瀏覽器後續一定用 GET 重新請求，
+			// 就算原本這次是用 POST 觸發的。
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		if !s.sessions.IsAdmin(r) {
+			// 停權檢查只擋非管理員：管理員必須仍能進入系統，才能處理被停權
+			// 使用者的檢舉與解封。session 的 is_admin 在登入當下就由
+			// cfg.AllowedAdminEmail 決定，不會因為使用者被設為 SUSPENDED 而改變。
+			suspended, err := s.isForumUserSuspended(r, email)
+			if err != nil {
+				// 查不到狀態不代表可以放行。DB 故障是伺服器問題而非授權結果，
+				// 此時回 500 讓呼叫端重試，絕不能因為「查不到」就當成已驗證。
+				internalError(w, "unable to verify user status")
+				return
+			}
+			if suspended {
+				unauthorized(w, "此帳號已被停權")
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// requireLoginForWrite 只在「會改動資料的請求方法」上要求登入，GET 直接放行。
+//
+// 為什麼 GET 可以免驗證：論壇的貼文列表、留言與公開個人頁本來就是公開內容，
+// 匿名訪客也要讀得到。若一併擋下，未登入者連首頁都開不了，等於把整個論壇變成
+// 必須登入才能瀏覽的系統；而且寫入才需要知道「作者是誰」，讀取不需要。
+func (s *Server) requireLoginForWrite(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 只豁免 GET。HEAD / OPTIONS 理論上同屬讀取，但前端沒有使用它們，
+		// 與其為罕見情境放寬規則，不如維持「非 GET 一律需驗證」的一致性。
+		if r.Method == http.MethodGet {
+			next(w, r)
+			return
+		}
+		// 把呼叫端已傳入的 next 直接交給 requireLogin，而不是另存一份，
+		// 避免多包一層閉包、也讓「先判斷方法、再判斷身分」的順序一目了然。
+		s.requireLogin(next)(w, r)
+	}
+}
+
+// isForumUserSuspended 查詢 forum_users.status，回傳該帳號是否為 SUSPENDED。
+//
+// 邊界情況：查無此列（sql.ErrNoRows）視為「非停權」而不是錯誤，因為管理員帳號
+// 與尚未完成首次登入的使用者都可能還不存在於該表，requireLogin 不該因此失敗。
+// 其他資料庫錯誤一律上浮，由呼叫端回 500。
+func (s *Server) isForumUserSuspended(r *http.Request, email string) (bool, error) {
+	var status string
+	// 以 request context 執行，client 斷線時可一併取消查詢，避免佔用連線。
+	err := s.db.QueryRowContext(r.Context(), `SELECT status FROM forum_users WHERE email = ?`, email).Scan(&status)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// 以字面量精確比對，未來若新增其他狀態值會預設視為可存取；
+	// 要改成「預設封鎖」時必須同步調整這裡與前端顯示。
+	return status == "SUSPENDED", nil
+}
+
+// frontendRoot 推測前端檔案根目錄。候選順序代表優先度：dist 優先於未建置的
+// 原始碼目錄，讓正式部署吃到打包結果，而開發環境沒有 dist 時自動退回原始碼。
+// 一個候選都找不到時回傳預設路徑而非 panic：前端缺檔不該讓整個 API 服務起不來，
+// 錯誤會在使用者造訪頁面時才以 404 的形式浮現。
+//
+// 注意：退回原始碼目錄只保證 HTML 與 CSS 可用，頁面邏輯不會動 —— 前端已全面
+// 改用 TypeScript，未建置時的 *.ts 對瀏覽器而言不是可執行的 JavaScript，
+// 而且 static.go 的 blockedSuffixes 也擋掉了 .ts（不公開原始碼）。
+// 換言之未建置就是不能跑，開發時請先 npm run build。候選順序保留原始碼目錄
+// 只是為了讓「忘記建置」得到明確的 404，而不是整頁壞掉。
+func frontendRoot() string {
+	candidates := []string{
+		filepath.Join("..", "frontend", "dist"),
+		filepath.Join("frontend", "dist"),
+		filepath.Join("..", "frontend"),
+		filepath.Join("frontend"),
+		"web",
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return filepath.Join("..", "frontend")
+}
+
+// frontendAssetPath 解析單一檔案的實際位置：檔案存在就直接用它；否則若
+// frontendDir 指向 dist，就改試 dist 的上一層。兩段式嘗試是為了同時支援
+// 「已打包」（檔案在 dist 根目錄）與「未打包」（檔案在上一層）兩種形態。
+// 兩處都不存在時原樣回傳，交由 http.ServeFile 回 404。
+func frontendAssetPath(frontendDir, name string) string {
+	filePath := filepath.Join(frontendDir, name)
+	if _, err := os.Stat(filePath); err == nil {
+		return filePath
+	}
+	if filepath.Base(frontendDir) == "dist" {
+		return filepath.Join(filepath.Dir(frontendDir), name)
+	}
+	return filePath
+}
+
+// frontendAssetsRoot 定位帶內容 hash 的建置資產目錄。與 frontendRoot 不同，
+// 這裡把「執行檔所在目錄」排最前面：正式部署多是 backend/server 對應
+// frontend/web/dist/assets 的相對關係，若只靠目前工作目錄猜測，在 systemd、
+// Docker 等以不同 cwd 啟動的環境就會失效。
+func frontendAssetsRoot(frontendDir string) string {
+	candidates := []string{
+		filepath.Join(frontendDir, "assets"),
+		filepath.Join(frontendDir, "dist", "assets"),
+		filepath.Join("..", "frontend", "web", "dist", "assets"),
+		filepath.Join("frontend", "web", "dist", "assets"),
+	}
+	if executable, err := os.Executable(); err == nil {
+		executableDir := filepath.Dir(executable)
+		candidates = append([]string{
+			filepath.Join(executableDir, "..", "frontend", "web", "dist", "assets"),
+		}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return filepath.Join(frontendDir, "assets")
+}
+
+// Handler 建立並回傳整個論壇後端的 http.Handler：先解析前端資產位置、組出
+// 完整路由表，再依序套上 session 更新與存取記錄兩個中介層。
+// 每次呼叫都會重新建立 ServeMux 與重新解析前端路徑，因此不應放在請求路徑上。
+func (s *Server) Handler() http.Handler {
+	frontendDir := frontendRoot()
+	// 啟動時把實際採用的路徑寫進日誌：前端檔案 404 是本專案最常見的部署錯誤，
+	// 沒有這行只能靠猜是哪一組候選路徑沒命中。站名一併記下來：改錯設定檔時
+	// 「送出的站名是什麼」是第一個要確認的事實，而它此時只存在於設定值裡。
+	logger.Infof("[HTTP] frontend root=%s assets=%s forum=%q", frontendDir, filepath.Join(frontendDir, "assets"), s.cfg.ForumName)
+	mux := http.NewServeMux()
+
+	/*
+		路由總表。中介層以「包裹 handler」的方式套用，實際執行順序由外而內為
+		SecurityHeaders → Refresh → LoggingMiddleware → ServeMux 路由比對 →
+		路由上掛的中介層 → handler。
+
+		基礎設施（不需認證）
+		  /healthz                        handleHealth
+		  /auth/google                    rateLimitAllMethods(auth) → auth.HandleLogin（307 轉 Google）
+		  /auth/callback                  rateLimitAllMethods(auth) → handleGoogleCallback
+		  /api/logout                     requireTrustedOrigin → handleLogout（僅接受 POST）
+		  /api/check                      handleCheck
+
+		論壇（讀取可匿名，寫入需登入並限流）
+		  /api/forum/posts                requireLoginForWrite → rateLimit(write) → handleForumPosts
+		  /api/forum/images               requireLogin → rateLimit(upload) → handleForumImageUpload
+		  /api/forum/image-tokens/release requireLogin → rateLimit(upload) → handleForumImageTokensRelease
+		  /api/forum/posts/{id}...        requireLoginForWrite → rateLimit(write) → handleForumPostAction
+		                                 （尾綴分派：/comments、/like、/report）
+		  /api/forum/profile              requireLogin → rateLimit(write) → handleForumProfile
+		  /api/forum/follows              requireLogin → rateLimit(write) → handleForumFollows
+		                                 （GET 回追蹤清單、POST 切換追蹤）
+		  /api/forum/following/posts      requireLogin → handleForumFollowingPosts（私有唯讀）
+		  /api/forum/public-profile       handleForumPublicProfile（刻意公開且不限流）
+		  /api/forum/public-posts         handleForumPublicPosts（依金鑰讀取某人貼文，公開且不限流）
+		  /api/forum/search               handleForumSearch（公開唯讀；ES 不可用時降級 MySQL LIKE）
+
+		後台（路由層不掛 requireLogin 也不掛限流；權限由各 handler 內的
+		requireAdminForum 把關，理由見該處註解）
+		  /api/admin/forum/posts[/{id}]   handleAdminForumPosts / handleAdminForumPost
+		  /api/admin/forum/comments[/{id}] handleAdminForumComments / handleAdminForumComment
+		  /api/admin/forum/reports[/{id}] handleAdminForumReports / handleAdminForumReport
+		  /api/admin/forum/search         handleAdminForumSearch（含作者 email 精確比對）
+		  /api/admin/users[/{...}]        handleAdminUsers / handleAdminUser
+		  /api/admin/tags[/{...}]         handleAdminTags / handleAdminTag
+
+		靜態頁面與資產（見下方各路由的個別說明）
+		  /forum-manifest.json、/service-worker.js、/admin*、/assets/、
+		  /forum*、/asset/、其餘落入 safeStaticFileServer
+
+		限流的四個要點：
+		  1. 內容端點用 rateLimit：只擋非 GET，因為讀取端點對匿名訪客開放，
+		     限流它們會直接壞掉首頁與「載入更多」。判斷標準與
+		     requireLoginForWrite 相同。
+		  2. OAuth 端點用 rateLimitAllMethods：它們本身即為 GET 導向，
+		     若用會放行 GET 的版本，限流就是沒有作用的裝飾品。
+		  3. 限流在 requireLogin 之「內」：先確認身分再吃額度，未登入的
+		     垃圾流量不會消耗已登入使用者的份額。
+		  4. 超額時回 429 並附 Retry-After，見 ratelimit.go 的 Middleware。
+	*/
+
+	mux.HandleFunc("/healthz", s.handleHealth)
+	// OAuth 兩條路由共用 auth 額度。/auth/callback 也要限：它是授權碼換 token
+	// 的端點，是轟炸 Google 端點與消耗自身 quota 的合理目標。
+	// 刻意用 rateLimitAllMethods 而非 rateLimit：這兩條本身即為 GET 導向，
+	// 用會放行 GET 的版本會讓限流形同不存在（見該函式的說明）。
+	mux.HandleFunc("/auth/google", s.rateLimitAllMethods(s.authRateLimiter, auth.HandleLogin))
+	mux.HandleFunc("/auth/callback", s.rateLimitAllMethods(s.authRateLimiter, s.handleGoogleCallback))
+	// 登出是「改變伺服器端狀態」的動作，因此掛 requireTrustedOrigin 做
+	// 跨站請求偽造防護：即使攻擊者能讓 victim's 瀏覽器送出 POST，
+	// 來源網域不在 TrustedOrigins 就會被擋下。
+	mux.HandleFunc("/api/logout", s.requireTrustedOrigin(s.handleLogout))
+	mux.HandleFunc("/api/check", s.handleCheck)
+
+	// 依金鑰讀取某人的公開貼文列表。刻意公開且不限流，理由與 public-profile 相同：
+	// 貼文本來就是公開內容，而這支端點的條件「author_email 等值 + created_at 排序」
+	// 走的是索引（見 MigrateMySQL 第 21 步），不像搜尋那樣要掃全文。
+	mux.HandleFunc("/api/forum/public-posts", s.handleForumPublicPosts)
+	// 貼文列表（GET）開放匿名，發文（POST）需登入才能決定作者。
+	// 發文另外掛上 write 額度：它是論壇最核心的寫入端點，也是灌水的主要目標。
+	mux.HandleFunc("/api/forum/posts", s.requireLoginForWrite(
+		s.rateLimit(s.writeRateLimiter, s.handleForumPosts)))
+	// 圖片上傳與 token 釋放一律需登入：兩者都會動到 mediaRedis 的資源配額。
+	// 掛 upload 額度（最緊的一組）：每次上傳都會讓外部檔案伺服器建立真實的
+	// 儲存與一筆 Redis token，是全站單次成本最高的操作。
+	mux.HandleFunc("/api/forum/images", s.requireLogin(
+		s.rateLimit(s.uploadRateLimiter, s.handleForumImageUpload)))
+	mux.HandleFunc("/api/forum/image-tokens/release", s.requireLogin(
+		s.rateLimit(s.uploadRateLimiter, s.handleForumImageTokensRelease)))
+	// 留言、按讚、檢舉都掛在 /api/forum/posts/ 之下。GET 取留言為公開讀取，
+	// 其餘寫入方法需要登入 —— 這正是 requireLoginForWrite 存在的理由。
+	// 這一條同時承載四種尾綴（/comments、/like、/report），因此一組限流同時
+	// 管到留言、按讚與檢舉。它們都是便宜的 MySQL 寫入，共用一份額度是合理的。
+	mux.HandleFunc("/api/forum/posts/", s.requireLoginForWrite(
+		s.rateLimit(s.writeRateLimiter, s.handleForumPostAction)))
+	// 個人資料的 PUT 也是寫入，因此掛上 write 額度。
+	// 它的呼叫頻率遠低於發文（正常使用只在調整簡介時動一次），但惡意或
+	// 失控的腳本可以藉此反覆寫入 MySQL，不該沒有上限。
+	mux.HandleFunc("/api/forum/profile", s.requireLogin(
+		s.rateLimit(s.writeRateLimiter, s.handleForumProfile)))
+	// 追蹤：GET 回自己的追蹤清單，POST 切換追蹤／取消追蹤。
+	// 掛 write 額度的理由與按讚相同（它就是一次資料庫開關）—— 但 s.rateLimit
+	// 會放行 GET，因此讀取清單不吃額度，惡意輪詢 GET 不會把使用者的發文配額吃掉。
+	mux.HandleFunc("/api/forum/follows", s.requireLogin(
+		s.rateLimit(s.writeRateLimiter, s.handleForumFollows)))
+	// 追蹤者的貼文動態。純私有讀取（沒有登入就沒有追蹤清單），因此只掛
+	// requireLogin，不掛限流 —— 限流 GET 的前提是匿名訪客也要能讀，而這裡本來就擋掉了匿名。
+	mux.HandleFunc("/api/forum/following/posts", s.requireLogin(s.handleForumFollowingPosts))
+	// 公開個人頁刻意不掛任何認證中介層，因為它就是設計給未登入訪客看的。
+	mux.HandleFunc("/api/forum/public-profile", s.handleForumPublicProfile)
+	// 貼文搜尋。唯讀且刻意不限流：與貼文列表同一個道理，匿名訪客也要能搜尋。
+	// 沒有掛 requireLoginForWrite 是因為它只有 GET 一種方法需要；把唯讀端點
+	// 綁到「依方法決定是否驗證」的中介層只會多一層間接。
+	mux.HandleFunc("/api/forum/search", s.handleForumSearch)
+
+	// 後台路由一律不掛 requireLogin：管理員與停權檢查的順序在不同 handler
+	// 間並不一致，交由 requireAdminForum 單點把關較不易漏掉。
+	//
+	// 後台刻意「不」掛限流：這裡的操作全都要管理員身分（已由 requireAdminForum
+	// 把關），而管理員有合理的批次操作需求（例如一次替多個使用者指派標籤）。
+	// 把面向一般使用者的額度套在後台，只會在管理員做正事時擋下他，卻擋不住
+	// 真正的攻擊者 —— 攻擊者拿到管理員 session 之前就已經能打普通端點了。
+	// 這裡的風險控管手段是授權檢查，不是速率限制。
+	mux.HandleFunc("/api/admin/forum/posts", s.handleAdminForumPosts)
+	mux.HandleFunc("/api/admin/forum/posts/", s.handleAdminForumPost)
+	mux.HandleFunc("/api/admin/forum/comments", s.handleAdminForumComments)
+	mux.HandleFunc("/api/admin/forum/comments/", s.handleAdminForumComment)
+	mux.HandleFunc("/api/admin/forum/reports", s.handleAdminForumReports)
+	mux.HandleFunc("/api/admin/forum/reports/", s.handleAdminForumReport)
+	// 貼文搜尋（後臺）。權限由 handleAdminForumSearch 內的 requireAdminForum 把關，
+	// 與其他 /api/admin/* 路由一致 —— 路由層不掛認證中介層的理由見上方註解。
+	mux.HandleFunc("/api/admin/forum/search", s.handleAdminForumSearch)
+	mux.HandleFunc("/api/admin/users", s.handleAdminUsers)
+	mux.HandleFunc("/api/admin/users/", s.handleAdminUser)
+	mux.HandleFunc("/api/admin/tags", s.handleAdminTags)
+	mux.HandleFunc("/api/admin/tags/", s.handleAdminTag)
+
+	// 下列 /forum/* 靜態路由都同時註冊「不帶尾斜線」與「帶尾斜線」兩個樣式，
+	// 並在 handler 內手動比對 r.URL.Path。這是 Go 1.22+ ServeMux 語意的必然結果：
+	// 樣式不含尾斜線時為「完全比對」，所以 "/forum/login" 不會匹配 "/forum/login/"；
+	// 而含尾斜線的樣式是「子樹比對」，"/forum/login/" 會匹配該前綴下的所有路徑。
+	// 若不手動比對，註冊子樹樣式就等於把 /forum/login/anything 也導到同一個
+	// HTML。實測 ServeMux 的匹配與註冊順序無關，只看哪個樣式更具體，因此
+	// 把比對邏輯留在 handler 裡是唯一不依賴 mux 內部規則的寫法。
+	mux.HandleFunc("/forum-manifest.json", s.handleForumManifest(frontendDir))
+	mux.HandleFunc("/service-worker.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		// Service Worker 的作用域預設為「註冊它的路徑所在的目錄」。這支檔案
+		// 掛在根目錄 /service-worker.js，預設作用域已經是全站 /，所以這行
+		// 是明確宣告而非補救；保留它是為了讓意圖不必靠閱讀者自行推導。
+		w.Header().Set("Service-Worker-Allowed", "/")
+		http.ServeFile(w, r, filepath.Join(frontendDir, "service-worker.js"))
+	})
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+		// 這個比對在目前的註冊方式下其實不會命中："/admin" 是完全比對樣式，
+		// "/admin/" 根本不會進來（實測會落到最後的 catch-all）。保留它是防禦性
+		// 寫法 —— 若日後有人把樣式改成子樹比對，未定義的子路徑仍會被擋成 404。
+		if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "admin.html"))
+	})
+	mux.HandleFunc("/admin/forum", func(w http.ResponseWriter, r *http.Request) {
+		// 論壇管理後台。同樣是防禦性比對；這三個 /admin 樣式彼此不前綴重疊
+		// （/admin/forum 與 /admin/forum-report 都是完全比對），不會互相吃掉。
+		if r.URL.Path != "/admin/forum" && r.URL.Path != "/admin/forum/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-admin.html"))
+	})
+	mux.HandleFunc("/admin/forum-report", func(w http.ResponseWriter, r *http.Request) {
+		// 檢舉管理頁。
+		if r.URL.Path != "/admin/forum-report" && r.URL.Path != "/admin/forum-report/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-report.html"))
+	})
+	assetServer := http.FileServer(http.Dir(frontendAssetsRoot(frontendDir)))
+	mux.Handle("/assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 僅 GET 掛 immutable：建置工具產出的資產檔名帶內容 hash，內容變了
+		// 檔名就會變，所以可以安心地宣告「一年內不會變」。非 GET 請求不該
+		// 帶著這份快取標頭 —— 萬一之後有其他方法走到這裡，標頭語意就不對了。
+		if r.Method == http.MethodGet {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		// StripPrefix 讓底層 FileServer 以 assets/ 之後的路徑去對應磁碟目錄。
+		http.StripPrefix("/assets/", assetServer).ServeHTTP(w, r)
+	}))
+	// 登入頁同時註冊帶尾斜線與不帶兩個樣式：前者的子樹比對讓 "/forum/login/"
+	// 進得來，handleForumLoginPage 內的列舉再把未定義的子路徑擋成 404。
+	mux.HandleFunc("/forum/login", s.handleForumLoginPage(frontendDir))
+	mux.HandleFunc("/forum/login/", s.handleForumLoginPage(frontendDir))
+	// 論壇首頁與他人個人頁同為公開頁面，不掛認證。
+	mux.HandleFunc("/forum", s.handleForumPage(frontendDir))
+	mux.HandleFunc("/forum/others-profile", s.handleForumPage(frontendDir))
+	mux.HandleFunc("/forum/others-profile/", s.handleForumPage(frontendDir))
+	// 其餘 /forum/* 頁面（新增文章、個人資料等）需要登入。此處掛最後只是閱讀
+	// 順序：ServeMux 取最具體的樣式，所以 "/forum/" 子樹樣式不會蓋掉上面
+	// 明確註冊的公開頁面，註冊先後並不影響結果。
+	mux.HandleFunc("/forum/", s.requireLogin(s.handleForumPage(frontendDir)))
+	// /asset/ 是給後台使用的原始素材（圖示等），路徑固定相對於 backend 的
+	// 上層目錄，不隨前端建置輸出位置變動。
+	mux.Handle("/asset/", http.StripPrefix("/asset/", http.FileServer(http.Dir(filepath.Join("..", "frontend", "asset")))))
+
+	//  "/" 是 catch-all 路由。位置無關緊要（匹配只看具體程度），"/" 是最不
+	// 具體的樣式，所以前面沒被認領的路徑自然會落到這裡。
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// 根路徑與 /index.html 是入口，一律導到論壇首頁，讓未登入者從
+		// requireLogin 的 303 之後有明確的落點。
+		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+			// 其餘路徑交給 safeStaticFileServer：它會擋掉設定檔、副檔名白名單
+			// 以外的檔案並設定快取標頭，比直接暴露目錄安全。
+			safeStaticFileServer(frontendDir).ServeHTTP(w, r)
+			return
+		}
+		http.Redirect(w, r, "/forum", http.StatusFound)
+	})
+
+	// 為什麼是 SecurityHeaders 在最外、Refresh 在其內、Logging 在最內：
+	//   SecurityHeaders 必須包在 mux 外面：它設定的是「這份回應該帶哪些
+	//   標頭」，必須在 Refresh 寫入 Set-Cookie 之前就決定好，否則標頭的
+	//   設定時機會落在 cookie 之後、而快取標頭之內，反而讓它只在部分路徑
+	//   生效。放在最外層也確保 JSON、靜態資產與 Service Worker 全部一致。
+	//   Refresh 必須包在 mux 外面：sliding expiration 要在「任何」回應（包含
+	//   304、302、500）被寫出之前就補上 Set-Cookie，若放進 mux 內部，它只能
+	//   看到自己那幾條路由的回應，其餘路徑的 cookie 就永遠不會被更新。
+	//   LoggingMiddleware 則必須包在 Refresh 外面，這樣它的 responseWriter 才
+	//   包住整棵樹，能記到真正寫出的最終 status code，且 duration 涵蓋了
+	//   session 存取的耗時。它同時需要 s.sessions.ResolveUser 辨識使用者，
+	//   而該函式讀的是 cookie + Redis，與 Refresh 使用的是同一份 session 狀態。
+	//
+	// 兩個變數不可共用同一個名稱：Go 的閉包捕捉的是「變數」而不是「當下的值」，
+	// 若把 Refresh 的閉包指派回 logged 本身，閉包內的 logged.ServeHTTP 就會
+	// 指向自己，形成無限遞迴並在第一個請求就 stack overflow。
+	// 這個錯誤不會被編譯器抓到，只有真的送出請求才會爆，因此以不同名字
+	// 分開三層是刻意的防呆。
+	logged := logger.LoggingMiddleware(mux, s.sessions.ResolveUser)
+	refreshed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 滑動式過期：每個請求都延長一次 session TTL，並重寫 cookie，
+		// 使用者持續使用就不會被登出。
+		s.sessions.Refresh(r, w)
+		logged.ServeHTTP(w, r)
+	})
+	// 安全標頭套在最外層，因此 HTML、JSON、靜態資產與 Service Worker
+	// 全部一致。只需要安全標頭的測試可直接呼叫 withSecurityHeaders，
+	// 不必走完整條 Handler()（後者需要 session 與 DB）。
+	//
+	// 各頁 HTML 的 <style> 區塊雜湊在這裡算：frontendDir 上面才剛解析出來，
+	// 而 style-src 沒有 'unsafe-inline'，沒有這組雜湊那些區塊會被整片擋下。
+	return s.withSecurityHeaders(refreshed, inlineStyleHashes(frontendDir))
+}

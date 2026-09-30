@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>新增貼文｜{{FORUM_NAME}}</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+TC:wght@400;500;700;900&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0..1,0&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /*
+       * 新增貼文（/forum/new）樣式
+       *
+       * 共用層在 /style.css：公開頁殼層（導覽列、底部導覽、膠囊按鈕、
+       * 狀態列、.login-prompt）與後臺 design tokens。本區塊只放這一頁的
+       * 標題列與編輯表單。
+       *
+       * html:root 必須在這裡重新宣告：--line 與 --accent 兩邊同名不同值。
+       * 寫成 html:root 而不是 :root，是為了用多一個元素選擇器贏過 style.css
+       * 第 4 節的 :root —— Vite 建置時會把 <link> 移到 <head> 最後，因此不能
+       * 靠「<style> 在 <link> 之後」取勝。理由見 style.css 的檔頭說明。
+       */
+      html:root {
+        --bg: #fff;
+        --line: #e7e7e7;
+        --text: #101010;
+        --muted: #777;
+        --accent: #111;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        color: var(--text);
+        background: var(--bg);
+        font-family: Inter, "Noto Sans TC", sans-serif;
+      }
+
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+      }
+
+      .new-post-main {
+        padding: 28px 16px 100px;
+      }
+
+      .new-post-panel {
+        padding: 24px 0;
+      }
+
+      .new-post-heading {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 30px;
+      }
+
+      .new-post-heading h1 {
+        margin: 0;
+        font-size: 28px;
+        letter-spacing: -0.04em;
+      }
+
+      /* 自己的頭像。貼文卡裡的 .avatar 是深色圓，這裡是「你」本人，用淺色
+         底以免看起來像另一位使用者。選擇器寫成 .avatar.avatar-you 而不是
+         單純 .avatar-you：style.css 的 .avatar 同樣設定 color 與 background，
+         而 Vite 會把它的 <link> 移到 <head> 最後，因此這裡必須靠多一個
+         class 贏過順序，而不是碰巧排在後面。 */
+      .avatar.avatar-you {
+        color: #222;
+        background: #e9e9e9;
+      }
+
+      /*
+       * 編輯表單。這一頁是全站唯一使用 id="forum-form" 的地方，因此整組規則
+       * 都在頁內；基底是無框的輸入區（只有底線是這個設計的邊界），面板內的
+       * 三條則把它放大成「一篇文章」的尺寸。
+       */
+      #forum-form {
+        display: block;
+      }
+
+      #forum-form input,
+      #forum-form textarea {
+        display: block;
+        width: 100%;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        color: var(--text);
+        background: transparent;
+        outline: 0;
+        font: inherit;
+        font-size: 16px;
+      }
+
+      #forum-form textarea {
+        min-height: 220px;
+        padding: 18px 0;
+        font-size: 16px;
+        line-height: 1.55;
+        resize: vertical;
+      }
+
+      #forum-form input {
+        padding: 14px 0;
+        font-size: 20px;
+      }
+
+      /*
+       * 隱藏原生 file input 的時機很重要：上面那條 #forum-form input
+       * （ID + 型別，權重 1,0,1）贏過 .image-upload-input（0,1,0），所以
+       * display: none 必須靠元素上的 hidden（[hidden] 帶 !important）才留得住。
+       * 實際控制項是上面的 <label htmlFor>，把原生控制項藏起來正是預期行為。
+       */
+      .image-upload-input {
+        display: none;
+      }
+
+      .image-upload-label {
+        display: inline-flex;
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 7px 12px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .image-upload-label:hover {
+        border-color: var(--text);
+        color: var(--text);
+      }
+
+      .image-preview {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .new-post-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-top: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 見 forum.html：整頁由 src/entries/forum-new.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-new.tsx"></script>
+  </body>
+</html>

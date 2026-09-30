@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>檢舉管理｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 檢舉管理（/admin/forum-report）樣式
+       *
+       * 共用層在 /style.css：<body class="admin-page"> 的元素 reset、後臺
+       * design tokens、rail / topbar / canvas 殼層、面板、按鈕、表單、表格
+       * 基礎、badge、列表狀態、對話框與 toast。本區塊只放這一頁自己渲染的
+       * 東西：補正表單的四欄格線與狀態篩選器。
+       *
+       * <body> 上的 admin-page 是這支 CSS 與公開頁唯一的分界：共用層的元素
+       * reset（a 的顏色、h1~h4 的字重、focus 圈）對淺色公開頁是錯的，必須
+       * 有東西擋住它，而 body 的 class 是最便宜也最明確的開關。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* 190px 而非 210px：檢舉表單是四欄（目標類型／目標 ID／檢舉人／狀態），
+         210px 的門檻在 1440 canvas 下剛好差幾個像素湊不進第四欄，會變成 3+1 的
+         斷行，看起來像漏了一格。 */
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 14px 18px;
+        margin-bottom: 14px;
+      }
+
+      /* 依狀態篩選的分段控制項。與 .btn 的差別是它表現的是「目前選哪一項」而
+         不是「按下會做什麼」，因此用 [aria-pressed] 當狀態開關、選中項靠白底
+         與邊框浮出來。 */
+      .segmented {
+        display: inline-flex;
+        gap: 4px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+      }
+
+      .segmented button {
+        min-height: 32px;
+        padding: 0 13px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        color: var(--ink-2);
+        background: none;
+        font-size: 12.5px;
+        font-weight: 700;
+        transition: background 150ms var(--ease), color 150ms var(--ease),
+          border-color 150ms var(--ease);
+      }
+
+      .segmented button:hover {
+        color: var(--accent-ink);
+      }
+
+      .segmented button[aria-pressed="true"] {
+        border-color: var(--line-2);
+        color: var(--accent-ink);
+        background: var(--surface);
+        box-shadow: var(--sh-1);
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-report.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-report.tsx"></script>
+  </body>
+</html>

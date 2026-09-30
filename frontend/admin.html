@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>登入｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 用戶管理（/admin）樣式
+       *
+       * 共用層在 /style.css：<body class="admin-page"> 的元素 reset、後臺
+       * design tokens、rail / topbar / canvas 殼層、面板、按鈕、表單、表格
+       * 基礎、badge、列表狀態、對話框與 toast。本區塊只放這一頁自己渲染的
+       * 東西：統計卡、用戶／標籤兩張表的專屬變體、展開列、登入閘門。
+       *
+       * <body> 上的 admin-page 是這支 CSS 與公開頁唯一的分界：共用層的元素
+       * reset（a 的顏色、h1~h4 的字重、focus 圈）對淺色公開頁是錯的，必須
+       * 有東西擋住它，而 body 的 class 是最便宜也最明確的開關。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 統計卡 ----------------------------------------------------------- */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 14px;
+      }
+
+      .stat {
+        display: grid;
+        gap: 4px;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface);
+        box-shadow: var(--sh-1);
+      }
+
+      .stat__label {
+        color: var(--ink-3);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .stat__value {
+        font-size: 26px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .stat--warn .stat__value {
+        color: var(--warn);
+      }
+
+      .stat--ok .stat__value {
+        color: var(--ok);
+      }
+
+      /* --- 用戶表與標籤表的專屬變體 ------------------------------------------ */
+      .table--users {
+        min-width: 880px;
+      }
+
+      /* 標籤表只有五欄，若讓瀏覽器平均分配，日期欄會各佔掉三分之一個畫面而名稱欄
+         還不一定寬。改成讓次要欄收合到內容寬度（white-space: nowrap），名稱欄吸收
+         剩餘空間 —— 這也是 auto table layout 的預設行為，只要不多加 width 限制。 */
+      .table--tags {
+        min-width: 520px;
+      }
+
+      .table--tags th:nth-child(n + 2),
+      .table--tags td:nth-child(n + 2) {
+        white-space: nowrap;
+      }
+
+      .table--tags td:first-child {
+        width: 100%;
+      }
+
+      /* 用戶的「展開列」：把該列的第二格變成一個填滿的容器，內容管理面板就
+         直接長在表格裡，不需要另外開一頁。 */
+      .table--sub td {
+        padding: 0;
+        background: var(--surface-2);
+      }
+
+      .table--sub:hover {
+        background: var(--surface-2);
+      }
+
+      /* --- 使用者標籤 chip --------------------------------------------------- */
+      .chip {
+        display: inline-block;
+        margin-block-end: 4px;
+        margin-inline-end: 4px;
+        padding: 3px 9px;
+        border: 1px solid #d3dcff;
+        border-radius: var(--r-pill);
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        font-size: 11.5px;
+        font-weight: 700;
+      }
+
+      /* --- 展開列：用戶內容管理 ---------------------------------------------- */
+      .detail {
+        display: grid;
+        gap: 14px;
+        padding: 18px 20px 20px;
+        border-top: 1px solid var(--line);
+        background: var(--surface-2);
+      }
+
+      .detail__head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .detail__head strong {
+        font-size: 13px;
+      }
+
+      .detail__head .detail__count {
+        margin-right: auto;
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      .detail__cols {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .detail__col {
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        min-width: 0;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface);
+      }
+
+      .detail__col h4 {
+        color: var(--ink-3);
+        font-size: 10.5px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .record {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+
+      .record:first-of-type {
+        padding-top: 0;
+        border-top: 0;
+      }
+
+      .record__meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        color: var(--ink-3);
+        font-size: 11px;
+      }
+
+      .record__meta .id {
+        font-family: var(--font-mono);
+      }
+
+      .record__text {
+        max-width: 46ch;
+        margin: 4px 0 0;
+        color: var(--ink-2);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .record__actions {
+        display: flex;
+        flex: 0 0 auto;
+        gap: 6px;
+      }
+
+      /* --- 整頁載入中 --------------------------------------------------------
+       * .loading 兩套設計系統同名不同義（公開頁是一段置中的文字），因此各自
+       * 在頁內宣告。
+       * ------------------------------------------------------------------ */
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        min-height: 120px;
+        color: var(--ink-2);
+        font-size: 12.5px;
+      }
+
+      .spinner {
+        width: 18px;
+        height: 18px;
+        border: 2px solid var(--accent-soft);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 700ms linear infinite;
+      }
+
+      /* --- 登入閘門 ----------------------------------------------------------
+       * 不用 100dvh：右側面板只有一組標題＋說明＋按鈕撐滿整屏會變成一大片空白。
+       * 上限 620px 是內容自然高度附近，下限用視窗高度避免小螢幕被推出畫面。
+       * ------------------------------------------------------------------ */
+      .signin {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        min-height: min(620px, calc(100dvh - var(--topbar-h) - 94px));
+        overflow: hidden;
+        border: 1px solid var(--rail-line);
+        border-radius: var(--r-xl);
+        background: var(--surface);
+        box-shadow: var(--sh-3);
+      }
+
+      .signin__aside {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 18px;
+        padding: clamp(30px, 4vw, 56px);
+        overflow: hidden;
+        color: #fff;
+        background:
+          radial-gradient(circle at 74% 20%, rgba(116, 143, 255, 0.4), transparent 32%),
+          radial-gradient(circle at 14% 84%, rgba(76, 110, 245, 0.26), transparent 34%),
+          linear-gradient(150deg, #131b2d 0%, #1d2740 54%, #101827 100%);
+      }
+
+      .signin__aside::after {
+        position: absolute;
+        right: -90px;
+        bottom: -190px;
+        width: 380px;
+        height: 380px;
+        border: 1px dashed rgba(255, 255, 255, 0.16);
+        border-radius: 50%;
+        content: "";
+      }
+
+      .signin__aside > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .signin__aside h2 {
+        font-size: clamp(26px, 3.4vw, 38px);
+      }
+
+      .signin__aside p {
+        max-width: 42ch;
+        color: #c3ccdd;
+        font-size: 14px;
+        line-height: 1.8;
+      }
+
+      .signin__steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 6px;
+      }
+
+      .signin__steps span {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+        padding: 7px 11px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: var(--r-sm);
+        color: #d2dae8;
+        background: rgba(255, 255, 255, 0.06);
+        font-size: 11.5px;
+        font-weight: 600;
+      }
+
+      .signin__steps strong {
+        color: #fff;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .signin__panel {
+        display: grid;
+        align-content: center;
+        padding: clamp(30px, 4vw, 56px);
+      }
+
+      .signin__inner {
+        display: grid;
+        gap: 14px;
+        max-width: 360px;
+      }
+
+      .signin__inner h3 {
+        font-size: 22px;
+      }
+
+      .signin__inner p {
+        color: var(--ink-2);
+        font-size: 13px;
+        line-height: 1.75;
+      }
+
+      .google-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        min-height: 48px;
+        margin-top: 6px;
+        border-radius: var(--r-md);
+        color: #fff;
+        background: var(--accent);
+        box-shadow: 0 12px 26px rgba(76, 110, 245, 0.26);
+        font-size: 13.5px;
+        font-weight: 700;
+        transition: background 160ms var(--ease), transform 160ms var(--ease),
+          box-shadow 160ms var(--ease);
+      }
+
+      .google-btn:hover {
+        color: #fff;
+        background: var(--accent-2);
+        box-shadow: 0 16px 32px rgba(76, 110, 245, 0.34);
+        transform: translateY(-1px);
+      }
+
+      .google-btn__mark {
+        display: grid;
+        width: 24px;
+        height: 24px;
+        place-items: center;
+        border-radius: 50%;
+        color: #4285f4;
+        background: #fff;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 14px;
+        font-weight: 800;
+      }
+
+      .signin__note {
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      /* --- 這一頁專屬的斷點 ---------------------------------------------------
+       * style.css 裡另有一個 720px 區塊處理三頁共用的部分（canvas、面板、
+       * 表格、對話框、toast）。拆開是刻意的：把「所有頁」與「這一頁」放進
+       * 同一個規則集，只會讓兩邊都不敢動。
+       * ------------------------------------------------------------------ */
+      @media (max-width: 1180px) {
+        .detail__cols {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 1000px) {
+        .signin {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .signin__aside {
+          min-height: 300px;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .record {
+          flex-direction: column;
+        }
+
+        .record__actions {
+          width: 100%;
+        }
+
+        .record__actions .btn {
+          flex: 1 1 auto;
+        }
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!--
+      見 forum.html：整頁由 src/entries/admin.tsx 掛載。
+      .skip-link 與 .admin-app 都在 React 產生的 DOM 裡 —— 它們是殼層
+      （src/admin/shell.tsx）的一部分，HTML 只需要一個掛載點。
+    -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/admin.tsx"></script>
+  </body>
+</html>

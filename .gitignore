@@ -1,0 +1,18 @@
+config.conf
+data.json
+server.log
+
+# 前端相依套件。React 版帶進 node_modules 後，這一項從「建議」變成「必須」：
+# 沒有它，npm 裝的幾百 MB 會跟著進版控。
+node_modules/
+
+# Go 編譯產物。backend/update.sh 與 files_server/start.ps1 都會重新 go build，
+# 版本控只留原始碼。（node_modules 裡的 esbuild.exe 也一併被這條蓋掉。）
+*.exe
+
+# 前端建置輸出。npm run build 產生，改用 npm run dev + HMR 即可重建。
+# 注意：frontend/asset/ 不是建置產物（後端直接用 http.Dir 提供 PWA 圖示），要進版控。
+frontend/dist/
+
+# 檔案伺服器的本機存儲，執行時會自動建立，放的是使用者上傳的檔案。
+files_server/storage/

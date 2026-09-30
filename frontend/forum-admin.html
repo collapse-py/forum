@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>論壇文章｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 論壇文章（/admin/forum）樣式
+       *
+       * 共用層在 /style.css：<body class="admin-page"> 的元素 reset、後臺
+       * design tokens、rail / topbar / canvas 殼層、面板、按鈕、表單、表格
+       * 基礎、badge、列表狀態、對話框與 toast。本區塊只放這一頁自己渲染的
+       * 東西：文章搜尋表單、貼文附圖、留言摺疊、分頁。
+       *
+       * <body> 上的 admin-page 是這支 CSS 與公開頁唯一的分界：共用層的元素
+       * reset（a 的顏色、h1~h4 的字重、focus 圈）對淺色公開頁是錯的，必須
+       * 有東西擋住它，而 body 的 class 是最便宜也最明確的開關。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 文章搜尋表單 -------------------------------------------------------
+       * 限制寬度是為了讓輸入框在寬螢幕上不會橫跨整個面板——一個 1300px 寬的
+       * 搜尋框既難以閱讀輸入的內容，也讓下面的 .form-footer
+       * （justify-content: space-between）把按鈕推到離輸入框很遠的位置。
+       * 左對齊而不是置中，與其他面板的欄位起點一致。
+       * ------------------------------------------------------------------ */
+      .search-form {
+        max-width: 560px;
+      }
+
+      /* 輸入框 + 放大鏡的組合，與公開頁的 .search-field 是同一個版面契約的兩份
+         實作（.search-field 兩邊同名不同義，因此各自在頁內宣告）。圖示疊在框內
+         左側，pointer-events 讓它不吃指標事件，點圖示等同點輸入框。 */
+      .search-field {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+
+      .search-field__icon {
+        position: absolute;
+        inset-inline-start: 12px;
+        width: 18px;
+        height: 18px;
+        color: var(--ink-3);
+        pointer-events: none;
+      }
+
+      .search-field .input {
+        padding-inline-start: 38px;
+      }
+
+      .search-field:focus-within .search-field__icon {
+        color: var(--ink);
+      }
+
+      /* --- 文章表 ------------------------------------------------------------- */
+      .table--posts {
+        min-width: 900px;
+      }
+
+      .post-figure {
+        display: block;
+        width: 168px;
+        margin-top: 10px;
+      }
+
+      .post-figure img {
+        display: block;
+        width: 100%;
+        max-height: 132px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        background: var(--surface-3);
+        object-fit: cover;
+      }
+
+      /* 貼文表裡的按讚數。做成藥丸而不是純數字，是為了讓「這欄是社群指標」
+         一眼可辨，而不是混在 id 與日期之間。 */
+      .metric {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 9px;
+        border-radius: var(--r-pill);
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        font-size: 11.5px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      /* --- 留言摺疊 ----------------------------------------------------------- */
+      .thread {
+        min-width: 200px;
+      }
+
+      .thread__toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 10px;
+        border: 1px solid var(--line-2);
+        border-radius: var(--r-pill);
+        color: var(--ink-2);
+        background: var(--surface-2);
+        font-size: 11.5px;
+        font-weight: 700;
+        list-style: none;
+      }
+
+      .thread__toggle::-webkit-details-marker {
+        display: none;
+      }
+
+      .thread__toggle::before {
+        color: var(--accent);
+        content: "▸";
+        font-size: 10px;
+      }
+
+      .thread[open] > .thread__toggle::before {
+        content: "▾";
+      }
+
+      /* 展開/收起的三角在右至左語言裡要指向另一邊：▸ 是固定字形，不會跟著 dir 翻。 */
+      [dir="rtl"] .thread__toggle::before {
+        content: "◂";
+      }
+
+      [dir="rtl"] .thread[open] > .thread__toggle::before {
+        content: "▾";
+      }
+
+      .thread__list {
+        display: grid;
+        gap: 6px;
+        margin: 8px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .thread__item {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        background: var(--surface-2);
+      }
+
+      /* 「留言」欄在 table--posts 的欄寬分配下只有兩百出頭 px，放不下「內容 +
+         兩顆按鈕」的橫向排列（內容會被擠成一字一行）。允許換行，並讓按鈕在
+         有空間時靠右、沒空間時落到下一行的左緣。 */
+      .thread__item .row-actions {
+        margin-inline-start: auto;
+      }
+
+      .thread__item > div:first-child {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+      }
+
+      .thread__item strong {
+        font-size: 11px;
+      }
+
+      .thread__item span {
+        color: var(--ink-2);
+        font-size: 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .thread__empty {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        color: var(--ink-3);
+        font-size: 12px;
+      }
+
+      /* --- 分頁 ---------------------------------------------------------------
+       * 這三條不跟 .pagination 一起放進 style.css：目前只有這一頁需要分頁
+       * （用戶與檢舉兩頁的資料量都還沒到需要換頁的規模）。等到第二頁也需要時
+       * 再整組搬過去 —— 在此之前把它放在 style.css 只會讓另一個頁面載入
+       * 一段永遠不會被命中的規則。
+       * ------------------------------------------------------------------ */
+      .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        padding: 16px 22px;
+        border-top: 1px solid var(--line);
+        background: var(--surface-2);
+      }
+
+      .pagination button {
+        min-width: 34px;
+        min-height: 34px;
+        padding: 0 10px;
+        border: 1px solid var(--line-2);
+        border-radius: 8px;
+        color: var(--ink-2);
+        background: var(--surface);
+        font-size: 12.5px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        transition: background 150ms var(--ease), color 150ms var(--ease),
+          border-color 150ms var(--ease);
+      }
+
+      .pagination button:hover {
+        border-color: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      .pagination button[aria-current="page"] {
+        border-color: var(--accent);
+        color: #fff;
+        background: var(--accent);
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-admin.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-admin.tsx"></script>
+  </body>
+</html>

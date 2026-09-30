@@ -1,0 +1,2609 @@
+/*
+ * FORUM 論壇 — 全站共用樣式層（style.css）
+ *
+ * 這一支檔案只放「不只一頁在用」的樣式。每一頁專屬的樣式都寫在該頁 HTML 的
+ * <style> 區塊裡，理由是調版面時開一個檔案就看得見全部，不必在 CSS 與
+ * HTML 之間來回跳。分界線不是「覺得順不順」，而是元件的使用範圍：
+ *
+ *   style.css          九個頁面共用，或同一個家族（公開頁 / 後臺）內被兩頁以上
+ *                      共用的元件：殼層（導覽列、rail、topbar）、膠囊按鈕、
+ *                      表格、面板、對話框、toast。
+ *   <style>（頁內）    只被那一頁渲染的元件。公開頁的貼文卡與留言表單、後臺的
+ *                      某一張表格與其中一欄的操作按鈕都屬於這一類。
+ *
+ * 分界線的對應關係是 React 的模組邊界：src/forum/shell.tsx 與
+ * src/admin/shell.tsx、src/admin/ui.tsx 對應本檔；src/forum/FeedPage.tsx、
+ * src/admin/UsersPage.tsx 等頁面元件對應各自的 HTML。
+ *
+ * 兩套設計系統共用一支檔案，因此有兩件事必須處理：
+ *
+ *   1. 同名 class 有兩種不同意義（.eyebrow、.search-field、.google-btn、
+ *      .loading）。這些一律不放本檔，改由兩邊的頁面 <style> 各自宣告 ——
+ *      .eyebrow 兩頁都用、.search-field 各只有一頁用，放本檔一定會互相覆蓋。
+ *   2. CSS 變數同名不同值（--line、--accent）。本檔宣告的是後臺那一組
+ *      （第 4 節），公開頁在頁內 <style> 重新宣告，且刻意寫成 `html:root`
+ *      而不是 `:root`。
+ *
+ * 為什麼是 html:root 而不是靠「後載入者勝出」：Vite 建置時會把被 bundle 的
+ * <link rel="stylesheet"> 移到 <head> 的最後，也就是排在我們的 <style> 之後
+ * （見 dist/*.html）。因此「<link> 在前、<style> 在後」這個前提在 source 目錄
+ * 成立、在 dist 不成立。把它變成優先級的問題（0,1,1 > 0,1,0）才不受建置
+ * 工具的排版影響 —— 同樣的理由，頁內 <style> 裡每一條要蓋掉本檔的規則都必須
+ * 靠選擇器本身，而不是靠出現順序。
+ *
+ * 設計方向：深色專業控制台
+ *   - 後臺左側 rail 與上方 topbar 為深色（近黑藍 + 頂部藍色光暈），把「這是
+ *     後臺」的訊號放在畫面最固定的兩個位置。
+ *   - 後臺內容 canvas 維持冷調淺灰：主要工作是在表格裡讀數字、比較狀態，
+ *     淺底長時間閱讀比全深底安全，資料量大的表格也不會被深底吃掉對比。
+ *   - 只有一個強調色（--accent 藍），狀態色（ok / warn / danger）只出現在
+ *     badge 與破壞性動作上，讓「紅 = 需要人處理」在整個後臺維持唯一語意。
+ *
+ * 兩條不可違反的硬性約束（改這個檔案前務必先讀）：
+ *   1. Content-Security-Policy 的 script-src 'self' 與 style-src 'self' 都沒有
+ *      'unsafe-inline'，因此禁止 style="..." 屬性，JS 產生的 HTML 一律只能用
+ *      class。頁面 HTML 裡的 <style> 區塊則是靠 style-src 內的 sha256 雜湊
+ *      取得授權（見 backend/forum/httpapi/securityheaders.go 的
+ *      inlineStyleHashes），雜湊由伺服器在啟動時直接從磁碟上的 HTML 計算，
+ *      因此改動 CSS 不需要手動同步任何雜湊值。
+ *   2. 舊版 admin.css / forum-admin.css 都宣告了
+ *      @font-face "FORUM Sans" → /asset/NotoSansTC-VariableFont_wght.ttf，
+ *      但 frontend/asset/ 裡沒有這個檔案，每頁都在默默 404 後掉回系統字體。
+ *      這裡直接改用系統字體堆疊，不再留一個假的字體宣告。
+ */
+
+/* ==========================================================================
+   1. 共用 base
+   ==========================================================================
+   九個頁面都需要、且兩套設計系統沒有第二種寫法的規則。這一節刻意只放
+   元素層級的中性 reset：任何帶視覺（顏色、字級、間距）的元素規則都留在各自
+   的頁內 <style>，否則後臺的深色預設會滲到淺色的公開頁。
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/*
+ * 只給讀螢幕軟體用、視覺上必須消失的文字。兩套設計系統原本各有一份，差別只在
+ * 少了一行 clip-path；統一成較完整的那份（clip 保留給舊引擎，clip-path 讓
+ * 新引擎連裁切框都不留）。
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * 共用字體變數。兩套設計系統的字體堆疊不同（公開頁只有 Inter + Noto Sans TC，
+ * 後臺還要吃 system-ui 與 Segoe UI），但「變數叫什麼」應該一致，否則同一次
+ * 全域換字體要改兩個地方。
+ */
+:root {
+  /*
+   * 字體堆疊的尾端刻意放了四種非拉丁文字的專用字體：Inter 與 Noto Sans TC
+   * 都沒有阿拉伯文、天城文或泰文的字形，這三種語言在沒有它們的系統上會掉到
+   * 系統預設，字重與字距因而與介面其他部分對不上。它們沒有被當成 webfont
+   * 載入（本站的 <link> 只有 Inter / Noto Sans TC / Material Symbols），
+   * 這幾項是「作業系統有的話就用」的意思。
+   */
+  --font: "Inter", system-ui, -apple-system, "Segoe UI", "Noto Sans TC",
+    "PingFang TC", "Microsoft JhengHei", "Noto Sans Arabic", "Noto Sans Devanagari",
+    "Noto Sans Thai", "Segoe UI Historic", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/*
+ * 動態偏好。放在 base 而不是各自的頁內樣式，因為它是無條件的全域規則：
+ * 只要使用者要求減少動態，兩套介面都該同時停用動畫。公開頁原本沒有這一節，
+ * 加上它不改變任何外觀（公開頁本來就沒有 transition 與 animation），只是把
+ * 未來可能加進去的動畫一併納入這個開關。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   2. 公開頁殼層
+   ==========================================================================
+   src/forum/shell.tsx 的六個公開頁（/forum、/forum/new、/forum/profile、
+   /forum/others-profile、/forum/following、/forum/login）都會渲染的東西：頂部導覽列、
+   底部導覽、膠囊按鈕、狀態列、外框。
+
+   只被單一頁面用的東西（貼文卡、留言表單、搜尋藥丸、登入閘門、各頁表單）
+   寫在那一頁的 <style> 裡，不在本節。
+   ========================================================================== */
+
+.forum-shell {
+  width: 100%;
+  min-height: 100vh;
+  padding-bottom: 78px;
+}
+
+/* 導覽列。三欄 grid：1fr / 搜尋 / 1fr。
+   置中的做法是讓左右兩欄寬度相同（1fr 1fr），中間那欄就是整列的正中心 ——
+   這比 flex 的 space-between 或 translateX(-50%) 都可靠：後者要嘛靠左右
+   內容寬度相同（本站左邊是 FORUM、右邊是一到三顆按鈕，本來就不等寬），
+   要嘛會讓搜尋欄疊在按鈕上。
+   順帶解決 flex 的另一個問題：左右兩欄吃 flex: 1 1 0 時，空間不夠會各自
+   往內容下限收縮，於是右側的登入狀態文字被壓成一字一行、把整列撐高；
+   grid 的 auto/1fr 混合讓右欄維持內容寬度。
+   沒有 search 插槽的頁面（其餘四個公開頁）中間欄是空的，標誌照舊靠左、
+   按鈕照舊靠右。 */
+.forum-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: 1fr minmax(0, 420px) 1fr;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(18px);
+}
+
+/* 搜尋欄的插槽：固定在第 2 欄。minmax(0, 420px) 讓欄寬在 420px 內、
+   視窗變窄時由這一欄先縮（0 作為最小值，否則 min-width: auto 會以
+   輸入框的預設寬度為下限而撐破整列）。 */
+.forum-nav__search {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.brand {
+  grid-column: 1;
+  justify-self: start;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 24px;
+  font-weight: 900;
+  letter-spacing: -0.07em;
+}
+
+.nav-actions {
+  grid-column: 3;
+  display: flex;
+  align-items: center;
+  justify-self: end;
+  gap: 12px;
+}
+
+/* 膠囊按鈕的共用外框。公開頁的動作按鈕都是同一顆藥丸：登入、安裝 App、送出
+   貼文、登出。差別只在填色（下一條）與內距。 */
+.login-link,
+.logout-button,
+.submit-button,
+.install-app-button {
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  padding: 8px 14px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.login-link,
+.submit-button,
+.install-app-button {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.install-app-button {
+  white-space: nowrap;
+}
+
+/* 導覽列右側的按鈕文字不換行。手機版換列後，右側的可用寬度只剩按鈕本身，
+   沒有 nowrap 的話「Google 登入」會折成兩行，把整列拉高到 121px。 */
+.login-link,
+.logout-button {
+  white-space: nowrap;
+}
+
+.install-app-button[hidden] {
+  display: none;
+}
+
+.logout-button {
+  display: none;
+}
+
+/* 登出鈕的顯示改由 class 決定，不寫 inline style。舊版是 logoutButton.style.display
+   = 'inline-block'，那行在 React 版拿掉了，而 display:none 的預設值仍要留給
+   同一個 .logout-button 被當成「取消」按鈕用的情況（.profile-cancel-button 已覆寫）。 */
+.logout-button--visible {
+  display: inline-block;
+}
+
+/* 登入狀態文字不換行：導覽列右欄是內容寬度，這句話若被折成兩行，列高會多出一行
+   （在 640px 以下雖然整段隱藏，但 641~900px 仍看得見）。 */
+.user-state {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.forum-main {
+  width: min(640px, 100%);
+  margin: 0 auto;
+}
+
+/*
+ * 個人資料頁的外框。這一組同時出現在 /forum/profile（自己的資料，可編輯）與
+ * /forum/others-profile（公開資料，唯讀），因此是共用樣式；只有「編輯」與
+ * 「唯讀內容」本身分別寫在那兩頁的 <style> 裡。
+ */
+.profile-main {
+  padding: 28px 16px 100px;
+}
+
+.profile-panel {
+  padding: 24px 0;
+}
+
+.profile-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 34px;
+}
+
+.profile-heading h1 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: -0.04em;
+}
+
+.profile-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  color: #fff;
+  background: #242424;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 24px;
+  color: var(--muted);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.back-link .material-symbols-outlined {
+  font-size: 20px;
+}
+
+.avatar {
+  display: flex;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  color: #fff;
+  background: #242424;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.avatar-you {
+  color: #222;
+  background: #e9e9e9;
+}
+
+.submit-button {
+  padding: 7px 16px;
+}
+
+.composer-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 操作結果／錯誤訊息列（首頁的搜尋與列表狀態、新增貼文頁的送出結果）。 */
+.status {
+  min-height: 18px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status.error {
+  color: #d33;
+}
+
+/* 沒登入時取代編輯器的說明列，同時出現在首頁的發文區與新增貼文頁。 */
+.login-prompt {
+  flex: 1;
+  padding: 10px 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.login-prompt a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.login-prompt a:hover {
+  color: var(--text);
+}
+
+.bottom-nav {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 6;
+  display: flex;
+  justify-content: center;
+  gap: 72px;
+  height: 68px;
+  border-top: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.04);
+  backdrop-filter: blur(18px);
+}
+
+.bottom-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 58px;
+  padding: 7px 12px 5px;
+  border: 0;
+  color: #858585;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.bottom-nav-item .material-symbols-outlined {
+  font-size: 25px;
+  font-variation-settings: "FILL" 0, "wght" 450, "GRAD" 0, "opsz" 24;
+}
+
+.bottom-nav-item.active {
+  color: var(--text);
+}
+
+.bottom-nav-item.active .material-symbols-outlined {
+  font-variation-settings: "FILL" 1, "wght" 500, "GRAD" 0, "opsz" 24;
+}
+
+/* .nav-add 只負責讓「+」變成深色圓形鈕，顏色由下一條規則掛在 icon 上。
+   這一條原本是 color: #fff，會讓同一個 <a> 裡的「新增」文字也變成白字，
+   疊在白色底導覽上等於看不見。icon 自己已有 color: #fff，不需要它。 */
+.bottom-nav-item.nav-add .material-symbols-outlined {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--accent);
+  font-size: 25px;
+}
+
+.install-app-hint {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 16px 24px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/*
+ * 頁尾。選擇器刻意多一層 .forum-shell：<footer> 是元素選擇器，後臺的
+ * <footer class="dlg__foot"> 也會被命中，限定在公開頁的外框內才不會把
+ * 對話框的按鈕列撐開。
+ */
+.forum-shell footer {
+  padding: 32px 16px 48px;
+  text-align: center;
+}
+
+.forum-shell footer a {
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+/*
+ * 搜尋欄換到第二列的門檻（1100px），與 640px 的手機版 media 查詢分開。
+ *
+ * 為什麼是 1100 而不是「塞不下就換列」：1fr / 420px / 1fr 要讓藥丸落在正中央，
+ * 左右兩欄必須真的等寬，而右欄（登入狀態文字 + 安裝 App + 登入鈕，且這幾個都
+ * nowrap）的最小需求約 284px、左欄（FORUM）只要 72px。於是視窗要寬到
+ * 420 + 24(間距) + 284*2 + 48(左右 padding) ≈ 1060px，左右兩欄才可能各分到
+ * 一樣的空間；在那以下若硬放同一列，grid 會把差額補到較寬的一側，藥丸就偏了
+ * （實測 1024px 偏 30px、901px 偏 91px）。
+ *
+ * 與其讓置中在這段寬度裡「差不多置中」，不如明確切成兩列：第 1 列標誌 + 按鈕，
+ * 第 2 列是置中的藥丸（grid-template-areas 指定位置，不依賴換行推斷）。
+ * 每一種寬度下藥丸都精確置中，這比「大部分情況置中」好解釋也好維護。
+ */
+@media (max-width: 1100px) {
+  .forum-nav {
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "brand actions" "search search";
+  }
+
+  .brand {
+    grid-area: brand;
+  }
+
+  .nav-actions {
+    grid-area: actions;
+  }
+
+  .forum-nav__search {
+    grid-area: search;
+    width: 100%;
+    max-width: 420px;
+    justify-self: center;
+  }
+}
+
+@media (max-width: 640px) {
+  .forum-nav {
+    min-height: 56px;
+    padding: 10px 16px;
+  }
+
+  .user-state {
+    display: none;
+  }
+
+  .bottom-nav {
+    gap: 28px;
+  }
+}
+
+/* ==========================================================================
+   3. 公開頁貼文卡與留言串
+   ==========================================================================
+   src/forum/PostCard.tsx 的樣式。這一段原本寫在 forum.html 的 <style> 裡，
+   但 /forum 與 /forum/following 兩頁都渲染同一支 PostCard —— 放在頁內樣式裡
+   等於新頁沒有任何版面，而且是靠「複製一份」而不是「共用」維持一致，那必然漂移。
+   因此依照檔頭的分界線（同一家族內被兩頁以上共用的元件 → 本檔）搬到這裡。
+
+   依賴的 CSS 變數（--line / --text / --muted / --accent）由各頁的頁內 <style>
+   以 html:root 重新宣告；本節刻意不宣告任何變數，避免與第 4 節的後臺色票
+   混成同一份。--accent 在公開頁是 #111（純黑膠囊鈕），在後臺是藍色，
+   同一顆按鈕因此在兩邊自然取得不同外觀，不必寫兩套規則。
+
+   .empty / .loading 這組類名後臺曾經有另一種意思（spinner 列），現在後臺
+   改用 .state / .skeleton（第 12 節），因此這兩個名稱在本站只有一種意義，
+   放在本檔是安全的。
+   ========================================================================== */
+
+.feed {
+  width: 100%;
+}
+
+/* 次要動作（取消檢舉）。 */
+.ghost-button {
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  padding: 7px 16px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ghost-button:hover {
+  border-color: var(--text);
+}
+
+.ghost-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --- 貼文卡 -------------------------------------------------------------- */
+.post {
+  padding: 18px 16px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.post-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.post-identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.author-line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.post-identity strong {
+  max-width: 420px;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.author-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 140px;
+  overflow: hidden;
+  border: 1px solid #d7d7d7;
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #555;
+  background: #f5f5f5;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.post-identity time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.avatar-link,
+.author-link {
+  text-decoration: none;
+}
+
+.author-link {
+  color: var(--text);
+}
+
+.author-link:hover {
+  text-decoration: underline;
+}
+
+.post-menu {
+  position: relative;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.more-button {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.more-button:hover,
+.more-button[aria-expanded='true'] {
+  color: var(--text);
+  background: #f1f1f1;
+}
+
+.more-button:focus-visible,
+.post-menu__item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.more-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.post-menu__panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 156px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+.post-menu__item {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  border: 0;
+  border-radius: 5px;
+  padding: 9px 12px;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.post-menu__item:hover {
+  background: #f1f1f1;
+}
+
+.post-menu__item--danger {
+  color: #b42318;
+}
+
+.comment-report-button:hover {
+  color: var(--text);
+}
+
+.post h2 {
+  margin-block: 13px 6px;
+  margin-inline: 50px 0;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.post p {
+  margin-block: 0 12px;
+  margin-inline: 50px 0;
+  color: #292929;
+  font-size: 15px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.post-image {
+  display: block;
+  max-width: calc(100% - 50px);
+  max-height: 520px;
+  margin-block: 0 12px;
+  margin-inline: 50px 0;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.post-actions {
+  display: flex;
+  gap: 22px;
+  margin-inline-start: 50px;
+}
+
+.post-actions button {
+  width: 24px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  color: #555;
+  background: transparent;
+  font-size: 23px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.post-actions button:hover {
+  color: var(--text);
+}
+
+.post-actions button.post-like-button {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  height: auto;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fff;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.post-like-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.post-like-count {
+  display: inline-block;
+  min-width: 1.2em;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.post-like-button:hover {
+  color: var(--text);
+}
+
+.post-like-button.liked {
+  border-color: #f7c7c7;
+  color: #d92b2b;
+  background: #fff4f4;
+}
+
+/* 留言鈕的版面與 .post-actions button 的 24×28 圖示鈕不同，必須逐項
+   覆寫；這也是唯一一組需要 !important 的地方 —— 內層選擇器的優先級
+   高於外層的 .post-actions button。 */
+.post-comment-button {
+  display: inline-flex !important;
+  align-items: center;
+  width: auto !important;
+  height: auto !important;
+  gap: 6px;
+  padding: 5px 10px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fff !important;
+  font-size: 14px !important;
+}
+
+.post-comment-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.post-comment-button:hover {
+  color: var(--text);
+}
+
+.post-comment-count {
+  min-width: 1.2em;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* --- 追蹤鈕 --------------------------------------------------------------
+   三個頁面共用同一顆按鈕：貼文卡作者列（inline）、他人個人頁（panel）、
+   追蹤頁的清單列（inline）。因此放本檔而不是任一頁的 <style>。
+   追蹤中的樣態靠 .follow-button--on，而不是 :active 或 :focus ——
+   那是「目前狀態」，必須在 DOM 上可見，否則重新載入後畫面會停在舊樣態。 */
+.follow-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: var(--muted);
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.follow-button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.follow-button--on {
+  border-color: #cfcfcf;
+  color: #6b6b6b;
+  background: #f2f2f2;
+}
+
+.follow-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.follow-button--panel {
+  padding: 8px 20px;
+  font-size: 14px;
+}
+
+/* busy 期間不換文字，只加淡出：spinner 會改變按鈕寬度，作者列因此會跳動。 */
+.follow-button.is-busy {
+  opacity: 0.6;
+}
+
+/* --- 留言串 --------------------------------------------------------------
+   檢舉表單沿用同一頁既有的 .comment-form 版面，就地展開在目標下方。
+   -------------------------------------------------------------------- */
+.post-comments {
+  margin: 14px 0 0 50px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.comments-list {
+  display: grid;
+  max-height: 360px;
+  gap: 12px;
+  padding: 2px 8px 2px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.comment {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f7f7f7;
+}
+
+.comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.comment-author {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.comment-head time {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.comment-report-button {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.comment p {
+  margin: 5px 0 0;
+  color: #292929;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.comments-empty {
+  padding: 8px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.comments-load-sentinel {
+  min-height: 28px;
+  padding: 8px 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.comment-form {
+  margin-top: 12px;
+}
+
+.comment-form textarea {
+  display: block;
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+}
+
+.comment-form textarea:focus {
+  border-color: var(--accent);
+}
+
+.comment-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+/* --- 列表狀態 ----------------------------------------------------------- */
+.empty,
+.loading {
+  padding: 48px 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.feed-status {
+  min-height: 44px;
+  padding: 14px 16px 24px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ==========================================================================
+   4. 後臺 design tokens
+   ==========================================================================
+   唯一一份後臺色票 / 圓角 / 陰影 / 尺寸的宣告處。過去三頁分屬 admin.css 與
+   forum-admin.css 兩套設計系統：色票重複宣告、類名語彙不同（.sidebar-link
+   vs .admin-nav a）、內容最大寬度不同（1440 vs 1180）、響應式策略也不同
+   （off-canvas vs 橫向捲動）。收斂成單一 token 來源與單一元件庫，避免再出現
+   同義不同名。
+
+   --line 與 --accent 與公開頁同名不同值。公開頁在頁內 <style> 以 html:root
+   重新宣告這兩個變數；多一個元素選擇器是為了贏過本節的 :root，不受 Vite
+   把 <link> 移到 <head> 最後的排版影響（見檔頭說明）。
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* 內容區（淺色） */
+  --canvas: #eceff6;
+  --surface: #ffffff;
+  --surface-2: #f7f9fc;
+  --surface-3: #eef2f8;
+
+  /* 文字 */
+  --ink: #101828;
+  --ink-2: #4a5567;
+  --ink-3: #8a94a6;
+
+  /* 線條（公開頁會覆寫 --line） */
+  --line: #e3e8f1;
+  --line-2: #ccd4e2;
+
+  /* 強調色（唯一；公開頁會覆寫 --accent） */
+  --accent: #4c6ef5;
+  --accent-2: #3a54d8;
+  --accent-ink: #2c3fb0;
+  --accent-soft: #edf1ff;
+
+  /* 語意色 */
+  --ok: #0f7d57;
+  --ok-soft: #e2f5ec;
+  --warn: #8f5d00;
+  --warn-soft: #fff4dd;
+  --danger: #cc3350;
+  --danger-soft: #fdecef;
+
+  /* 深色導覽（rail + topbar） */
+  --rail: #101827;
+  --rail-2: #0a0f1c;
+  --rail-ink: #e9edf6;
+  --rail-ink-2: #8d99b2;
+  --rail-line: rgba(255, 255, 255, 0.09);
+  --rail-surface: rgba(255, 255, 255, 0.05);
+  --rail-accent: #8ba1ff;
+
+  /* 圓角 */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+
+  /* 陰影 */
+  --sh-1: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --sh-2: 0 1px 3px rgba(16, 24, 40, 0.06), 0 10px 28px rgba(16, 24, 40, 0.06);
+  --sh-3: 0 26px 64px rgba(16, 24, 40, 0.2);
+  --sh-pop: 0 36px 90px rgba(6, 11, 22, 0.42);
+
+  /* 尺寸 */
+  --rail-w: 264px;
+  --topbar-h: 64px;
+}
+
+/* ==========================================================================
+   5. 後臺殼層與共用元件
+   ==========================================================================
+   src/admin/shell.tsx（rail / topbar / canvas）與 src/admin/ui.tsx
+   （表格狀態、忙碌按鈕、表單狀態列）在三個後臺頁面都會出現，因此放在本檔。
+
+   只被單一後臺頁面用的東西寫在那一頁的 <style>：.detail / .record / .signin /
+   .table--users / .table--tags / .table--sub / .loading + .spinner → admin.html，
+   .thread / .metric / .post-figure / .pagination / .search-form / .search-field /
+   .table--posts → forum-admin.html，.segmented / .form-grid → forum-report.html。
+
+   同名的 .eyebrow / .loading / .google-btn / .search-field 刻意不在本檔：它們在
+   公開頁有另一種外觀，兩個家族共用一支檔案時只能由頁內 <style> 各自宣告。
+   ========================================================================== */
+
+/* --- App shell ----------------------------------------------------------- */
+
+.skip-link {
+  position: fixed;
+  top: 10px;
+  inset-inline-start: 10px;
+  z-index: 100;
+  padding: 10px 16px;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  transform: translateY(-160%);
+  transition: transform 160ms var(--ease);
+}
+
+.skip-link:focus {
+  color: #fff;
+  transform: translateY(0);
+}
+
+.admin-app {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* --- rail ---------------------------------------------------------------- */
+
+.rail {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  padding: 22px 14px 18px;
+  overflow-y: auto;
+  border-right: 1px solid var(--rail-line);
+  background:
+    radial-gradient(120% 60% at 12% -6%, rgba(96, 128, 255, 0.24), transparent 62%),
+    linear-gradient(180deg, var(--rail) 0%, var(--rail-2) 100%);
+  color: var(--rail-ink);
+}
+
+.rail__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 6px 30px;
+  color: inherit;
+}
+
+.rail__brand:hover {
+  color: inherit;
+}
+
+.rail__mark {
+  display: grid;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 11px;
+  background: linear-gradient(140deg, #7d95ff, #3f57d8);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.rail__brand-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rail__brand-text strong {
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.rail__brand-text small {
+  color: var(--rail-ink-2);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.rail__nav {
+  display: grid;
+  gap: 4px;
+}
+
+.rail__label {
+  padding: 0 12px 8px;
+  color: #6e7b95;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.rail__link {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--rail-ink-2);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 160ms var(--ease), border-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.rail__link:hover {
+  border-color: var(--rail-line);
+  background: var(--rail-surface);
+  color: var(--rail-ink);
+}
+
+.rail__link.is-active {
+  border-color: rgba(139, 161, 255, 0.28);
+  background: rgba(139, 161, 255, 0.14);
+  color: #fff;
+  box-shadow: inset 3px 0 0 var(--rail-accent);
+}
+
+.rail__icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.rail__icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.rail__link.is-active .rail__icon {
+  color: var(--rail-accent);
+}
+
+.rail__count {
+  min-width: 22px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: rgba(255, 255, 255, 0.1);
+  color: #d5dcee;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail__foot {
+  display: grid;
+  gap: 8px;
+  margin-top: auto;
+  padding: 16px 6px 0;
+  border-top: 1px solid var(--rail-line);
+}
+
+.rail__session {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--rail-line);
+  border-radius: 10px;
+  background: var(--rail-surface);
+  color: #c3cbdb;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rail__pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4bd39a;
+  box-shadow: 0 0 0 4px rgba(75, 211, 154, 0.14);
+}
+
+.rail__exit {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: none;
+  color: var(--rail-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+
+.rail__exit:hover {
+  background: var(--rail-surface);
+  color: var(--rail-ink);
+}
+
+.rail__exit .rail__icon {
+  width: 15px;
+  height: 15px;
+}
+
+.rail__scrim {
+  display: none;
+}
+
+/* --- viewport ------------------------------------------------------------ */
+
+.viewport {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: var(--topbar-h);
+  padding: 0 clamp(18px, 2.6vw, 34px);
+  border-bottom: 1px solid var(--rail-line);
+  background: rgba(12, 18, 32, 0.86);
+  color: var(--rail-ink);
+  backdrop-filter: blur(16px);
+}
+
+.topbar__menu {
+  display: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--rail-line);
+  border-radius: 10px;
+  background: var(--rail-surface);
+  color: var(--rail-ink);
+}
+
+.topbar__menu .rail__icon {
+  width: 18px;
+  height: 18px;
+  margin: 0 auto;
+}
+
+.topbar__crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--rail-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.topbar__crumb i {
+  color: #475066;
+  font-style: normal;
+}
+
+.topbar__crumb strong {
+  overflow: hidden;
+  color: #fff;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--rail-line);
+  border-radius: 9px;
+  background: var(--rail-surface);
+  color: #c8d1e2;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+
+.topbar__link:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.topbar__link .rail__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 11px;
+  border-radius: var(--r-pill);
+  background: rgba(75, 211, 154, 0.12);
+  color: #8ce6bd;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-pill i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4bd39a;
+}
+
+/* --- canvas -------------------------------------------------------------- */
+
+.canvas {
+  display: grid;
+  gap: 22px;
+  align-content: start;
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 30px clamp(18px, 2.6vw, 34px) 64px;
+}
+
+/* 頁面內容的直向堆疊。canvas 本身就是 grid，但登入閘門與儀表板會在同一個
+   canvas 內互換顯示，儀表板需要一層自己的堆疊容器。 */
+.stack {
+  display: grid;
+  gap: 22px;
+  align-content: start;
+  min-width: 0;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.page-head__text {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.page-head h1 {
+  font-size: 28px;
+}
+
+.page-head__copy {
+  max-width: 62ch;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.page-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ==========================================================================
+   6. 後臺元素層 reset
+   ==========================================================================
+   這一段只作用在 <body class="admin-page">。它必須與公開頁隔開，理由是這些
+   都是元素選擇器：a 的藍色、h1~h4 的 800 字重、藍色 focus 圈、p 的 margin: 0
+   全部會改變公開頁的外觀，而公開頁的設計明確不要它們（例如公開頁的 h1 是
+   靠 letter-spacing 而不是字重建立層級）。
+
+   為什麼需要這一段：React 版把整頁交給 JS 生成，因此瀏覽器的預設樣式沒有
+   任何機會被「原本寫在 HTML 裡的 reset」蓋掉 —— 它們以前在這裡，現在得在這裡。
+
+   為什麼每一條都用 :where(body.admin-page) 包起來：:where() 不貢獻任何優先級，
+   所以 `a` 在這裡的優先級仍是 (0,0,1)，與這些規則被搬進本檔之前完全相同。
+   這一點是關鍵 —— 若寫成 `body.admin-page a`，它會變成 (0,1,1) 而壓過
+   .google-btn、.topbar__link、.rail__link、.btn--primary、.record__text 等
+   單一 class 規則（(0,1,0)），結果是後臺的深色 rail 上出現藍色連結、
+   主要按鈕變成藍字。隔離靠選擇器的「符合範圍」達成，不靠優先級。
+   ========================================================================== */
+
+:where(body.admin-page) {
+  min-width: 320px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-text-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:where(body.admin-page) h1,
+:where(body.admin-page) h2,
+:where(body.admin-page) h3,
+:where(body.admin-page) h4,
+:where(body.admin-page) p,
+:where(body.admin-page) figure {
+  margin: 0;
+}
+
+/*
+ * CJK 不使用負字距。舊版對 h1/h2 掛 letter-spacing: -.04em，在繁中標題上會讓
+ * 字面黏在一起、筆畫擠壓；這裡改成以字重與尺寸建立層級，字距保持中性。
+ */
+:where(body.admin-page) h1,
+:where(body.admin-page) h2,
+:where(body.admin-page) h3,
+:where(body.admin-page) h4 {
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+:where(body.admin-page) button,
+:where(body.admin-page) input,
+:where(body.admin-page) select,
+:where(body.admin-page) textarea {
+  color: inherit;
+  font: inherit;
+}
+
+:where(body.admin-page) button,
+:where(body.admin-page) a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(body.admin-page) button {
+  cursor: pointer;
+}
+
+:where(body.admin-page) button:disabled {
+  cursor: not-allowed;
+}
+
+:where(body.admin-page) a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+:where(body.admin-page) a:hover {
+  color: var(--accent-2);
+}
+
+:where(body.admin-page) img {
+  max-width: 100%;
+}
+
+:where(body.admin-page) :focus-visible {
+  border-radius: 4px;
+  outline: 3px solid rgba(76, 110, 245, 0.45);
+  outline-offset: 2px;
+}
+
+:where(body.admin-page) .rail :focus-visible,
+:where(body.admin-page) .topbar :focus-visible {
+  outline-color: rgba(139, 161, 255, 0.7);
+}
+
+/* ==========================================================================
+   7. Panels
+   ========================================================================== */
+
+.panel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--sh-2);
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.panel__titles {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.panel__title {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.panel__note {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.panel__body {
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+}
+
+/* ==========================================================================
+   8. Buttons
+   ========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background 150ms var(--ease), border-color 150ms var(--ease),
+    color 150ms var(--ease), transform 150ms var(--ease),
+    box-shadow 150ms var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+}
+
+.btn--primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(76, 110, 245, 0.24);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-2);
+  color: #fff;
+}
+
+.btn--danger {
+  border-color: transparent;
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #b32b46;
+  color: #fff;
+}
+
+.btn--ghost {
+  border-color: var(--line-2);
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.btn--sm {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+}
+
+/*
+ * 忙碌中的按鈕：文字變成透明，再用 ::after 畫 spinner。目的是讓按鈕寬度不
+ * 跳動 —— 舊版在「儲存中…」與原文之間來回撐開版面。
+ */
+.btn.is-busy {
+  position: relative;
+  color: transparent !important;
+}
+
+.btn.is-busy::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 15px;
+  height: 15px;
+  margin: -7.5px 0 0 -7.5px;
+  border: 2px solid currentcolor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  color: #fff;
+  content: "";
+  animation: spin 620ms linear infinite;
+}
+
+.btn--primary.is-busy::after,
+.btn--danger.is-busy::after {
+  color: #fff;
+}
+
+.btn--ghost.is-busy::after,
+.btn:not(.btn--primary, .btn--danger).is-busy::after {
+  color: var(--ink-3);
+}
+
+/* ==========================================================================
+   9. Forms
+   ========================================================================== */
+
+.field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field__label {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.field__hint {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  outline: none;
+  background: var(--surface-2);
+  transition: border-color 150ms var(--ease), background 150ms var(--ease),
+    box-shadow 150ms var(--ease);
+}
+
+.textarea {
+  min-height: 140px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: #a9b2c2;
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px rgba(76, 110, 245, 0.14);
+}
+
+.input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.form-status {
+  min-height: 20px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+
+.form-status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.form-status[data-tone="ok"] {
+  color: var(--ok);
+}
+
+.check-list {
+  display: grid;
+  gap: 2px;
+  max-height: 320px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.check-list__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 140ms var(--ease);
+}
+
+.check-list__item:hover {
+  background: var(--surface-3);
+}
+
+.check-list__item input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.check-list__id {
+  margin-inline-start: auto;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* ==========================================================================
+   10. Tables
+   ========================================================================== */
+
+.table-wrap {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: start;
+}
+
+.table th,
+.table td {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.table th {
+  background: var(--surface-2);
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table tbody tr {
+  transition: background 140ms var(--ease);
+}
+
+.table tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.table .num {
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+  white-space: nowrap;
+}
+
+.table .id {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+/*
+ * 這三個 class 只能放在 <td> 的子元素上。若誤用到 <td> 本身，display: block
+ * 會讓該格脫離表格列的盒子計算：欄寬分配錯亂、cell 的底線畫在比列高度更低的
+ * 位置，視覺上就是表格中間憑空多出幾條短線。用 td > 限定除了語意清楚，
+ * 也讓誤用不會直接炸掉版面。
+ */
+.table td > .cell-primary {
+  display: block;
+  font-weight: 700;
+}
+
+.table td > .cell-sub {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.table td > .cell-clamp {
+  display: -webkit-box;
+  max-width: 42ch;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.table .row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+/* .table--reports 同時出現在「論壇文章」頁的留言檢舉區與「檢舉管理」頁，
+   因此是共用樣式（min-width 與操作欄換行）。 */
+.table--reports {
+  min-width: 860px;
+}
+
+/* 檢舉的操作欄有四顆按鈕（通過／不成立／編輯／刪除），單排寬度超過
+   .table--reports 的 860px min-width 所需的欄寬。.table .row-actions 預設是
+   nowrap，橫向撐不下的結果是整張表被拉寬、每個欄位都變稀疏；改為在操作欄內
+   換行，並靠右對齊維持它與其他欄的視覺基準一致。 */
+.table--reports .row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 日期時間欄位永遠不折行：「2026年9月20日」被拆成三行時，欄位會撐出整列的
+   高度，掃讀時每一列的基準線都不一致。 */
+.u-nowrap {
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   11. Badges
+   ==========================================================================
+   .badge 同時出現在「用戶管理」與「檢舉管理」兩頁，因此是共用樣式。
+   .chip 只有用戶管理頁的標籤欄會用到，寫在那頁的 <style> 裡。
+   ========================================================================== */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.badge::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentcolor;
+  content: "";
+}
+
+.badge--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.badge--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.badge--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.badge--info {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.muted {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+/* ==========================================================================
+   12. Empty / loading states
+   ==========================================================================
+   表格的四種狀態（載入中 / 有資料 / 沒資料 / 載入失敗）是 src/admin/ui.tsx 的
+   ListBody，三個後臺頁面共用。載入中的骨架（.skeleton）也在這裡。
+   ========================================================================== */
+
+.state {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 56px 24px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.state__icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--ink-3);
+}
+
+.state__icon .rail__icon {
+  width: 20px;
+  height: 20px;
+}
+
+.state strong {
+  color: var(--ink-2);
+  font-size: 14px;
+}
+
+.state p {
+  font-size: 12px;
+}
+
+.skeleton {
+  display: block;
+  width: 100%;
+  min-width: 60px;
+  height: 11px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-3) 25%,
+    var(--surface-2) 37%,
+    var(--surface-3) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    background: var(--surface-3);
+  }
+}
+
+/* ==========================================================================
+   13. Toasts
+   ==========================================================================
+   src/admin/provider.tsx 在三個後臺頁面都掛著同一組 toast 容器。
+   ========================================================================== */
+
+.toasts {
+  position: fixed;
+  inset-inline-end: 20px;
+  bottom: 20px;
+  z-index: 60;
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  max-width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  width: 100%;
+  padding: 11px 15px;
+  border: 1px solid var(--rail-line);
+  border-radius: var(--r-md);
+  background: #131a2a;
+  box-shadow: var(--sh-3);
+  color: #eef1f8;
+  font-size: 12.5px;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: auto;
+  cursor: pointer;
+  transform: translateY(10px);
+  transition: opacity 180ms var(--ease), transform 180ms var(--ease);
+}
+
+.toast.is-open {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast--ok {
+  border-inline-start: 3px solid #4bd39a;
+}
+
+.toast--error {
+  border-inline-start: 3px solid #ff6b86;
+}
+
+/* ==========================================================================
+   14. Dialog（取代 window.prompt / window.confirm）
+   ==========================================================================
+   同樣掛在 src/admin/provider.tsx，三個後臺頁面共用。
+   ========================================================================== */
+
+.dlg {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--sh-pop);
+  color: var(--ink);
+}
+
+.dlg::backdrop {
+  background: rgba(9, 14, 26, 0.58);
+  backdrop-filter: blur(3px);
+}
+
+.dlg[open] {
+  animation: dlg-in 200ms var(--ease);
+}
+
+.dlg__form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: calc(100dvh - 48px);
+}
+
+.dlg__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px 14px;
+}
+
+.dlg__title {
+  font-size: 17px;
+}
+
+.dlg__close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink-3);
+}
+
+.dlg__close .rail__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.dlg__body {
+  display: grid;
+  gap: 14px;
+  padding: 0 20px 18px;
+  overflow-y: auto;
+}
+
+.dlg__message {
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.dlg__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+/* ==========================================================================
+   15. Animations
+   ==========================================================================
+   三個 @keyframes 都被上面的共用元件用到：.btn.is-busy / .skeleton / .dlg[open]。
+   ========================================================================== */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+@keyframes dlg-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ==========================================================================
+   16. 語言切換器
+   ==========================================================================
+   九個頁面共用（公開頁導覽列與後臺 topbar），因此樣式在這裡、互動邏輯與
+   「有哪些語言」在 src/i18n/。元件本身不判斷自己在哪一頁，由呼叫處傳
+   variant —— 樣式與位置是兩件事，混在一起就會長成一個需要
+   document.location 的元件。
+
+   兩種外觀差在觸發鈕與選單的底色：公開頁是白底導覽列，後臺是深色 topbar。
+   選單的版面（浮動位置、圓角、陰影）兩者共用，只有配色分開寫。
+   ========================================================================== */
+
+.lang-switch {
+  position: relative;
+  /* 不設 z-index：下拉選單的堆疊順序靠它自己（.lang-switch__menu）就夠了。
+     父層提高 z-index 會讓整顆切換器在 .forum-nav 的 stacking context 裡
+     脫離捲動裁切，副作用大於收益。 */
+  flex: 0 0 auto;
+}
+
+/*
+ * 代碼 + 箭頭。箭頭用 border 畫而不是「▾」字元：字元會被載入的字體影響
+ * 外形（Noto Sans TC 的 ▾ 和 Inter 的 ▾ 大小不同），而三個後臺頁面沒有載
+ * Material Symbols，用字元的話箭頭在不同頁面長得也不一樣。
+ */
+.lang-switch__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease),
+    color 140ms var(--ease);
+}
+
+.lang-switch__badge {
+  /* 代碼是全大寫兩字母，用 tabular 讓它在切換時寬度不變，避免選單抖動。 */
+  font-variant-numeric: tabular-nums;
+}
+
+.lang-switch__caret {
+  width: 0;
+  height: 0;
+  border-top: 4px solid currentcolor;
+  border-right: 3.5px solid transparent;
+  border-left: 3.5px solid transparent;
+  opacity: 0.65;
+  transition: transform 140ms var(--ease);
+}
+
+.lang-switch__trigger[aria-expanded="true"] .lang-switch__caret {
+  transform: rotate(180deg);
+}
+
+.lang-switch__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  inset-inline-end: 0;
+  z-index: 60;
+  display: grid;
+  min-width: 190px;
+  /* 17 種語言的清單需要這個寬度才不會讓長語言名（例如 Português (Brasil)）換行。 */
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--sh-3);
+  color: var(--ink);
+}
+
+.lang-switch__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 130ms var(--ease), color 130ms var(--ease);
+}
+
+.lang-switch__item:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.lang-switch__item-badge {
+  min-width: 22px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+
+.lang-switch__item-name {
+  flex: 1;
+  font-weight: 700;
+}
+
+/*
+ * 目前選中的那一項。aria-checked 是這裡唯一的狀態來源 —— 樣式跟著語意走，
+ * 就不會出現「畫面顯示已選取但讀螢幕軟體說沒選」的分裂。
+ *
+ * 用左側的色條而不是背景色：背景色是選單自己 hover 時也在用的那一個，
+ * 若把「已選取」也畫成底色，使用者分不出「我正在指向」和「我已經選了」。
+ */
+.lang-switch__item[aria-checked="true"] {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.lang-switch__item[aria-checked="true"] .lang-switch__item-badge {
+  color: var(--accent);
+}
+
+/* --- 公開頁外觀 --------------------------------------------------------- */
+
+.lang-switch--forum .lang-switch__trigger {
+  border-color: #ddd;
+  color: var(--text);
+  background: #fff;
+}
+
+.lang-switch--forum .lang-switch__trigger:hover {
+  border-color: var(--text);
+}
+
+/* --- 後臺外觀 ----------------------------------------------------------- *
+ * 深色 topbar 上不能沿用淺色預設：白底選單在深色列上會是一塊刺眼的方塊，
+ * 而「選單用深色、項目文字用淺色」才能維持整個 topbar 的連續感。
+ * ---------------------------------------------------------------------- */
+
+.lang-switch--admin .lang-switch__trigger {
+  border-color: var(--rail-line);
+  color: #c8d1e2;
+  background: var(--rail-surface);
+}
+
+.lang-switch--admin .lang-switch__trigger:hover,
+.lang-switch--admin .lang-switch__trigger[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.lang-switch--admin .lang-switch__menu {
+  border-color: var(--rail-line);
+  background: #131a2a;
+  color: #eef1f8;
+}
+
+.lang-switch--admin .lang-switch__item {
+  color: #b9c3d6;
+}
+
+.lang-switch--admin .lang-switch__item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+}
+
+.lang-switch--admin .lang-switch__item-badge {
+  color: #7c88a1;
+}
+
+.lang-switch--admin .lang-switch__item[aria-checked="true"] {
+  color: #fff;
+  background: rgba(139, 161, 255, 0.16);
+}
+
+.lang-switch--admin .lang-switch__item[aria-checked="true"] .lang-switch__item-badge {
+  color: var(--rail-accent);
+}
+
+/* ==========================================================================
+   17. 右至左（阿拉伯文）
+   ==========================================================================
+   阿拉伯文是本站唯一書寫方向相反的語言，因此 <html dir> 會是 "rtl"。版面
+   會鏡像的部分**不需要**在這裡處理 —— grid 的欄位、flex 的排列、
+   justify-self / text-align 的 start|end 全部會跟著 dir 翻，只有那些寫成
+   實體值（left / right / translateX 的負號）的規則不會。
+
+   上一節已經把能改成邏輯屬性的都改了（inset-inline-*、margin-inline-*、
+   text-align: start|end），剩下的三處是邏輯屬性表達不了的，以下逐一說明：
+
+   1. transform: translateX(-102%)。邏輯屬性沒有「往起點方向位移」這個概念，
+      所以收起狀態必須在 RTL 覆寫成 +102%。用 [dir="rtl"] 而不是 .admin-app
+      是因為 scrim 與 body.is-rail-open 的層級在 .admin-app 之外。
+   2. box-shadow: inset 3px 0 0 —— 這個「0」是偏移量不是位移，沒有對應的邏輯
+      屬性。改用 inset-inline-shadow 至今不是所有瀏覽器都支援，因此在 RTL 覆寫
+      成負的 x。
+   3. ▸ 這個字形本身方向固定，展開/收起的三角要在 RTL 換成 ◂。
+
+   這一節的選擇器都用 [dir="rtl"]：它是寫在 <html> 上的屬性，整份 CSS 都只
+   在它為 rtl 時才需要這些覆寫。
+   ========================================================================== */
+
+[dir="rtl"] .rail {
+  transform: translateX(102%);
+}
+
+[dir="rtl"] .rail.is-open {
+  transform: translateX(0);
+}
+
+[dir="rtl"] .rail__link.is-active {
+  box-shadow: inset -3px 0 0 var(--rail-accent);
+}
+
+/*
+ * 方向性圖示鏡像。只挑「鏡像之後語意才正確」的：返回箭頭與登出箭頭。底部導覽的
+ * home / add / person 是對稱的圖形，翻了反而奇怪，因此明確排除。
+ */
+[dir="rtl"] .back-link .material-symbols-outlined,
+[dir="rtl"] .rail__exit .rail__icon {
+  transform: scaleX(-1);
+}
+
+/* ==========================================================================
+   18. Responsive（後臺共用部分）
+   ==========================================================================
+   只放三個後臺頁面都受影響的斷點。單頁專屬的調整（.detail__cols 摺疊、
+   .signin 轉單欄）寫在那一頁的 <style> 裡，因此本節與各頁的 media 查詢會
+   各有一個 720px 區塊 —— 拆開是刻意的：把「所有頁」與「這一頁」放在同一個
+   規則集裡，只會讓兩邊都不敢動。
+   ========================================================================== */
+
+@media (max-width: 900px) {
+  .admin-app {
+    display: block;
+  }
+
+  .rail {
+    position: fixed;
+    top: 0;
+    inset-inline-start: 0;
+    z-index: 50;
+    width: var(--rail-w);
+    transform: translateX(-102%);
+    transition: transform 220ms var(--ease);
+  }
+
+  .rail.is-open {
+    transform: translateX(0);
+    box-shadow: var(--sh-pop);
+  }
+
+  .rail__scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    display: block;
+    background: rgba(9, 14, 26, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms var(--ease);
+  }
+
+  .rail__scrim.is-open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  body.is-rail-open {
+    overflow: hidden;
+  }
+
+  .topbar__menu {
+    display: grid;
+    place-items: center;
+  }
+
+  .topbar__crumb {
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .canvas {
+    gap: 18px;
+    padding-bottom: 44px;
+  }
+
+  .page-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .page-head h1 {
+    font-size: 24px;
+  }
+
+  .page-head__actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .panel__head {
+    padding: 15px 16px;
+  }
+
+  .panel__actions {
+    width: 100%;
+  }
+
+  .panel__actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .table th,
+  .table td {
+    padding: 11px 14px;
+  }
+
+  .table .cell-clamp {
+    max-width: 26ch;
+  }
+
+  .form-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .form-footer .btn {
+    width: 100%;
+  }
+
+  .dlg__foot {
+    flex-direction: column-reverse;
+  }
+
+  .dlg__foot .btn {
+    width: 100%;
+  }
+
+  .toasts {
+    inset-inline: 12px;
+    bottom: 12px;
+    max-width: none;
+    justify-items: stretch;
+  }
+}
+
+@media (max-width: 520px) {
+  .topbar__actions .status-pill {
+    display: none;
+  }
+
+  .topbar__crumb span,
+  .topbar__crumb i {
+    display: none;
+  }
+}
