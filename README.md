@@ -19,28 +19,6 @@ forum/
 └── files_server/     圖片檔案微服務（論壇附圖上傳的相依服務）
 ```
 
-## 已移除的非論壇功能
-
-| 功能 | 說明 |
-| --- | --- |
-| AI 聊天 | `module/chat`、WebSocket、`/chat` 頁面與 `/api/chat/*` 路由 |
-| UI 主題投稿 | `ui.html`、`/ui` 頁面與 `/api/ui-submissions` 路由 |
-| 刪文申請（AI 審查） | `delete_requests` 資料表、`/api/delete-requests` 與後臺「刪文申請」分頁 |
-| 手動投稿審核 | `manual_submissions` 資料表與相關後臺 API |
-| 歷史訊息生成 | `image_gen.go`（`gg` 影像繪圖）與 `/api/history/images` |
-| Instagram API | `module/config` 中的 `Ig*` 設定 |
-| 管理密碼登入 | `/api/login`、`module/security`、`app_settings` 資料表 |
-| 主站首頁 | `index.html` 與 Tailwind CSS、React 聊天前端 |
-
-`go.mod` 已移除對應相依套件（`gg`、`freetype`、`x/image`、`gorilla/websocket`、`gopher-lua` 仍由測試用 `miniredis` 保留、`x/crypto`）。
-`package.json` 的執行相依為 `react` 與 `react-dom`，開發相依為 `vite`、
-`@vitejs/plugin-react`、`typescript`、`@types/node`、`@types/react` 與
-`@types/react-dom`。
-
-貼文全文搜尋是唯一從主站「帶回來」的舊功能，但對象不同：主站的 `module/es`
-服務的是聊天紀錄，這裡的 `module/es` 服務論壇貼文（索引名 `forum_posts`），
-兩者不共用索引也不共用程式碼。搜尋支援 Elasticsearch，未設定時自動降級為
-MySQL 的關鍵字比對（詳見「搜尋」一節）。
 
 ## 系統需求
 
