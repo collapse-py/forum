@@ -1,0 +1,167 @@
+# ============================================================
+#  論壇後端設定範本
+# ============================================================
+#
+#  用法：複製成 config.conf 後再修改。
+#
+#    Linux / macOS：cp config.conf.example config.conf
+#    Windows：       Copy-Item config.conf.example config.conf
+#
+#  兩件事要注意：
+#
+#  1. config.conf 本身在 .gitignore 裡，**不要**把填了真實密碼的版本
+#     提交上去。本檔只提供結構與註解，不含任何真實憑證。
+#  2. 設定路徑是相對於「工作目錄」的 config/config.conf，所以必須在
+#     backend/ 目錄下啟動，否則程式會直接 fatal。
+#
+#  格式：KEY=VALUE，一行一組；# 或 ; 開頭是註解；逗號分隔表示清單。
+#  鍵比對大小寫敏感。任何「打錯字」或「沒設定」都不會報錯，而是安靜地
+#  採用下方的預設值 —— 改完設定請以 /healthz 與啟動日誌確認有生效。
+#  沒有熱重載，改完必須重啟後端。
+# ============================================================
+
+
+# ------------------------------------------------------------
+#  站台名稱
+# ------------------------------------------------------------
+# 這三行決定全站的三種長度。站名是在**送出頁面時**由後端代入 HTML 與
+# PWA manifest，因此改完只需重啟後端，不必重新建置前端。
+# 佔位符必須放在樣式區塊之外，否則內嵌樣式的 SHA-256 授權會失效，
+# 症狀是「整頁沒有版面，且沒有任何錯誤訊息」。
+FORUM_NAME=SB 論壇
+# 留空＝沿用 FORUM_NAME。用於導覽列標誌與後臺麵包屑。
+FORUM_SHORT_NAME=SB
+# 留空＝沿用 FORUM_NAME。用於 manifest 的 description（安裝提示會用到）。
+FORUM_DESCRIPTION=SB 匿名論壇。
+
+# ------------------------------------------------------------
+#  系統基礎
+# ------------------------------------------------------------
+# 預設 FORUM_forum。刻意帶站台前綴，避免與同網域其他應用共用 cookie 名稱。
+COOKIE_NAME=forum_forum
+
+# **滑動**續期，所以這個值是「閒置多久後登入失效」，不是登入後的絕對上限。
+SESSION_EXPIRE_HOURS=72
+
+# 對外以 HTTPS 服務時必須為 true（同時是 HSTS 標頭的送出依據）。
+# 本機開發走 http:// 必須維持 false，否則瀏覽器會丟棄 cookie 而「登不進去」。
+COOKIE_SECURE=false
+
+# net/http 的 host:port；以 ":" 開頭代表綁定所有介面。
+SERVER_PORT=:8088
+
+# 站台對外網址。會作為 TRUSTED_ORIGINS 的預設來源。
+# 部署時務必改成實際網域（含 https://），尾斜線會被自動去掉。
+PUBLIC_BASE_URL=http://localhost:8088
+
+# 允許變更狀態的請求來源（CSRF 白名單）。**留空等於關閉 CSRF 防護** ——
+# 沒有白名單時所有來源都視為可信。本機開發要把 localhost 與 127.0.0.1 都列進去。
+TRUSTED_ORIGINS=http://localhost:8088,http://127.0.0.1:8088
+
+# ------------------------------------------------------------
+#  圖片檔案服務（貼文附圖）
+# ------------------------------------------------------------
+# FILES_SERVER_URL 是後端**上傳時連線的內部位址**；
+# FILES_SERVER_PUBLIC_URL 是寫進回應、讓瀏覽器下載圖片的**對外網址**。
+# 兩者不同＝內外網分離。留空則沿用 FILES_SERVER_URL（沒有分離）。
+FILES_SERVER_URL=http://localhost:7070
+FILES_SERVER_PUBLIC_URL=http://localhost:7070
+
+# 與 files_server/config.conf 的 [upload].token 必須完全相同。
+# 這是全檔唯一也支援環境變數的設定（FILES_SERVER_TOKEN），
+# 供 CI/CD 或容器注入密鑰而不必改寫檔案。
+FILES_SERVER_TOKEN=change_me
+
+# 媒體存取權杖的 Redis 鍵前綴。
+# 必須與 files_server 的 [redis].token_key_prefix 相同，否則上傳會成功但
+# 圖片 GET 一律 401（檔案服務找不到那把 key）。
+# 也要與 session 的 forum:session: 前綴區隔 —— 兩者共用同一個 Redis。
+MEDIA_TOKEN_KEY_PREFIX=forum:token:
+
+# 圖片存取權杖存活秒數。前端在離開頁面時會主動釋放用不到的權杖，
+# 所以這個值可以設得偏短。程式內的兜底值是 2592000（30 天），對正式環境
+# 明顯過長，請務必在此明確設定。
+MEDIA_TOKEN_TTL_SECONDS=60
+
+# ------------------------------------------------------------
+#  速率限制
+# ------------------------------------------------------------
+# 以用戶端 IP 為單位。分三組是因為各端點的單次成本差異極大，混用同一份
+# 額度的結果必然是「要嘛放行上傳轟炸、要嘛把留言一起擋掉」。
+# 超額回 429 並附 Retry-After（秒）。
+# 內容端點只擋非 GET：讀取端點對匿名訪客開放，限流它們會直接壞掉首頁。
+
+# 內容寫入：發文、留言、按讚、檢舉、個人資料修改
+RATE_LIMIT_REQUESTS=10
+RATE_LIMIT_WINDOW_SECONDS=60
+
+# 圖片上傳：會呼叫外部檔案服務並在 Redis 建立存取權杖，全站最貴的操作
+RATE_LIMIT_UPLOAD_REQUESTS=5
+RATE_LIMIT_UPLOAD_WINDOW_SECONDS=60
+
+# OAuth 跳轉：擋掉對授權流程的轟炸與重導向洗版。
+# 這組限流**所有** HTTP 方法 —— 登入跳轉本身就是 GET，
+# 若沿用「放行 GET」的規則，限流會變成完全無作用的死設定。
+RATE_LIMIT_AUTH_REQUESTS=10
+RATE_LIMIT_AUTH_WINDOW_SECONDS=60
+
+# ------------------------------------------------------------
+#  MySQL（utf8mb4 / InnoDB，schema 啟動時自動建立）
+# ------------------------------------------------------------
+# 內含帳密。charset=utf8mb4 是 emoji 能存進去的前提；
+# parseTime=True 讓 DATETIME 直接掃成 time.Time。
+# 換用獨立帳號而非 root，並只授權這個資料庫。
+DB_DSN=forum:change_me@tcp(127.0.0.1:3306)/forum?charset=utf8mb4&parseTime=True&loc=Local
+DB_MAX_OPEN_CONNS=20
+DB_MAX_IDLE_CONNS=5
+DB_CONN_MAX_LIFETIME_MINUTES=5
+
+# ------------------------------------------------------------
+#  Redis（Session 與媒體權杖）
+# ------------------------------------------------------------
+# Redis 掛掉等於所有人被登出，這是刻意的取捨：session 放進 Redis 才能
+# 做到即時撤銷，否則只能等 cookie 過期。
+REDIS_ADDR=127.0.0.1:6379
+REDIS_PASSWORD=
+REDIS_DB=0
+
+# ------------------------------------------------------------
+#  Elasticsearch（貼文全文搜尋）
+# ------------------------------------------------------------
+# **留空＝不啟用**：搜尋自動退回 MySQL 的 LIKE 比對，其餘行為完全不變。
+# 本機開發建議留空，省一個服務。
+ES_URL=
+# 索引名。不可與其他功能的索引同名，否則兩種資料會混在一起。
+# 改了分析器或欄位必須刪掉索引重建，服務不會自動做：
+#   curl -X DELETE http://<es-host>:9200/forum_posts
+# （下次啟動時會以新 mapping 全量重建）
+ES_INDEX=forum_posts
+
+# ------------------------------------------------------------
+#  Google OAuth 2.0（authorization code flow）
+# ------------------------------------------------------------
+# 從 https://console.cloud.google.com/apis/credentials 建立「Web 客戶端」
+# OAuth 客戶端，取得前兩項。第三項必須與該客戶端的授權 redirect URI
+# **完全一致**（http/https、埠、結尾斜線都算）。
+#
+# 本機開發須把 http://localhost:8088/auth/callback 加進 Google Cloud Console
+# 的授權 redirect URI 清單，否則回調會被拒。
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URL=http://localhost:8088/auth/callback
+
+# 可進入後臺的管理員 Email（逗號分隔）。沒有資料庫角色表，也沒有密碼登入，
+# 後臺權限完全由這份白名單決定。
+# 比對大小寫敏感且不做正規化（不轉小寫、不去空白）—— Google 回傳的 email
+# 已是穩定的小寫形式，所以白名單也必須寫成完全相同的小寫樣子，
+# 否則會**靜默失效**（沒有錯誤訊息，只是對方看不到後臺）。
+ALLOWED_ADMIN_EMAIL=
+
+# ------------------------------------------------------------
+#  日誌
+# ------------------------------------------------------------
+# 預設 INFO。WARN 以上預設輸出到 LOG_FILE。
+LOG_LEVEL=INFO
+LOG_FILE=server.log
+# "text"（人眼可讀）或 "json"（給日誌收集系統）。
+LOG_FORMAT=text

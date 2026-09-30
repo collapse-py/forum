@@ -99,14 +99,21 @@ URL 裡都不會出現 email。管理員的身分不看資料庫角色表，只�
 
 ### 1. 準備設定檔
 
-兩個 `config.conf` 都在 `.gitignore` 裡，需要各自建立：
+兩個 `config.conf` 都在 `.gitignore` 裡，必須各自從範本複製出來。範本已提交，
+且不含任何真實憑證：
 
 ```bash
-cp backend/config/config.conf.example backend/config/config.conf   # 若有 example
-cp files_server/config.conf.example files_server/config.conf       # 若有 example
+# Linux / macOS
+cp backend/config/config.conf.example backend/config/config.conf
+cp files_server/config.conf.example  files_server/config.conf
+
+# Windows PowerShell
+Copy-Item backend\config\config.conf.example backend\config\config.conf
+Copy-Item files_server\config.conf.example  files_server\config.conf
 ```
 
-專案沒有內附 `.example` 檔（避免密鑰樣本進版控）。最小可用設定如下。
+兩份範本都附有逐項註解（`backend/config/config.conf.example` 167 行、
+`files_server/config.conf.example` 129 行），以下是最小可用設定。
 
 **`backend/config/config.conf`**
 
@@ -564,8 +571,10 @@ node ../../tools/i18n/verify-catalogs.mjs
 
 誠實記錄現況，避免下次 deploy 時踩到：
 
-- **沒有設定檔範本檔**。`.gitignore` 排除 `config.conf`，所以新環境必須照上面
-  「快速開始」手寫。放一份去密碼化的 `config.conf.example` 進版控會省事很多。
+- **`token_key_prefix` 兩邊不一致的後果很難診斷**。範本已把 `files_server` 的
+  `[redis].token_key_prefix` 對齊成 `forum:token:`，但既有的 `config.conf` 若仍留著
+  舊值（例如 `hpnm:token:`），症狀是「上傳成功、貼文也存得下，但圖片一律 403/401」。
+  兩邊都要是 `forum:token:`，且都要與 session 的 `forum:session:` 前綴區隔。
 - **`npm run dev` 開箱即壞**。沒有 `server.proxy`，相對路徑的 API 請求打不到後端。
 - **兩個 Go 模組版本不一致**：backend 要 1.25、files_server 要 1.26。
 - **`MEDIA_TOKEN_TTL_SECONDS` 的兜底值是 30 天**，對正式環境明顯過長。

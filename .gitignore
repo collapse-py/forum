@@ -1,3 +1,6 @@
+# 設定檔。這個未加路徑的樣式會同時命中 backend/config/config.conf 與
+# files_server/config.conf —— 兩份都含真實憑證，都不該進版控。
+# 對應的 config.conf.example 是去密碼化的範本，刻意**要**進版控。
 config.conf
 data.json
 server.log
