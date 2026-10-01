@@ -254,6 +254,37 @@ export function ForumAdminPage() {
     }
   };
 
+  /*
+   * 置頂／取消置頂。
+   *
+   * 兩件事刻意做成同一支函式：它們是同一個資源的同一個屬性的兩種值，而
+   * 分成兩個函式會讓「按了按鈕之後要重載哪一份資料」有兩份可能 —— 而那
+   * 正是會出現「列表顯示已置頂、但公開頁沒有」的地方。
+   *
+   * 送出的是「目標狀態」而不是「翻轉」：翻轉在連點兩下時會得到相反的結果
+   * （使用者按一下想置頂、再按一下想取消，剛好是對的；但網路重送或使用者
+   * 失去耐心再按一次就變成反的）。目標狀態在重送時冪等。
+   */
+  const togglePin = async (item: AdminPost) => {
+    const next = item.pinned !== true;
+    const ok = await dialog.confirm({
+      title: next ? t('posts.pinTitle') : t('posts.unpinTitle'),
+      message: next ? t('posts.pinMessage') : t('posts.unpinMessage'),
+      confirmLabel: next ? t('posts.pin') : t('posts.unpin'),
+    });
+    if (!ok) return;
+    try {
+      await adminApi(`/api/admin/forum/posts/${item.id}/pin`, { method: 'POST', body: { pinned: next } });
+      toast(next ? t('posts.pinDone') : t('posts.unpinDone'), 'ok');
+      // 重載而不是就地改那一列：置頂會改變**排序**（公開動態的第一頁），
+      // 而後臺的列表是依時間排序的 —— 因此就地改會讓列表的順序與公開頁
+      // 不一致，而那正是使用者接下來要去比對的東西。
+      await reloadPosts();
+    } catch (error) {
+      toast(errorMessage(error, t('posts.pinFailed')), 'error');
+    }
+  };
+
   const deletePost = async (item: AdminPost) => {
     const ok = await dialog.confirm({
       title: t('posts.deleteTitle', { id: item.id }),
@@ -572,6 +603,19 @@ export function ForumAdminPage() {
                         </td>
                         <td>
                           <div className="row-actions">
+                            {/*
+                              置頂鈕的位置在「修改」之前：它改變的是這篇文章
+                              在公開頁的**位置**，而「修改」改變的是內容。從左
+                              到右是「它會出現在哪裡 → 它說什麼 → 要不要刪掉」，
+                              與管理者思考一件事的順序一致。
+                            */}
+                            <button
+                              className={`btn btn--sm${item.pinned === true ? ' btn--primary' : ''}`}
+                              type="button"
+                              onClick={() => void togglePin(item)}
+                            >
+                              {item.pinned === true ? t('posts.unpin') : t('posts.pin')}
+                            </button>
                             <button className="btn btn--sm" type="button" onClick={() => startEditing(item)}>
                               {t('common.edit')}
                             </button>

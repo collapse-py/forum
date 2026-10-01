@@ -31,7 +31,9 @@ import (
 	"forum/forum/auth"
 	"forum/forum/config"
 	"forum/forum/es"
+	"forum/forum/ipban"
 	"forum/forum/logger"
+	"forum/forum/metrics"
 	"forum/forum/session"
 	"net/http"
 	"net/url"
@@ -71,6 +73,17 @@ type Server struct {
 	// 允許為 nil：未在設定檔填 ES_URL 時 NewServer 會讓它保持 nil，
 	// 搜尋則整條走 MySQL LIKE（見 search.go 的降級說明），/healthz 也略過它。
 	es *es.Client
+	// metrics 收集請求統計，供後臺監控頁（/admin/monitor）顯示。
+	// 由 NewServer 建構；持久化（把分鐘彙總寫進 MySQL）不由這裡啟動，
+	// 理由與三個限流器的清理相同 —— 「何時開始有背景工作」是呼叫端的決定，
+	// 由 main 以 Registry.StartFlusher 表達。監控端點是監控資料的主要消費者，
+	// 但 metricsMiddleware 與 handleAdminMonitor 兩處都對 nil 安全。
+	metrics *metrics.Registry
+	// blocks 是 IP 封鎖名單（Redis sorted set）。它與三個限流器是並存的兩個
+	// 機制，理由見 httpapi/blocklist.go 檔頭。
+	// 允許為 nil（測試以 struct literal 構造 Server、或 Redis 未設定時）；
+	// 兩種情況下 withBlocklistHandler 都會直接放行。
+	blocks *ipban.Store
 }
 
 // NewServer 以依賴注入的方式組裝 Server。cfg、db、sessions、redisClient 都由
@@ -84,6 +97,11 @@ type Server struct {
 // 組裝結果，沒有連線要在這裡建立（es.Client 內部是 http.Client，沒有
 // dial），因此在這裡就地建構能讓「設定檔有沒有填 ES_URL」成為唯一的事實來源。
 // 填了就是啟用，沒填 s.es 保持 nil、搜尋退回 MySQL（見 search.go）。
+//
+// 監控統計容器 metrics.Registry 同樣就地建構：它沒有任何外部依賴（不連資料庫、
+// 不連 Redis、不 dial），建構本身只是一個 map 與幾個計數器。把它的參數形狀
+// （保留幾分鐘、追蹤幾條路由）留給呼叫端反而是錯的 —— 那兩個值是「這個規模的
+// 論壇」的常數，不是每個部署點該各自決定的事。
 func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisClient *redis.Client) *Server {
 	srv := &Server{
 		cfg:               cfg,
@@ -93,11 +111,45 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 		uploadRateLimiter: NewRateLimiter(cfg.RateLimitUploadRequests, cfg.RateLimitUploadWindow),
 		authRateLimiter:   NewRateLimiter(cfg.RateLimitAuthRequests, cfg.RateLimitAuthWindow),
 		mediaRedis:        redisClient,
+		// 封鎖名單與 session 與媒體 token 共用同一個 Redis 實例（同一條連線
+		// 池），因此這裡不另外建構連線。
+		blocks: ipban.New(redisClient),
+		metrics: metrics.New(metrics.Options{
+			// 記憶體視窗刻意比資料庫保留期長：頁面重整時看到的是「自上次
+			// 重新整理以來」的完整曲線，而不是只有最後 24 分鐘。時間軸的實際
+			// 長度另由 Snapshot 的 maxTimelinePoints 收斂。
+			WindowMinutes: 120,
+			MaxRoutes:     200,
+		}),
 	}
 	if cfg.ESURL != "" {
 		srv.es = es.New(cfg.ESURL, cfg.ESIndex)
 	}
 	return srv
+}
+
+// Metrics 回傳監控統計容器，供 main 啟動持久化 goroutine 與讀回歷史。
+//
+// 刻意匯出：統計容器的生命週期由 NewServer 開始，但「把分鐘彙總寫進資料庫」
+// 與「啟動時讀回歷史」都是需要資料庫與背景 goroutine 的工作，屬於 main 的職責
+// （與 StartRateLimitCleanup 由 main 呼叫是同一個分工）。若把這兩件事藏進
+// NewServer，Server 就會在建立時啟動 goroutine，而測試每建構一次 Server 就
+// 多一條永遠不會退出的 goroutine。
+//
+// 回傳值可能為 nil（測試以 struct literal 構造 Server），呼叫端必須自行判斷。
+func (s *Server) Metrics() *metrics.Registry {
+	return s.metrics
+}
+
+// Blocks 回傳 IP 封鎖名單的存取層，供 main 啟動過期清理。
+//
+// 與 Metrics 同一個理由：清理是有背景工作的，而「何時開始有背景工作」屬於
+// 呼叫端的決定，不該由 NewServer 偷偷啟動 goroutine（否則每建構一次 Server
+// 就多一條永遠不會退出的 goroutine）。
+//
+// 回傳值可能為 nil（測試以 struct literal 構造 Server），呼叫端必須自行判斷。
+func (s *Server) Blocks() *ipban.Store {
+	return s.blocks
 }
 
 // StartRateLimitCleanup 為三個限流器啟動定期清理的背景 goroutine。
@@ -160,17 +212,22 @@ func (s *Server) rateLimitAllMethods(limiter *RateLimiter, next http.HandlerFunc
 //
 // 把判斷集中在這裡（而不是複製到兩個函式）是為了讓「哪些端點該用哪一個」
 // 成為唯一需要決定的事：內容端點用 rateLimit，GET 端點用 rateLimitAllMethods。
+//
+// 封鎖檢查在這一層**之下**（withBlocklistHandler 先於 limiter.Middleware 執行，
+// 理由見 blocklist.go）：它必須涵蓋與限流完全相同的那組路由，否則會出現
+// 「被封鎖的人仍可從某條沒掛封鎖的路由寫入」。讓它們由同一個函式組裝就是
+// 為了杜絕那種不同步。
 func (s *Server) applyRateLimit(limiter *RateLimiter, next http.HandlerFunc, skipGet bool) http.HandlerFunc {
 	if limiter == nil {
 		return next
 	}
 	if !skipGet {
-		return limiter.Middleware(next)
+		return withBlocklistHandler(limiter, s.blocks, next)
 	}
 	// 走 limiter.Middleware 的完整流程（含 Retry-After 與 429），
 	// 因此包一層只做方法判斷，而不是自己呼叫 Allow —— 那樣會漏掉
 	// Retry-After 的計算與取整。
-	limited := limiter.Middleware(next)
+	limited := withBlocklistHandler(limiter, s.blocks, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			next(w, r)
@@ -342,8 +399,8 @@ func (s *Server) Handler() http.Handler {
 
 	/*
 		路由總表。中介層以「包裹 handler」的方式套用，實際執行順序由外而內為
-		SecurityHeaders → Refresh → LoggingMiddleware → ServeMux 路由比對 →
-		路由上掛的中介層 → handler。
+		SecurityHeaders → Refresh → LoggingMiddleware → metricsMiddleware →
+		ServeMux 路由比對 → 路由上掛的中介層 → handler。
 
 		基礎設施（不需認證）
 		  /healthz                        handleHealth
@@ -374,6 +431,18 @@ func (s *Server) Handler() http.Handler {
 		  /api/admin/forum/search         handleAdminForumSearch（含作者 email 精確比對）
 		  /api/admin/users[/{...}]        handleAdminUsers / handleAdminUser
 		  /api/admin/tags[/{...}]         handleAdminTags / handleAdminTag
+		  /api/admin/monitor              handleAdminMonitor（依賴狀態 + 請求統計）
+		  /api/admin/log                  handleAdminLog（管理員操作稽核紀錄查詢）
+		  /api/admin/stats                handleAdminStats（內容趨勢統計）
+		  /api/admin/export/*.csv         handleAdminExport*（CSV 匯出，附 Content-Disposition）
+		  /api/admin/batch/tags           handleAdminBatchTags（批次覆寫標籤，每人一筆稽核）
+		  /api/admin/batch/status         handleAdminBatchStatus（批次停權／復原，每人一筆稽核）
+		  /api/admin/sessions             handleAdminSessions（列出活躍 session，只給 token 前綴）
+		  /api/admin/sessions/revoke      handleAdminRevokeSessions（強制登出）
+		  /api/admin/blocks               handleAdminBlocks（IP 封鎖名單；GET 列出、POST 封鎖／解封）
+		  /api/forum/announcement         handleForumAnnouncement（公開：目前生效的公告，無則 announcement:null）
+		  /api/admin/announcements[/{id}] handleAdminAnnouncements / handleAdminAnnouncement（後臺公告）
+		  /api/admin/forum/posts/{id}/pin handleAdminPostOrPin → handleAdminPostPin（置頂／取消置頂）
 
 		靜態頁面與資產（見下方各路由的個別說明）
 		  /forum-manifest.json、/service-worker.js、/admin*、/assets/、
@@ -453,7 +522,13 @@ func (s *Server) Handler() http.Handler {
 	// 真正的攻擊者 —— 攻擊者拿到管理員 session 之前就已經能打普通端點了。
 	// 這裡的風險控管手段是授權檢查，不是速率限制。
 	mux.HandleFunc("/api/admin/forum/posts", s.handleAdminForumPosts)
-	mux.HandleFunc("/api/admin/forum/posts/", s.handleAdminForumPost)
+	// 這條前綴同時服務 /api/admin/forum/posts/{id}（修改／刪除）與
+	// /api/admin/forum/posts/{id}/pin（置頂），因此掛的是分流用的
+	// handleAdminPostOrPin 而非 handleAdminForumPost —— 理由見該函式的說明。
+	// 特別注意：同一個樣板**不能**註冊兩次，Go 1.22 起的 ServeMux 會在啟動時
+	// 直接 panic（conflicts with pattern），而症狀是「行程一啟動就死、
+	// 日誌停在最後一行」，不會有任何 HTTP 層的錯誤訊息。
+	mux.HandleFunc("/api/admin/forum/posts/", s.handleAdminPostOrPin)
 	mux.HandleFunc("/api/admin/forum/comments", s.handleAdminForumComments)
 	mux.HandleFunc("/api/admin/forum/comments/", s.handleAdminForumComment)
 	mux.HandleFunc("/api/admin/forum/reports", s.handleAdminForumReports)
@@ -465,6 +540,50 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/admin/users/", s.handleAdminUser)
 	mux.HandleFunc("/api/admin/tags", s.handleAdminTags)
 	mux.HandleFunc("/api/admin/tags/", s.handleAdminTag)
+	// 監控端點。與其他 /api/admin/* 相同：路由層不掛認證中介層，權限由
+	// handler 內的 requireAdminForum 把關（理由見上方註解）。
+	//
+	// 刻意不掛 rateLimitAllMethods：它每十秒被監控頁輪詢一次，是這台機器上
+	// 最規則的合法流量。限流它只會在真正出事時多一條混淆的訊息。
+	mux.HandleFunc("/api/admin/monitor", s.handleAdminMonitor)
+	// 管理員操作稽核紀錄（唯讀查詢）。與其他 /api/admin/* 相同：路由層不掛認證
+	// 中介層，權限由 handler 內的 requireAdminForum 把關。
+	//
+	// 刻意沒有限流：它是管理員點擊才發出的低頻請求，與監控頁的十秒輪詢不同。
+	// 限流它的唯一效果是「稽核紀錄打不開」—— 那個頁面正是事故時第一個該看的
+	// 地方，在那個時刻擋下它是最壞的取捨。
+	mux.HandleFunc("/api/admin/log", s.handleAdminLog)
+	// 內容趨勢統計。唯讀、刻意不限流（理由同 /api/admin/log）。
+	mux.HandleFunc("/api/admin/stats", s.handleAdminStats)
+	// CSV 匯出。三條路由刻意各自獨立而不是用一個 ?kind= 參數：它們的
+	// 欄位、查詢與上限都不同，而一個共用 handler 會讓「匯出哪一份」變成
+	// 一個執行期才決定的分支，讀碼時看不出每份匯出到底送了什麼。
+	// 檔名以 .csv 結尾是為了讓 ServeMux 的「完全比對」不會吃掉子路徑
+	// （見下方關於比對樣式的說明）。
+	mux.HandleFunc("/api/admin/export/users.csv", s.handleAdminExportUsers)
+	mux.HandleFunc("/api/admin/export/posts.csv", s.handleAdminExportPosts)
+	mux.HandleFunc("/api/admin/export/reports.csv", s.handleAdminExportReports)
+	// 批次操作。POST 才有語意，路由層掛一個空 handler 是為了讓非 POST 得到
+	// 405 而不是落到 catch-all 的 404（「這條路由存在但方法不對」比
+	// 「沒有這條路由」誠實）。
+	mux.HandleFunc("/api/admin/batch/tags", s.handleAdminBatchTags)
+	mux.HandleFunc("/api/admin/batch/status", s.handleAdminBatchStatus)
+	// Session 管理。刻意**不**掛在 rateLimitAllMethods 下，理由同其他
+	// /api/admin/*：限流它的唯一效果是在「有人疑似被盜帳號、需要立刻
+	// 強制登出」的那一刻把後臺打不開。
+	mux.HandleFunc("/api/admin/sessions", s.handleAdminSessions)
+	mux.HandleFunc("/api/admin/sessions/revoke", s.handleAdminRevokeSessions)
+	// IP 封鎖名單。刻意**不**掛在 rateLimitAllMethods 下：那會讓管理員在
+	// 處理一個正在發生的濫用時被自己正在用的功能擋住。
+	// 站內公告。公開的那一支刻意放在 /api/forum/ 下（與其他公開讀取同一個
+	// 命名空間），而且**不掛限流**：它是每個頁面載入都會打一次的低成本查詢，
+	// 限流它的唯一效果是「公告機制壞掉時連診斷都做不了」。
+	mux.HandleFunc("/api/forum/announcement", s.handleForumAnnouncement)
+	mux.HandleFunc("/api/admin/announcements", s.handleAdminAnnouncements)
+	mux.HandleFunc("/api/admin/announcements/", s.handleAdminAnnouncement)
+	// IP 封鎖名單。刻意**不**掛在 rateLimitAllMethods 下：那會讓管理員在
+	// 處理一個正在發生的濫用時被自己正在用的功能擋住。
+	mux.HandleFunc("/api/admin/blocks", s.handleAdminBlocks)
 
 	// 下列 /forum/* 靜態路由都同時註冊「不帶尾斜線」與「帶尾斜線」兩個樣式，
 	// 並在 handler 內手動比對 r.URL.Path。這是 Go 1.22+ ServeMux 語意的必然結果：
@@ -508,6 +627,68 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-report.html"))
+	})
+	mux.HandleFunc("/admin/monitor", func(w http.ResponseWriter, r *http.Request) {
+		// 監控儀表板。防禦性比對與另外兩個 /admin 樣式相同：這些樣式是
+		// 「完全比對」，/admin/monitor/ 不會進來（會落到 catch-all 的靜態
+		// 檔處理而拿到 404），保留比對是為了日後有人改成子樹比對時，未定義
+		// 的子路徑仍然被擋成 404。
+		if r.URL.Path != "/admin/monitor" && r.URL.Path != "/admin/monitor/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-monitor.html"))
+	})
+	mux.HandleFunc("/admin/log", func(w http.ResponseWriter, r *http.Request) {
+		// 管理員操作稽核紀錄頁。防禦性比對同 /admin/monitor。
+		if r.URL.Path != "/admin/log" && r.URL.Path != "/admin/log/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "audit-log.html"))
+	})
+	mux.HandleFunc("/admin/stats", func(w http.ResponseWriter, r *http.Request) {
+		// 內容趨勢統計頁。防禦性比對同 /admin/monitor。
+		if r.URL.Path != "/admin/stats" && r.URL.Path != "/admin/stats/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-stats.html"))
+	})
+	mux.HandleFunc("/admin/export", func(w http.ResponseWriter, r *http.Request) {
+		// 匯出與批次操作頁。防禦性比對同 /admin/monitor。
+		// 路由名刻意不含「csv」：/admin/export 是頁面，而 /api/admin/export/*.csv
+		// 是下載。兩者若同名，ServeMux 的最長前綴比對會讓頁面路由吃掉下載
+		// 路由（或反過來），症狀是下載得到一個 HTML 頁。
+		if r.URL.Path != "/admin/export" && r.URL.Path != "/admin/export/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "export.html"))
+	})
+	mux.HandleFunc("/admin/sessions", func(w http.ResponseWriter, r *http.Request) {
+		// 登入與 Session 管理頁。防禦性比對同 /admin/monitor。
+		if r.URL.Path != "/admin/sessions" && r.URL.Path != "/admin/sessions/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "sessions.html"))
+	})
+	mux.HandleFunc("/admin/blocks", func(w http.ResponseWriter, r *http.Request) {
+		// IP 封鎖名單頁。防禦性比對同 /admin/monitor。
+		if r.URL.Path != "/admin/blocks" && r.URL.Path != "/admin/blocks/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "blocks.html"))
+	})
+	mux.HandleFunc("/admin/announcements", func(w http.ResponseWriter, r *http.Request) {
+		// 站內公告管理頁。防禦性比對同 /admin/monitor。
+		if r.URL.Path != "/admin/announcements" && r.URL.Path != "/admin/announcements/" {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "announcements.html"))
 	})
 	assetServer := http.FileServer(http.Dir(frontendAssetsRoot(frontendDir)))
 	mux.Handle("/assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -568,7 +749,14 @@ func (s *Server) Handler() http.Handler {
 	// 指向自己，形成無限遞迴並在第一個請求就 stack overflow。
 	// 這個錯誤不會被編譯器抓到，只有真的送出請求才會爆，因此以不同名字
 	// 分開三層是刻意的防呆。
-	logged := logger.LoggingMiddleware(mux, s.sessions.ResolveUser)
+	//
+	// metricsMiddleware 的位置：LoggingMiddleware 的內側、mux 的外側。
+	//   - 在 LoggingMiddleware 內側 → 沿用它已經包好的 StatusWriter，不必
+	//     再寫一份只為取得狀態碼的包裝（見 monitoring.go 的說明）。
+	//   - 在 mux 外側 → 每個請求（含靜態資產與 404）都會被計入，且計到的
+	//     狀態碼是「mux 最終寫出的那一個」，包含 catch-all 靜態檔的結果。
+	observed := s.metricsMiddleware(mux)
+	logged := logger.LoggingMiddleware(observed, s.sessions.ResolveUser)
 	refreshed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 滑動式過期：每個請求都延長一次 session TTL，並重寫 cookie，
 		// 使用者持續使用就不會被登出。

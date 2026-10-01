@@ -76,23 +76,75 @@ import (
 
 // RateLimiter 是以滑動視窗日誌為基礎的行程內限流器，欄位語意如下：
 //
-//	mu     保護 hits 的鎖。鎖定範圍是 Allow 與 Cleanup 中「剔除過期 → 計數 →
-//	       追加」的整段，不可只鎖其中一步，否則會出現同時放行超過上限的情形。
+//	mu     保護 hits 與 allowed/blocked 計數的鎖。鎖定範圍是 Allow 與 Cleanup
+//	       中「剔除過期 → 計數 → 追加」的整段，不可只鎖其中一步，否則會出現
+//	       同時放行超過上限的情形。
 //	hits   用戶端 key 到「最近 window 內各次請求時間戳」的對應，slice 依
 //	       時間由舊到新排列。剔除時複用同一個底層陣列（times[:0]），因此
 //	       每次請求不會造成新的配置。
 //	limit  單一視窗內允許的最大請求數。
 //	window 滑動視窗的長度。
 //	now    取當前時間的函式，建構後固定指向 time.Now，除非測試以 setClock 換掉。
+//	allowed/blocked 允許與被拒絕的累計次數，供監控頁顯示。它們與 hits 共用
+//	       同一把鎖而不是用 atomics：允許／阻擋的計數只在 Allow 內發生，而
+//	       Allow 本來就必須持有 mu，因此多一對 atomics 只會讓「這兩個數字
+//	       與 hits 是否一致」變成一個需要推理的問題。
 //
 // limit、window 與 now 三個欄位在建構後皆不再變更（setClock 僅限測試使用），
-// 可安全地被多個 goroutine 併發讀取。hits 與 mu 則由所有存取路徑的鎖保護。
+// 可安全地被多個 goroutine 併發讀取。hits、allowed/blocked 與 mu 則由所有
+// 存取路徑的鎖保護。
 type RateLimiter struct {
-	mu     sync.Mutex
-	hits   map[string][]time.Time
-	limit  int
-	window time.Duration
-	now    func() time.Time
+	mu      sync.Mutex
+	hits    map[string][]time.Time
+	allowed uint64
+	blocked uint64
+	limit   int
+	window  time.Duration
+	now     func() time.Time
+}
+
+// LimiterStats 是限流器可供觀察的累計計數。
+type LimiterStats struct {
+	// Allowed 是本次啟動以來被放行的請求數。
+	Allowed uint64
+	// Blocked 是本次啟動以來因超出額度而被拒絕（回 429）的請求數。
+	Blocked uint64
+}
+
+// Stats 回傳目前的累計計數，並以一份快照的形式一次取得兩個值。
+//
+// 兩個值刻意在同一把鎖內讀出：分開呼叫兩次會得到「可能對不上」的組合
+// （允許數已更新、阻擋數還沒），而儀表板上並排顯示的兩個數字必須彼此一致。
+func (rl *RateLimiter) Stats() LimiterStats {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return LimiterStats{Allowed: rl.allowed, Blocked: rl.blocked}
+}
+
+// Limit 回傳單一視窗內允許的最大請求數。建構後固定不變，可無鎖讀取。
+func (rl *RateLimiter) Limit() int {
+	return rl.limit
+}
+
+// Window 回傳滑動視窗長度。建構後固定不變，可無鎖讀取。
+func (rl *RateLimiter) Window() time.Duration {
+	return rl.window
+}
+
+// TrackedKeys 回傳目前 map 中的 key 數量，並在讀取期間持有 mu。
+//
+// 存在的理由：StartCleanup 會讓背景 goroutine 與呼叫端同時觸及 hits。
+// 測試若直接讀 len(rl.hits) 就是未同步的存取，`go test -race` 會報出資料
+// 競爭 —— 而且那不是誤報，是真的競爭。正式程式碼若要觀察限流狀態（例如
+// 監控頁的 metrics）也應走這個方法，不要直接碰 hits。
+//
+// 這個數字是「記憶體裡正在被追蹤的用戶端數」，不是「曾經出現過的使用者數」：
+// 已無視窗內紀錄的 key 會被 Cleanup 刪掉，因此它同時也是限流器記憶體佔用
+// 的直接指標 —— 這個值一路上升就代表 Cleanup 沒跟上（見檔頭的成長說明）。
+func (rl *RateLimiter) TrackedKeys() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return len(rl.hits)
 }
 
 // NewRateLimiter 建立限流器。limit 與 window 若為非正值會被改用預設值
@@ -114,18 +166,6 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 		// 留 nil 會在第一個請求就 panic。
 		now: time.Now,
 	}
-}
-
-// trackedKeys 回傳目前 map 中的 key 數量，並在讀取期間持有 mu。
-//
-// 存在的理由：StartCleanup 會讓背景 goroutine 與呼叫端同時觸及 hits。
-// 測試若直接讀 len(rl.hits) 就是未同步的存取，`go test -race` 會報出資料
-// 競爭 —— 而且那不是誤報，是真的競爭。正式程式碼若要觀察限流狀態（例如
-// 健康檢查或除錯用的 metrics）也應走這個方法，不要直接碰 hits。
-func (rl *RateLimiter) trackedKeys() int {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	return len(rl.hits)
 }
 
 // setClock 替換取時間的函式，只為讓測試能確定性地推進視窗邊界。
@@ -165,16 +205,19 @@ func (rl *RateLimiter) Allow(key string) (bool, time.Duration) {
 		//（NewRateLimiter 已兜底）。留一個防禦性分支只是避免日後有人放寬
 		// limit 的下限時在這裡 panic。
 		if len(kept) == 0 {
+			rl.blocked++
 			return false, rl.window
 		}
 		// 最早滑出視窗的時刻 = 最老一筆記錄 + window。減去 now 就是還要等多久。
 		// 這個差值恆為正：kept 裡每一筆都滿足 ts.After(cutoff)，而 cutoff = now - window。
+		rl.blocked++
 		return false, kept[0].Add(rl.window).Sub(now)
 	}
 	// 通過時才追加本次時間戳。被拒絕的請求不記錄，因此不會延長封鎖時間 ——
 	// 使用者最多等過最早的紀錄滑出視窗就可再次通過，不會因持續重試而被
 	// 永久鎖住。
 	rl.hits[key] = append(kept, now)
+	rl.allowed++
 	return true, 0
 }
 

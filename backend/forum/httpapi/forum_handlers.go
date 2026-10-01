@@ -115,6 +115,9 @@ import (
 //	              避免為了顯示計數而額外請求一次留言列表。
 //	ImageURL     由庫中檔名組出的公開網址（已附加 token）；無圖時為空字串，
 //	             因 omitempty 而省略。
+//	Pinned       是否為管理員置頂。省略未置頂的（false + omitempty）而不是恆
+//	             送出 false，讓「一般的貼文」在 JSON 裡沒有這個欄位 —— 那是
+//	             佔多數的情況，不該讓它們的每筆回應都多一個欄位。
 type forumPost struct {
 	ID           int64     `json:"id"`
 	Author       string    `json:"author"`
@@ -124,6 +127,7 @@ type forumPost struct {
 	CreatedAt    time.Time `json:"createdAt"`
 	LikeCount    int       `json:"likeCount"`
 	Liked        bool      `json:"liked"`
+	Pinned       bool      `json:"pinned,omitempty"`
 	CommentCount int       `json:"commentCount"`
 	ImageURL     string    `json:"imageUrl,omitempty"`
 }
@@ -212,13 +216,26 @@ func (s *Server) handleForumPosts(w http.ResponseWriter, r *http.Request) {
 // 追蹤狀態刻意不在這裡：它是「頁面層的一次查詢結果」（見 forum_follow_handlers.go
 // 的 handleForumFollows），不是每篇貼文的屬性。放進這個投影會讓三個查詢各多一
 // 個相關子查詢，卻換不來任何好處 —— 同一頁的追蹤清單只讀一次就夠了。
-const forumPostProjection = `fp.id, fp.author_email, fp.content, fp.created_at, fp.image_url,
+const forumPostProjection = `fp.id, fp.author_email, fp.content, fp.created_at, fp.image_url, fp.pinned,
 		(SELECT COUNT(*) FROM forum_post_likes WHERE post_id = fp.id) AS like_count,
 		(SELECT COUNT(*) FROM forum_post_comments WHERE post_id = fp.id) AS comment_count,
 		CASE WHEN EXISTS (
 		    SELECT 1 FROM forum_post_likes
 		    WHERE post_id = fp.id AND author_email = ?
 		) THEN 1 ELSE 0 END AS liked_by_me`
+
+// forumPostFeedOrder 是公開動態的排序。
+//
+// pinned DESC 在最前面，因此「置頂」對首頁是有效的（置頂的文章永遠在第一頁，
+// 不會被新文章擠到第二頁去）。c1/c2 分開寫而不合併成 `c1 DESC, c2 DESC`：
+// 兩種寫法在這個 MySQL 版本上等價，而分開寫讓「三欄都遞減」這件事一眼看得出來
+// —— 而它必須與 idx_forum_posts_feed 的定義完全一致，否則查詢最佳化器會判定
+// 索引用不上而退回 filesort（正確但慢，且這正是加索引要避免的）。
+//
+// 追蹤動態（handleForumFollowingPosts）刻意用**同一個**排序：兩個動態的
+// 置頂語意若不一致，會出現「這篇在我的首頁置頂、在某人的首頁不置頂」而沒有人
+// 能解釋那個差異。
+const forumPostFeedOrder = `fp.pinned DESC, fp.created_at DESC, fp.id DESC`
 
 // errMediaTokenUnavailable 表示簽發圖片存取 token 失敗（通常是 Redis 不可用）。
 //
@@ -249,7 +266,7 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+forumPostProjection+`
 		FROM forum_posts fp `+condition+`
-		ORDER BY fp.created_at DESC, fp.id DESC LIMIT ? OFFSET ?`, args...)
+		ORDER BY `+forumPostFeedOrder+` LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		// 先記錄原始錯誤再回通用訊息：使用者不需要知道是哪一段 SQL 失敗，
 		// 但維運需要看到足以定位的資訊。
@@ -267,13 +284,14 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 	for rows.Next() {
 		var post forumPost
 		// CASE WHEN EXISTS 的結果以 0/1 呈現，MySQL 沒有原生布林型別。
-		var liked int
-		if err := rows.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL, &post.LikeCount, &post.CommentCount, &liked); err != nil {
+		var liked, pinned int
+		if err := rows.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL, &pinned, &post.LikeCount, &post.CommentCount, &liked); err != nil {
 			logger.ErrorfContext(ctx, "[FORUM] 讀取文章失敗: %v", err)
 			return nil, err
 		}
 
 		post.Liked = liked == 1
+		post.Pinned = pinned == 1
 		// 先把庫值（純檔名）取出來，並用它判斷「這頁有沒有圖」：舊資料若存的是
 		// 無法辨識的值，這裡會得到空字串，而不會為了它去簽發一個沒人用得到的
 		// token。token 延遲到真的有圖片時才簽發，純文字頁完全不碰 Redis。

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go）。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>站內公告｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 站內公告管理（/admin/announcements）樣式
+       *
+       * 共用層在 /style.css。本區塊只放這一頁自己的東西。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 發佈表單 --------------------------------------------------------
+       * 內容欄是 textarea 而不是 input：公告是段落，input 會讓它變成單行且
+       * 在 300 字的長度下完全無法編輯。
+       * ------------------------------------------------------------------ */
+      .announce-form {
+        display: grid;
+        gap: 14px;
+      }
+
+      .announce-form__row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 14px;
+        align-items: end;
+      }
+
+      .announce-form__row .field {
+        flex: 1 1 200px;
+        min-width: 0;
+      }
+
+      /* 文字計數貼在欄位的 hint 列右側。刻意顯示而不是在超過時才出現：
+         讓管理員在打到 250 字時就知道還剩多少，比在 301 字時被拒更好。 */
+      .announce-counter {
+        margin-left: auto;
+        color: var(--ink-3);
+        font-size: 11px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .announce-counter--over {
+        color: var(--danger);
+      }
+
+      /* --- 公告清單 --------------------------------------------------------
+       * 每一列是一則公告，而它可能是「開著」「停用」「過期」三種狀態之一。
+       * 狀態用 badge 而不是開關，是因為「停用」是個有後果的動作（它立刻影響
+       * 每一個訪客），而開關的滑動手感會讓人覺得它可逆。
+       * ------------------------------------------------------------------ */
+      .announce-table {
+        min-width: 720px;
+      }
+
+      .announce-table th {
+        text-align: start;
+      }
+
+      .announce-body {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        color: var(--ink);
+        font-size: 12.5px;
+        line-height: 1.55;
+        /* 公告的內文是管理員寫的純文字，保留換行 —— 一則有兩段落的公告
+           被壓成一行會改變它的意思。 */
+        white-space: pre-line;
+      }
+
+      .announce-table__author {
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        color: var(--ink-2);
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-announcements.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-announcements.tsx"></script>
+  </body>
+</html>

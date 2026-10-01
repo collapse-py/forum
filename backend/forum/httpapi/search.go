@@ -339,11 +339,16 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 	mediaToken := ""
 	for rows.Next() {
 		var post forumPost
-		var liked int
-		if err := rows.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL, &post.LikeCount, &post.CommentCount, &liked); err != nil {
+		// pinned 與 liked 一样以 0/1 讀入（MySQL 沒有原生布林），理由見
+		// forum_handlers.go 的 loadForumPosts。
+		var liked, pinned int
+		if err := rows.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL, &pinned, &post.LikeCount, &post.CommentCount, &liked); err != nil {
 			return nil, err
 		}
 		post.Liked = liked == 1
+		// 搜尋結果也帶 pinned：使用者從搜尋找到一篇置頂文章時，應看到與首頁
+		// 相同的徽章。少了它，同一篇文章在兩個地方會長得不一樣。
+		post.Pinned = pinned == 1
 		imageName := s.forumImageFileName(post.ImageURL)
 		if imageName != "" && mediaToken == "" {
 			token, err := s.createMediaToken(r.Context())

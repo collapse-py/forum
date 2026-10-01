@@ -267,6 +267,111 @@ body {
 }
 
 /*
+ * 站內公告橫幅（src/forum/AnnouncementBanner.tsx）。
+ *
+ * 放在 style.css 而不是 forum.html 的 <style>：它出現在**每一個**公開頁
+ * （首頁、追蹤、profile、others-profile），而那些頁面各自的 <style> 只服務
+ * 自己那一頁的特有元素 —— 把共用元素放進某一頁的樣式區塊，會讓另外四個
+ * 頁面拿到未定義的樣式（而症狀是那四頁的橫幅沒有邊框，難以追查）。
+ *
+ * 這與後台頁的 .panel / .table 是同一個理由：跨頁共用的東西屬於 style.css。
+ */
+.announce {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 13px 15px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  /* 淡藍底而不是白色：它必須一眼與「內容」區分開，但不該用警告色 ——
+     公告是日常的站方訊息，不是錯誤。 */
+  background: #f2f6ff;
+  color: var(--ink);
+}
+
+/* 深色底下要換成深色的提示底，否則白字落在淺藍上會看不見。 */
+@media (prefers-color-scheme: dark) {
+  .announce {
+    background: #16233b;
+  }
+}
+
+.announce__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.announce__label {
+  margin: 0 0 4px;
+}
+
+/* 「站方公告」標籤。它存在的唯一理由是讓使用者知道這段文字來自站方 ——
+   一則要求點連結的文字若沒有出處，使用者沒有理由信任它。 */
+.announce__tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.announce__text {
+  margin: 0;
+  /* pre-line 保留管理員打的換行，但不保留連續空行 —— 空行是打字時的副產品，
+     不是排版意圖。 */
+  white-space: pre-line;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.announce__meta {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.announce__close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.announce__close:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/*
+ * 置頂徽章（src/forum/PostCard.tsx）。
+ *
+ * 與 .author-tag 刻意不同形狀：那一個是圓角藥丸（標籤是身分），這一個是
+ * 直角小標（置頂是這篇文章的狀態）。兩者若長得太像，使用者會把「置頂」
+ * 當成一個可以被移除的標籤，而它不能 —— 只能在後臺取消。
+ */
+.pinned {
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 800;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
+/*
  * 個人資料頁的外框。這一組同時出現在 /forum/profile（自己的資料，可編輯）與
  * /forum/others-profile（公開資料，唯讀），因此是共用樣式；只有「編輯」與
  * 「唯讀內容」本身分別寫在那兩頁的 <style> 裡。
@@ -612,6 +717,20 @@ body {
 .post-identity time {
   color: var(--muted);
   font-size: 12px;
+}
+
+/*
+ * 置頂徽章與時間的容器（src/forum/PostCard.tsx）。
+ *
+ * 這個 class 存在的原因是 .post-identity 是 flex-direction: column —— 徽章與
+ * <time> 若是它的直接子元素，會各自佔一行，徽章就會孤零零地掛在作者名下面。
+ * 橫向的容器才能讓它們真的並排。
+ */
+.post-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .avatar-link,

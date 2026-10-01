@@ -39,6 +39,23 @@ URL 裡都不會出現 email。管理員的身分不看資料庫角色表，只�
 - **Redis 版可撤銷 Session**：滑動續期，Redis 掛掉等於全部登入失效
 - **管理後台**：貼文／留言 CRUD、檢舉佇列裁決（通過即刪除對象、駁回保留）、
   帳號停權與復原、使用者標籤字典與指派、以使用者身分代發文
+- **系統監控**：`/admin/monitor` 顯示 MySQL／Redis／搜尋引擎狀態、Go 執行期用量、
+  依正規化路由統計的請求量與延遲分位數、限流器計數，以及分鐘級流量圖
+  （記憶體內 120 分鐘 + 資料庫保留 24 小時，重啟後時間軸不會歸零）
+- **管理員操作稽核**：`/admin/log` 記錄後臺每一項會改變資料的操作，包含欄位級
+  diff（哪個欄位從什麼變成什麼）。稽核寫入與操作在同一個交易裡，因此不會出現
+  「操作發生但沒有紀錄」；保留 90 天，沒有任何刪除紀錄的 API
+- **內容趨勢統計**：`/admin/stats` 顯示每日新增的使用者／文章／留言、視窗內合計，
+  以及熱門文章、熱門標籤、活躍作者三份排行。視窗 7～90 天可切換
+- **匯出與批次**：`/admin/export` 提供使用者／文章／檢舉三份 CSV（對公式注入
+  有防護），用戶管理頁可多選後批次停權、批次套標籤
+- **登入與 Session 管理**：`/admin/sessions` 列出目前仍有效的登入狀態（只顯示
+  token 前 8 個字元），可強制登出某個帳號的所有裝置。Session 的建立時間從
+  這個功能開始才會記錄，既有 session 顯示為「未知」
+- **IP 封鎖**：`/admin/blocks` 把確認濫用的來源位址加進存在 Redis 的封鎖名單
+  （跨行程、跨重啟都存活），並可隨時解除。刻意**不會**自動封鎖
+- **站內公告與置頂**：`/admin/announcements` 發佈全站橫幅（同時只有一則生效），
+  公開頁首頁最上方顯示；文章可在「論壇文章」管理頁逐篇置頂
 - **Elasticsearch 全文搜尋**：`ES_URL` 留空則自動退回 MySQL `LIKE`
 - **PWA**：可安裝、有 service worker 與 manifest，頁面 network-first、
   靜態資源 cache-first
@@ -56,8 +73,11 @@ URL 裡都不會出現 email。管理員的身分不看資料庫角色表，只�
    PWA             │                                          │
    /forum          │  httpapi/  路由、中介層、security headers  │
    /admin          │  auth/     Google OAuth2                  │
-                   │  session/  Redis session                  │
-                   │  data/     MySQL + MigrateMySQL           │
+│  session/  Redis session                  │
+                    │  ipban/    IP 封鎖名單（Redis sorted set）  │
+                    │  metrics/  請求統計、分鐘彙總持久化         │
+                    │  audit/    管理員操作稽核、依時間清理        │
+                    │  data/     MySQL + MigrateMySQL           │
                    │  es/       Elasticsearch（選用）           │
                    │  ─ 服務 frontend/dist/ 的靜態檔案 ─      │
                    └───────┬──────────────────┬───────────────┘
@@ -258,10 +278,24 @@ go build .
 | `LOG_LEVEL` | `INFO` | |
 | `LOG_FILE` | `server.log` | |
 | `LOG_FORMAT` | `text` | 或 `json` |
+| `MONITOR_RETENTION_HOURS` | `24` | 監控分鐘彙總在資料庫保留幾小時；非正值會退回 24 |
+| `AUDIT_RETENTION_DAYS` | `90` | 稽核紀錄保留幾天；非正值會退回 90 |
 
 三組限流預設值刻意不同，反映各端點的真實成本；`applyDefaults` 對「空值或非正數」
 補值，因此無法用設定檔把某個視窗設成 0 秒（那會讓限流失效）。布林值接受
 `1` / `true` / `yes` / `on`（不分大小寫）。
+
+`MONITOR_RETENTION_HOURS` 決定 `forum_request_metrics` 留多久（過期列由
+`metrics` 套件的背景 goroutine 每 20 秒清一次）以及監控頁時間軸的長度。給一個
+有限的值是刻意的：這張表每分鐘都會長出一列，只增不減的監控資料在幾個月後
+就會變成資料庫裡最大的一張表，而它的價值隨時間急遽下降 —— 維運看的是
+「最近幾小時」。不設這個值時，記憶體裡仍然有 120 分鐘的即時資料，時間軸只是
+不會有重啟前的歷史。
+
+`AUDIT_RETENTION_DAYS` 決定 `forum_admin_actions` 留多久。給 90 天是因為稽核
+紀錄的用途是「上季有人動過什麼」，跨月保留才有稽核意義；但不能無限保留 ——
+這張表保存了使用者的文字片段（截斷後），留得愈久愈像一份沒有用途的個人資料
+備份。與 `MONITOR_RETENTION_HOURS` 相反，這個值給得愈長愈好。
 
 ### `files_server/config.conf`
 
@@ -303,10 +337,43 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 | `forum_user_tags` | 標籤字典 | `name` 唯一 |
 | `forum_user_tag_assignments` | 標籤指派 | 複合 PK `(user_email, tag_id)` |
 | `forum_follows` | 追蹤關係 | 複合 PK `(follower_email, target_email)` |
+| `forum_request_metrics` | 分鐘級請求統計 | PK `(bucket_minute)`；純衍生資料，可整表刪除 |
+| `forum_admin_actions` | 管理員操作稽核 | `changes` 存欄位級 diff JSON；只能由時間清理 |
+| `forum_announcements` | 站內公告 | 同時只有一列 `active`；`expires_at` 可空＝永不自動過期 |
 
 刪除 `forum_reports` 的 `uq_forum_reports_reporter_target` 與
 `idx_forum_reports_status_created` 是必要的：前者擋同一使用者重複檢舉同一對象，
 後者讓「待處理檢舉」列表不必掃全表。
+
+`forum_request_metrics` 沒有欄位明細表，只有「每分鐘的總量、4xx、5xx、耗時總和」。
+這是刻意的：依路由分拆的明細會隨路由數量線性成長，而維運真正會回頭查
+「三小時前那波流量來自哪條路由」的機率很低 —— 記憶體裡的 120 分鐘即時資料
+已經涵蓋那個情境。存耗時「總和」而非「平均」是因為平均在累加多個執行個體的
+分鐘時無法正確合併（`(10+20)/2 ≠ (30+40)/2`），而總和可以在查詢時用
+`SUM()/COUNT()` 得到正確的加權平均。
+
+`forum_admin_actions` 記錄後臺**每一項會改變資料的操作**：停權／恢復、改標籤、
+代發文／代留言、貼文與留言的建立／修改／刪除、檢舉的建立／裁定／修改／刪除、
+標籤字典的建立／改名／刪除。存取日誌做不到這件事 —— 它只記到「某個 IP 對
+`/api/admin/forum/reports/9` 送出 DELETE」，不包含「那筆檢舉被裁定為成立」還是
+「被刪掉的是哪一篇文」。
+
+三個性質值得知道：
+
+- **稽核與操作在同一個交易裡。** `audit.Record` 回傳錯誤，而每個後臺寫入
+  handler 都在 `Commit()` **之前**檢查它 —— 因此「操作發生但沒有紀錄」在
+  資料庫層不可能發生。這件事很容易被無聲破壞：Go 的 `database/sql` 不會因為
+  交易內某個語句失敗就中止交易，所以呼叫了 `recordAdminAction` 卻不看回傳
+  值，等於把稽核降級成「盡力記錄」。搜尋 `beginAdminTx` 會列出全部需要稽核
+  的寫入點（搜尋 `s.db.ExecContext` 則會混進二十幾個唯讀查詢）。
+- **欄位級 diff 存在 `changes`（JSON），每個值截到 200 bytes。** 截斷是刻意的：
+  稽核要回答「這段文字被改成了什麼」，但不是為了備份全文。完整內容仍在
+  `forum_posts` / `forum_post_comments`，稽核表不重複一份可能含有個資的長文字。
+  介面上會標示「已截斷」—— 不標的話，讀者會以為看到的就是全文，而那正是
+  稽核紀錄最不能出現的誤解。
+- **沒有任何刪除紀錄的 API。** 唯一的清理途徑是時間式的 `audit.Pruner`
+  （保留 `AUDIT_RETENTION_DAYS` 天，預設 90，每小時清一次）。一個能刪除自己
+  紀錄的稽核日誌等於沒有稽核日誌。
 
 ---
 
@@ -368,6 +435,328 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 | POST | `/api/admin/users/{email}/comments` |
 | GET/POST | `/api/admin/tags` |
 | PATCH/DELETE | `/api/admin/tags/{id}` |
+| GET | `/api/admin/monitor` |
+| GET | `/api/admin/log?actor=&action=&targetType=&targetId=&from=&to=&offset=` |
+| GET | `/api/admin/stats?days=` （預設 30 天，上限 90 天） |
+| GET | `/api/admin/export/users.csv` |
+| GET | `/api/admin/export/posts.csv` |
+| GET | `/api/admin/export/reports.csv` |
+| POST | `/api/admin/batch/tags` （body `{"emails":[…],"tagIds":[…]}`） |
+| POST | `/api/admin/batch/status` （body `{"emails":[…],"status":"SUSPENDED"\|"ACTIVE"}`） |
+| GET | `/api/admin/sessions?email=&limit=` |
+| POST | `/api/admin/sessions/revoke` （body `{"email":…}`） |
+| GET | `/api/admin/blocks` |
+| POST | `/api/admin/blocks` （body `{"ip":…,"minutes":1440,"reason":"…"}`；`minutes <= 0` 代表解除） |
+| GET | `/api/forum/announcement` （公開；沒有生效中的公告時回 `announcement: null`） |
+| GET/POST | `/api/admin/announcements` |
+| PATCH | `/api/admin/announcements/{id}` （body `{"body":…,"active":…,"hoursUntilExpiry":…}`） |
+| POST | `/api/admin/forum/posts/{id}/pin` （body `{"pinned":true\|false}`） |
+
+### 系統監控
+
+`GET /api/admin/monitor` 是監控頁（`/admin/monitor`）唯一的資料來源，一次回傳：
+
+| 區塊 | 內容 |
+| --- | --- |
+| `stats.runtime` | Go 版本、goroutine 數、CPU 核心數、堆積／堆內用量、GC 次數與最近一次暫停 |
+| `stats.requests` | 本次啟動以來的請求總數、4xx／5xx、進行中與峰值並行數、平均與 P50／P95／P99／最慢 |
+| `stats.requests.routes` | 依正規化路由分組的同樣統計（數字與 email 段換成 `:id`，上限 200 條） |
+| `stats.timeline` | 近 120 分鐘的分鐘級彙總，每格標示 `live`（本次啟動）或 `history`（資料庫讀回） |
+| `stats.rateLimits` | 三組限流器的額度、放行／阻擋累計、目前追蹤中的來源數 |
+| `dependencies` | MySQL 連線池水位與 ping 延遲、Redis 鍵數／記憶體／連線池、搜尋引擎狀態 |
+
+兩件讀這個端點時要知道的事：
+
+- **延遲分位數是直方圖的桶上界，不是精確值。** 邊界固定為
+  1/2/5/10/25/50/100/250/500ms 與 1/2/5/10s，因此 P95 只會落在這些刻度上。
+  這是刻意的取捨：精確分位數要保存每次請求的耗時，記憶體會隨流量線性成長。
+- **總量只算本次啟動。** 記憶體裡沒有跨行程的累計，時間軸上一格 24 小時前的
+  資料是從資料庫讀回來的（`source: "history"`），與重啟後的資料（`source: "live"`）
+  在圖上以虛線框區分。
+
+依賴探測每個 2 秒逾時、三者並行，總耗時回在 `probesMs`。探測失敗不會讓整個
+請求回 5xx —— 依賴狀態放在 body 裡、狀態碼維持 200，因為管理員正是最需要看到
+「哪一個掛了」的時候。
+
+### 內容趨勢統計
+
+`GET /api/admin/stats?days=` 補足後臺其他三頁都答不出的那個問題：「站正在長成
+什麼樣子」。那三頁都是「現在是什麼」（總數、清單、待裁決的佇列），這裡是
+「變成這樣多久了」。
+
+一次回傳四塊資料：
+
+| 區塊 | 內容 |
+| --- | --- |
+| `series` | 視窗內每日新增的使用者／文章／留言，**固定 `days` 長度**（沒有資料的日子是 0 而非缺漏） |
+| `totals` | 視窗內合計（新增的使用者／文章／留言／按讚） |
+| `topPosts` | 視窗內發表的文章，依「留言 + 按讚」排序，含前 80 字摘要 |
+| `topTags` | 依綁定人數排序的標籤；**不設時間範圍**（標籤是身分分類而不是事件） |
+| `topAuthors` | 視窗內發文最多的作者，留言數另外列出 |
+
+三件讀這支端點時要知道的事：
+
+- **每日份量以伺服器主機的本地時區切分。** `created_at` 由應用層寫入
+  `time.Now()`（不是資料庫的 `NOW()`），因此站台部署在 UTC 而管理員在 UTC+8
+  時，「今天」的數字看起來會少一截。那是時區差，不是流量掉了 —— 介面上也
+  照實寫了這一句。
+- **`topTags` 刻意不受 `days` 限制。** 一個人三個月前被標成「高雄」今天仍然
+  是高雄；放進 30 天視窗會讓「熱門標籤」變成「最近剛好被套上的標籤」，那是
+  完全不同的一個問題。
+- **每次讀取都即時計算，沒有預先彙總的統計表。** 與監控頁的分鐘彙總
+  （`forum_request_metrics`）相反：這裡的查詢被 `WHERE created_at >= ?` 限制在
+  視窗內，掃描量是「最近 N 天的文章數」而不是全部。三張表的 `created_at`
+  都有索引（`forum_users` 的在遷移第 24 步補上，那是這批查詢裡唯一原本沒有
+  索引的）。什麼時候該改：文章總量成長到讓「最近 N 天」也不再是有界的時候 ——
+  那時正確做法是加一張每日彙總表，而不是把視窗縮到 7 天（縮視窗會讓圖上看不出
+  季節性的起伏，而那正是這一頁存在的理由）。
+
+圖上的三條線**共用同一個縱軸刻度**。各自正規化看起來比較「好看」—— 三條線都會
+有明顯的起伏 —— 但那會讓讀者誤以為三者的量級相當，而實情是新使用者通常比新
+留言少一到兩個數量級。共用刻度之後貼地的那條線就是事實。
+
+刻意**沒有**為 `forum_posts.author_email` 補複合索引：「活躍作者排行」那條查詢
+會 `GROUP BY author_email` 而沒有可用索引，但它被 `created_at` 限制在視窗內；
+為了一條有界的查詢在「最熱的表」上加索引，是把成本放在每次發文而不是偶爾開
+一次後臺。
+
+### 匯出與批次操作
+
+三份 CSV 匯出（`/api/admin/export/{users,posts,reports}.csv`）與兩支批次端點
+（`/api/admin/batch/{tags,status}`）。批次按鈕在**用戶管理頁**（`/admin`）的
+核取方塊列上，而 `/admin/export` 只有下載入口與說明 —— 因為選取狀態只存在於
+用戶管理頁，在匯出頁放批次按鈕只會得到一個永遠按不動的誘餌。
+
+#### CSV 注入防護
+
+以 `=`、`+`、`-`、`@`、Tab 或 CR 開頭的欄位值，Excel / Google Sheets /
+LibreOffice 會當成**公式**評估。而這個專案匯出的欄位幾乎全是使用者可控的
+自由文字（暱稱、貼文內容、**檢舉原因**），所以一條 `=cmd|'/C calc'!A0` 的
+檢舉原因在管理員的機器上就會被執行。
+
+`sanitizeCSVField` 因此在危險值前面加一個單引號（Excel 認得的「以下是文字」
+前綴，顯示時不會出現）。三件刻意的取捨：
+
+- **不跳過危險值。** 跳過會讓匯出少掉資料，而管理者不會知道少了什麼 ——
+  那比顯示成文字更糟，因為它讓匯出結果不可信。
+- **不改寫第一個字元。** 匯出的用途是「與線上內容逐字比對」，把 `=` 換成
+  別的字元等於改資料。
+- **接受前綴的可見代價**：在文字編輯器裡打開匯出檔會看到 `'。介面上寫明了
+  這是刻意行為、不要要求移除 —— 否則某個管理員會以為那是資料損壞。
+
+這個防護只有一份實作（`writeCSVRow`），因此沒有某一個匯出會漏掉它 ——
+而漏掉的症狀不會出現在任何日誌、任何 HTTP 狀態碼、任何測試失敗裡。
+`batch_export_test.go` 有一組涵蓋全部六個前綴的表格測試專門守這件事。
+
+另外兩個容易被忽略的細節也一併處理了：檔案以 **UTF-8 BOM** 開頭（沒有它
+Excel 開啟中文全是亂碼），以及 `Content-Disposition: attachment`（沒有它瀏覽器
+會把匯出內容直接內嵌顯示，而那是全站使用者的 email 與站內言論）。
+
+#### 批次操作的兩個保證
+
+1. **每個受影響的對象各自記一筆稽核。** 「一次停權 50 個帳號」若只記一筆，
+   稽核紀錄就答不出「這個 email 什麼時候被停權的」—— 而那正是稽核紀錄存在
+   的理由。
+2. **整批生效或整批不動。** 整批放在單一交易裡，因此不會出現「第 30 個失敗、
+   前 29 個已經停權」這種沒有任何地方記錄部分結果的狀態。
+
+回應帶 `counts`（`updated` / `unchanged`）與 `skipped`（逐項列出 email 與
+原因）。逐項帶原因的理由：管理員需要知道跳過的 4 個是「帳號不存在」還是
+「格式錯誤」—— 兩者的下一步完全不同。
+
+刻意不做的事：批次標籤採**覆寫**語意（與單一使用者的 `PUT` 相同），沒有
+「加標籤」與「設定標籤」兩種並存的模式 —— 猜錯「加」對「設」的後果是使用者
+無預期地失去標籤。
+
+### 登入與 Session 管理
+
+`GET /api/admin/sessions` 與 `POST /api/admin/sessions/revoke` 回答後臺原本答不
+不出來的兩個問題：「現在有誰在線上」與「把某個人的所有裝置都登出」。它存在的
+理由是「cookie 即憑證」設計（見 `session.go` 檔頭第一點）留下的一個洞：token
+不輪替、不綁 IP、不綁 UA，因此遭竊的 cookie 在過期前可被完整重用，而後臺原本
+沒有任何手段提前止血。
+
+#### 掃描必須用 SCAN，且每批用 pipeline 撈回
+
+key 是隨機 token，**無法由 email 反推 token**，因此沒有「只掃某個 email 的 key」
+這種可能 —— 只能掃整個 `FORUM:session:` 命名空間再逐一比對 hash 裡的 email。
+
+- **不能用 KEYS。** 它會讓 Redis 在掃完全部 keyspace 之前阻塞整個實例。
+  session 庫與媒體 token 共用同一個 Redis，因此一個後臺頁面的 KEYS 會讓整站
+  同時無法登入、無法讀圖 —— 包括「按一下頁面來解除封鎖」這件事本身。
+- **游標必須帶著回傳值繼續。** 寫成「每次都傳 0」會讓迴圈永遠只掃第一頁，
+  而症狀是「看得到少數幾支 session，看起來一切正常」。
+- **每批的 HGETALL + TTL 用 pipeline 一次撈回。** 逐個呼叫是每支 session 兩次
+  往返；列出 200 支就是 400 次往返，跨網路時是一段好幾秒的空白頁。
+- **SCAN 不保證一次遍歷內不重複**，因此有一層以 token 去重的過濾。
+- **key 數有上限（20000），達到就截斷並回報 `truncated: true`。** 掃描成本是
+  O(session 總數)；若同時有十萬支 session，這個請求會變成跑好幾秒的 SCAN，
+  而它是管理員按一下就發出的請求。截斷的結果對「找出那個帳號的 session」仍然
+  有用，而且「沒掃完」會被明確告知 —— 少了那個旗標，「沒列出來」看起來就會像
+  「不存在」。截斷時強制登出**回 409 而不是靜默回 0 筆**：那個函式的契約是
+  「刪掉所有」，掃描沒完就做不到。
+
+#### 不回傳完整 token
+
+token 就是憑證本身。介面上只給前 8 個字元（`tokenPrefix`），足以讓管理員分辨
+「是不是同一支」而不足以還原。批次撤銷也只接受 email、不接受 token —— 讓介面
+傳 token 才能撤銷，等於那個 token 已經離開伺服器了。
+
+頁面上有一段明寫「這是刻意的限制，不是尚未完成的功能」：少了它，第一個管理員
+會以為是 bug 而要求把完整 token 顯示出來。
+
+#### 建立時間是「新的 session 才會有」
+
+`created_at` 從這個功能開始才寫進 hash。既有 session 沒有它，而建立時間已經
+過去了、補寫不可能，猜一個值只會產生比「不知道」更糟的資料 —— 因此介面顯示
+「未知」，後端回空字串而不是 `0001-01-01T00:00:00Z`（那看起來像真實時間）。
+
+#### 強制登出的稽核寫在 MySQL，動作在 Redis
+
+兩個資料庫之間沒有共同交易，因此這個操作**不可能**像其他後臺寫入那樣「操作
+與稽核同生共死」。這裡選擇的方向是**先刪 Redis（動作），再寫稽核（紀錄）**：
+「動手之後忘了記錄」比「記錄了但還沒動手」安全 —— 後者會讓稽核紀錄宣稱「已撤銷」
+而 session 還活著，那是一個**不實的紀錄**，而稽核紀錄的價值全在於它是真實的。
+
+稽核寫入失敗時回 500 並在訊息裡說明「session 已撤銷但紀錄失敗」。那會讓管理員
+困惑（他會想重試，而重試會顯示「已撤銷 0 筆」），但那個困惑好過一個不實的
+稽核紀錄。
+
+#### 刻意不做的事
+
+- **不顯示每支 session 的 IP 與 User-Agent。** session hash 裡沒有存這兩項，
+  而為了顯示它們就得新增欄位 —— 那是為了診斷而擴大憑證的儲存面。token 不綁
+  IP/UA 這件事本身就是既有的已知限制，補上這兩項也不會讓它消失。
+- **不提供「登出所有 session」。** 那是一個非常容易誤按的按鈕，而且按下之後
+  管理員自己也被踢出，症狀是「我按了登出全部，結果我也登出了，而且沒有辦法
+  再進來登出所有人」。
+
+### IP 封鎖名單
+
+`GET /api/admin/blocks` 與 `POST /api/admin/blocks`（`minutes <= 0` 代表解除）。
+名單是 Redis sorted set：`FORUM:ipban`，member 是 IP、score 是到期 Unix 秒。
+過期項目由背景 goroutine 每小時清理一次，而查詢時（`ipban.IsBanned`）也會正確
+地把已過期的項目視為未封鎖 —— 因此**清理間隔只影響「ZRANGE 結果裡有多少雜訊」
+而不影響正確性**。
+
+#### 為什麼需要它（限流不夠的兩個地方）
+
+`ratelimit.go` 的限流是**行程內**的純記憶體滑動視窗，而那是刻意的取捨
+（見該檔檔頭：把計數器放進 Redis 會讓每個請求多一次網路往返）。但純記憶體有
+兩個限制，它們都不是「可接受的取捨」而是「擋不住攻擊」：
+
+1. **重啟即失效** —— 攻擊者只要等一次部署或崩潰就重新拿到滿額度，而且沒有
+   任何人收到通知。
+2. **不跨行程** —— 負載平衡器後面有 N 個執行個體時，實際額度是 `limit × N`，
+   而輪到哪一台不是使用者能控制的。
+
+把封鎖做成「額度設成 0」是錯的：限流的記憶體狀態有上面這兩個限制，所以用限流
+實作的封鎖會在一次維護窗口之後自動解除。封鎖必須存在於行程之外。
+
+#### 熱路徑的成本（這是本功能最需要被評估的一件事）
+
+`IsBanned` 是一次 `ZSCORE`，加上它的時機是每個「非 GET 且被限流器攔到」的
+請求：發文、留言、按讚、檢舉、上傳圖片、OAuth 登入跳轉。成本的實際大小：
+
+| 面向 | 評估 |
+| --- | --- |
+| 指令本身 | `ZSCORE` 是 O(log N)，N 是封鎖筆數（這個站上通常是 0 到數十）；單一 key、單一 member，回應約 8 bytes |
+| 往返 | 與既有 Redis 呼叫同一條連線。`session` 套件在**每個**請求上都已經做了一次 `HGET`（`ResolveUser`），而它只為了「知道有沒有登入」；`IsBanned` 多出來的那次與那一次性質相同。因此在本架構下它是「又多一次已經在做的事」，不是「新的延遲來源」 |
+| 相對該請求的工作量 | 建立一則貼文要做一次 INSERT、可能一次 ES 索引（又一次 HTTP 往返）。`ZSCORE` 相對之下是雜音 |
+| 讀取端點 | **完全不受影響**。限流器只掛在寫入型路由上（見 `ratelimit.go` 檔頭的掛載位置說明），所以匿名訪客的瀏覽不會多付這一次 |
+
+結論：這個成本可以接受，而它買到的是「封鎖在部署之後仍然有效」。
+
+掛載位置由 `withBlocklistHandler` 這**一個**函式決定，讓「先查封鎖、再查限流」
+不會有第二個掛載點而不同步。順序不可交換：反過來會讓被封鎖的 IP 先累積限流
+計數，而那個計數會在解除封鎖之後仍然生效 —— 一個沒有管理員動作卻持續存在的
+隱藏狀態。
+
+#### 失敗時 fail open
+
+Redis 故障時封鎖檢查會失敗，而呼叫端**放行**。理由：讓封鎖檢查失敗就擋掉所有
+人，會把一次 Redis 抖動變成「整站不能發文」，而那比「Redis 掛掉期間封鎖失效」
+嚴重得多（Redis 掛掉時本站的登入本來就已經受影響 —— session 查不到等於未登入）。
+
+可觀察代價：攻擊者只要製造 Redis 壓力，就能暫時解除對自己的封鎖。監控頁的
+Redis 探測會變紅，那是這個狀態唯一的提示。因此記錄是**節流的**（每 90 秒一行），
+否則 Redis 故障會在幾秒內灌滿 log。
+
+#### 刻意不做的事
+
+- **不會自動封鎖。** 超過限流額度的位址只會收到 429，不會被自動加進名單。
+  同一個出口位址可能是一整間辦公室或一整個 NAT，而自動封鎖會誤傷他們 ——
+  誤封正常使用者的後果比多讓一個腳本多打幾次嚴重得多。**封鎖必須是管理員的決定。**
+- **不支援 CIDR 範圍。** 封鎖名單的 key 是單一 IP，接受「一段範圍」會讓
+  「這個 IP 被封了嗎」變成一個需要逐一比對的問題。範圍封鎖是另一個功能。
+- **沒有「永久封鎖」。** score 是到期秒數，「永久」只能寫成一個極大的數字，
+  而那種封鎖沒有辦法靠時間自動解除 —— 它會一直查到有人來解除為止，而管理員
+  在幾個月後已經不記得自己封過誰。上限是 365 天，輸入更長的會被**就地收斂**
+  （而不是回錯），介面上寫出了這個上限。
+- **不把原因存進 Redis。** 只寫進稽核紀錄。sorted set 的 member 只能是 IP，
+  而 reason 若塞進 member 就無法再用 IP 查詢；另開一個 hash 又多了一個要保持
+  同步的資料結構。管理員填的原因是給「事後查」看的，而稽核紀錄正好是那個地方。
+
+### 站內公告與文章置頂
+
+`forum_announcements`（一列一則）與 `forum_posts.pinned`（每篇一個旗標）。
+公告在 `/admin/announcements` 管理，置頂按鈕在「論壇文章」管理頁的每一列上 ——
+它們分成兩處是因為「單元」不同：一個是全站唯一資源，一個是每篇文章的屬性。
+
+#### 同一時間只有一則公告
+
+公告在公開頁上是一條橫幅。兩條同時生效會互相衝突（使用者看到一個被橫幅佔掉
+的上半頁，其中還可能是「活動改期」與「活動照常」這種打架的內容）。表格保留多列
+是為了留下「這則公告是什麼時候、經誰發布、之後被誰關掉」的歷史，而那正是稽核
+紀錄之外的另一半脈絡。
+
+這個不變條件由**三件**事保證：
+
+1. 發佈新公告時，在同一個交易裡把舊的設為不啟用。
+2. 改為啟用時，同樣先把其他全部關掉。
+3. 公開查詢回 `announcement: null` 而不是 404 —— 那是壓倒性的常見情況，若回 404，
+   前端每個頁面載入都得區分「正常的沒有」與「端點壞了」。
+
+`expires_at` 允許 NULL（永不自動過期），因為「過期」與「手動停用」是兩件事：
+活動結束的公告會自然過期，而放錯一則需要立刻消失 —— 前者不該要求管理員記得回來
+關，後者不該等到過期時間。
+
+#### 置頂的索引必須是遞減的
+
+動態的排序是 `pinned DESC, created_at DESC, id DESC`。MySQL 的「反向掃描索引」
+會把**所有**欄位一起反向，因此一個 `(pinned, created_at)` 的遞增索引無法服務這個
+排序 —— 查詢最佳化器會判定它不能用而退回 filesort（正確但慢，那正是加索引要避免
+的）。所以 `idx_forum_posts_feed` 宣告成 `(pinned DESC, created_at DESC, id DESC)`
+（MySQL 8.0+ 支援，README 的環境需求正是 MySQL 8.x）。既有的
+`idx_forum_posts_created_at` 保留：搜尋結果、profile 的貼文列表與管理端的多處
+查詢都只按 `created_at` 排序，那些地方不該為了支援置頂而多付一個用不上的索引。
+
+#### 什麼翻譯、什麼不翻譯
+
+這是這個功能唯一需要寫成規格的事：
+
+- **不翻譯** —— 公告的**內文**。它是管理員寫的純文字，翻譯它需要一套翻譯資料庫，
+  而本站的多語系是純介面層的（見 `src/i18n`）。所以內文以原文顯示，換行以 `\n`
+  保留（本站沒有富文字編輯器，textarea 的換行是唯一的排版資訊）。
+- **翻譯** —— 圍著它的每一個字：標題、關閉鈕的 aria-label、發佈與到期的時間格式，
+  以及文章卡上的「置頂」徽章。把標題寫死成「公告」會讓英文介面裡出現兩個中文字，
+  而那是最容易被發現也最難以辯解的一類 bug。
+
+#### 三狀態而不是兩狀態
+
+後臺的公告列表顯示 `active` 與 `effective` 兩個不同的值：前者是開關，後者是
+「實際上會不會顯示」。一則 `active` 但已過期的公告在列表裡看起來是開著的，而它
+實際上什麼都不顯示 —— 合成一個欄位會讓管理員以為橫幅還在。三個狀態因此是
+「顯示中」（綠）／「已停用」（琥珀，可重新啟用）／「已過期」（藍，要重新設定時間），
+而顏色區分的是「能不能按」而不是嚴重度。
+
+#### 刻意不做的事
+
+- **不刪除公告。** 只有停用。保留歷史是為了回答「這則是什麼時候、經誰發布的」，
+  而那正是稽核紀錄之外的另一半脈絡。頁面上明寫了這件事，因為「按了刪掉之後
+  就找不回來」是使用者在按下去之前應該知道的。
+- **有效時間不超過 365 天**，且介面上是有限清單而不是數字輸入框（理由與 IP 封鎖
+  的時長相同：數字欄位最常見的填法是把「7」當成「7 分鐘」）。
 
 ---
 
@@ -387,6 +776,13 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 | `/admin` | `admin.html` | 管理員 |
 | `/admin/forum` | `forum-admin.html` | 管理員 |
 | `/admin/forum-report` | `forum-report.html` | 管理員 |
+| `/admin/monitor` | `forum-monitor.html` | 管理員 |
+| `/admin/log` | `audit-log.html` | 管理員 |
+| `/admin/stats` | `forum-stats.html` | 管理員 |
+| `/admin/export` | `export.html` | 管理員 |
+| `/admin/sessions` | `sessions.html` | 管理員 |
+| `/admin/blocks` | `blocks.html` | 管理員 |
+| `/admin/announcements` | `announcements.html` | 管理員 |
 
 另有 `/service-worker.js`（附 `Service-Worker-Allowed: /`）、`/forum-manifest.json`、
 `/assets/*`（內容雜湊，cache 一年）、`/asset/*`（PWA 圖示等原始檔，後端以
@@ -407,10 +803,14 @@ npm run build        # typecheck + vite build → dist/
 npm run preview      # 預覽 dist/
 ```
 
-**MPA，9 個 entry**：`src/entries/` 下的 `forum`、`forum-login`、`forum-new`、
+**MPA，16 個 entry**：`src/entries/` 下的 `forum`、`forum-login`、`forum-new`、
 `forum-profile`、`forum-others-profile`、`forum-following`、`forum-admin`、
-`forum-report`、`admin`，對應 `frontend/*.html` 與 `vite.config.ts` 的
-`rollupOptions.input`。
+`forum-report`、`forum-monitor`、`audit-log`、`forum-stats`、`forum-export`、
+`forum-sessions`、`forum-blocks`、`forum-announcements`、`admin`，對應
+`frontend/*.html` 與 `vite.config.ts` 的 `rollupOptions.input`。同一組檔名也出現在
+後端 `httpapi.frontendShellFiles`（CSP 的 `<style>` SHA-256 授權）—— 三處少一個
+檔名，那一頁就會整頁沒有版面，因此 `securityheaders_test.go` 有一支測試守住
+這兩份清單的同步。
 
 `vite.config.ts` 另有兩個自訂行為：
 
@@ -450,15 +850,28 @@ server: {
 
 ```bash
 cd backend
-go test ./...          # 全域
-go test ./forum/es/... # ES 傳輸層（用 httptest 與 fake server）
+go test ./...                # 全域
+go test ./forum/metrics/...  # 請求統計（注入假時鐘，斷言快照）
+go test ./forum/audit/...    # 稽核（CSV 防護、佔位符、截斷）
+go test ./forum/session/...  # Session 列舉與撤銷（miniredis）
+go test ./forum/ipban/...    # IP 封鎖名單（miniredis；過期、清理、長度上下限）
+go test ./forum/es/...       # ES 傳輸層（用 httptest 與 fake server）
 ```
 
-現有的兩個測試檔：
+現有的十個測試檔：
 
 | 檔案 | 覆蓋 |
 | --- | --- |
 | `backend/forum/httpapi/site_test.go` | 站名樣板取代、跳脫、manifest、style hash 穩定性 |
+| `backend/forum/httpapi/securityheaders_test.go` | `frontendShellFiles` 與實際頁面殼的同步、雜湊的完整與穩定 |
+| `backend/forum/httpapi/monitoring_test.go` | 統計中介層的路由／狀態碼／in-flight、限流器計數、監控端點的授權、`INFO memory` 解析 |
+| `backend/forum/httpapi/stats_handlers_test.go` | 統計視窗的收斂與起點、摘要的字元計算、端點授權 |
+| `backend/forum/httpapi/batch_export_test.go` | **CSV 注入的六個危險前綴**、BOM 與下載標頭、email 清單正規化、匯出與批次的授權 |
+| `backend/forum/httpapi/announcement_test.go` | 公告內文的邊界（空白／300 字／有效時間上下限）、後臺端點的授權、公開端點的 null 路徑 |
+| `backend/forum/session/session_list_test.go` | 掃描走遍整個 keyspace、**絕不回傳完整 token**、SCAN 去重、上限截斷、撤銷只刪目標帳號 |
+| `backend/forum/ipban/ipban_test.go` | 過期封鎖視為未封鎖、重複封鎖延長到期、`Ban` 順手清理、CIDR 被拒、長度上下限、nil 連線安全 |
+| `backend/forum/audit/audit_test.go` | 稽核寫入的參數順序與錯誤傳遞、UTF-8 邊界截斷、變更筆數上限、查詢條件的佔位符與分頁收斂 |
+| `backend/forum/metrics/metrics_test.go` | 路徑正規化（含基數上限）、延遲分桶、排序、時間軸連續性與歷史來源 |
 | `backend/forum/es/es_test.go` | ES 傳輸層約 16 個案例（`httptest` 假伺服器） |
 
 `go.mod` 有宣告 `miniredis`（供 Redis 相關測試），但目前實際用到的 ES 測試是
@@ -580,7 +993,69 @@ node ../../tools/i18n/verify-catalogs.mjs
 - **`MEDIA_TOKEN_TTL_SECONDS` 的兜底值是 30 天**，對正式環境明顯過長。
 - **後端沒有優雅關閉**（沒有 `signal` 處理、沒有 `Server.Shutdown`），也沒有設定
   `ReadHeaderTimeout`，直接用零值 `http.ListenAndServe`。
-- **管理端點沒有限流**（刻意如此，但值得知道）。
+- **管理端點沒有限流**（刻意如此，但值得知道）。`/api/admin/monitor` 尤其
+  不限流：它是監控頁每十秒打一次的合法流量，限流它只會在真正出事時多一條
+  混淆的訊息。
+- **監控統計只活在一個行程裡**。請求總量、依路由統計與延遲直方圖都是記憶體
+  內的累計，重啟歸零；分鐘桶會寫進 `forum_request_metrics`（已結束的分鐘、
+  每分鐘只寫一次、用累加語意支援多執行個體），因此時間軸在重啟後不會變空白，
+  但「上個行程一共服務了多少請求」這種問題答不出來。要長期資料得看存取日誌。
+- **非正常結束會遺失最多一分鐘的監控資料**（`main.go` 沒有 graceful shutdown，
+  `metrics` 的收尾寫入走的是 `ctx.Done()`，實際上不會被觸發）。這與「監控本來
+  就是取樣」相符，但它確實是一個已知的資料缺口。
+- **延遲分位數是分桶上界**，P95 只會落在 1/2/5/10/25/50/100/250/500ms 或
+  1/2/5/10s 上。介面上照實標示，但拿它跟精確的 APM 數字比較會失望。
+- **多執行個體時監控頁只顯示打到這個行程的流量**。限流器的 hits map 本來就是
+  行程內的（見 `ratelimit.go`），請求統計沿用同一個範圍；資料庫的分鐘彙總會把
+  各個個體加總，但即時統計不會。
+- **稽核紀錄的 INSERT 與操作共用交易，因此稽核表故障會讓後臺寫入全部失敗**。
+  這是刻意的取捨：寧可「停權按了沒反應」，也不要「停權成功了但沒人知道是誰停的」。
+  若 `forum_admin_actions` 出了問題（例如磁碟滿），後臺的每一個寫入操作都會回
+  500，必須先修好稽核表才能繼續管理。唯讀頁面不受影響。
+- **稽核紀錄保存的是截斷後的文字**（每個值 200 bytes）。要還原完整內容得回
+  `forum_posts` / `forum_post_comments`，而那兩張表的內容本身已經被覆寫了 ——
+  稽核紀錄不能回答「被改掉的那段原文是什麼」，只能回答「原本的前 200 bytes 是什麼」。
+- **稽核紀錄沒有防止同一管理員互相掩蓋的機制**。要查到「誰動的」需要該管理員
+  的存取日誌與稽核紀錄一起看；而 access log 沒有輪替設定，會無限期增長。
+- **內容趨勢的每日份量以主機本地時區切分**，站台在 UTC、管理員在 UTC+8 時
+  「今天」會看起來少一截。這是 `created_at` 寫入 `time.Now()`（而非資料庫的
+  `NOW()`）的必然結果，介面上已寫出這一句，但它是需要管理員自己記住的背景知識。
+- **內容趨勢的「熱門標籤」不受時間視窗限制**，而「熱門文章」與「活躍作者」受
+  限制。這個不一致是刻意的（標籤是身分分類、其餘是事件），但讀排行榜時若不
+  注意到就會拿三份不同範圍的資料互相比較。
+- **`/admin/stats` 每次讀取都即時計算**，沒有預先彙總的統計表。掃描量被視窗
+  限制住，但當文章總量成長到讓「最近 N 天」也不再有界時，這個查詢會開始變慢 ——
+  那時該加每日彙總表，而不是縮短視窗。
+- **CSV 匯出每份上限 5 萬列，到達上限時靜默截斷**（串流的 CSV 不能中途插入
+  一行提示，那會讓欄位數不一致）。介面上寫出了上限，但匯出檔本身沒有標記。
+- **匯出檔裡的單引號前綴在試算表中不可見、在文字編輯器中可見。** 這是刻意的
+  取捨（見「CSV 注入防護」），但它會被誤認為資料損壞 —— 因此頁面上明寫
+  「不要要求移除它」。
+- **Session 列表的建立時間只對新建立的 session 有意義。** `created_at` 是這個
+  功能之後才寫進 hash 的，既有 session 顯示「未知」且永遠不會補上。
+- **強制登出的稽核紀錄可能在動作之後才寫，且兩者不在同一個交易裡**（一個在
+  Redis、一個在 MySQL）。稽核寫入失敗時操作已經生效，介面會明確說明這一點 ——
+  它看起來像矛盾，但那正是「寧可少一筆紀錄，也不要一筆不實的紀錄」這個取捨
+  的樣子。
+- **Session 掃描有 20000 個 key 的上限**，達到時清單不完整（介面會標示）。
+  在同時登入人數遠低於這個數字的站上不會發生；一旦發生（例如爬蟲大量登入），
+  強制登出会回 409 而不是靜默宣稱成功。
+- **Session 不記錄 IP 與 User-Agent**，因此無法從後臺看出「這支 session 是從
+  哪裡來的」。這是「token 即憑證」設計的已知限制（見 `session.go` 檔頭安全
+  假設的最後一點），而不是這個功能漏了。
+- **IP 封鎖在 Redis 故障時失效（fail open）。** 擋掉所有人會把一次 Redis 抖動
+  變成「整站不能發文」，那比封鎖失效嚴重得多。代價是攻擊者只要製造 Redis 壓力
+  就能暫時解除對自己的封鎖；監控頁的 Redis 探測是這個狀態唯一的提示。
+- **IP 封鎖在超過 365 天時被就地收斂**，不會回錯。介面上寫出了上限，但匯出的
+  稽核紀錄只會記到收斂後的到期時間。
+- **IP 封鎖的「原因」不存進 Redis**，只存在稽核紀錄裡。因此從 Redis 直接查
+  （redis-cli）會看不到原因，而那些紀錄在稽核保留期（90 天）到期後就消失了。
+- **站內公告的內文不翻譯**，只翻譯圍著它的介面文字（標題、時間格式、置頂徽章）。
+  這是刻意的：翻譯管理員寫的文字需要一套翻譯資料庫，而本站的多語系是純介面層的。
+  介面上是英文的使用者會看到中文公告 —— 那正確嗎？取決於你的讀者，而這個決定
+  應該由站方明確做出，而不是由實作細節決定。
+- **公告只有一則生效，且不會被刪除**（只有停用）。因此 `forum_announcements` 會
+  隨時間累積列數；若要清理過期且已停用的公告，目前得直接動資料庫。
 - **測試覆蓋集中在少數幾個檔**，`httpapi` 的主要 handler 沒有測試；
   `server.go` 的註解提到的 `forum_handlers_test.go` 目前不存在於 repo 中。
 - **`ALLOWED_ADMIN_EMAIL` 比對大小寫敏感且不做正規化**。白名單若寫成帶空白或

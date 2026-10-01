@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go）。
+      前端 src/site.ts 在模組層讀下面這兩個 meta 標記，因此第一次繪製就是正確
+      站名，不會先畫出預設值再換掉。佔位符必須留在樣式區塊之外：各頁的內嵌
+      樣式是被 CSP 以 SHA-256 授權的，區塊內容只要一個位元組不同，整頁就會
+      沒有版面。這段註解因此刻意不寫出樣式標籤本身。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>內容趨勢｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 內容趨勢統計（/admin/stats）樣式
+       *
+       * 共用層在 /style.css：<body class="admin-page"> 的元素 reset、後臺
+       * design tokens、rail / topbar / canvas 殼層、面板、按鈕、表單、表格
+       * 基礎、badge、列表狀態與 toasts。本區塊只放這一頁自己渲染的東西：
+       * 視窗控制、折線圖與排行榜。
+       *
+       * .stats / .stat / .stat__label / .stat__value 是從 admin.html
+       * （用戶管理頁）沿用過來的三組規則，而不是搬進 style.css：那一頁的
+       * 文字長度、字重與圓角是為了配合用戶統計的數字量級；這一頁的
+       * 「視窗內合計」是同樣的四張純數字卡片，因此沿用。這是**頁面層級**的
+       * 樣式，style.css 裡沒有這三組 —— 只引用不定義會讓四張卡變成一列純
+       * 文字（症狀是標籤與數字黏在一起，看起來像未完成的表格）。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 統計卡（沿用 admin.html，見上方說明）---------------------------- */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 14px;
+      }
+
+      .stat {
+        display: grid;
+        align-content: start;
+        gap: 4px;
+        padding: 15px 17px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface);
+        box-shadow: var(--sh-1);
+      }
+
+      .stat__label {
+        color: var(--ink-3);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .stat__value {
+        font-size: 24px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.25;
+      }
+
+      /* --- 視窗控制 -------------------------------------------------------
+       * 單列右對齊並靠面板底部。它是「這張圖在看多長的時間」的控制項，與
+       * 統計內容是兩件事，因此放在面板的 footer 而不是 header ——
+       * 使用者是看完圖之後才想換區間。
+       * ------------------------------------------------------------------ */
+      .stats-window {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 12px;
+        margin: 0;
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      /* 視窗選項是一列按鈕而不是 select：可選的值只有五個（7／14／30／60／
+         90 天），而且「切換區間」是一個值得更快點到的動作 —— select 要兩次
+         點擊（下拉、選項），按鈕列只要一次。 */
+      .stats-window__options {
+        display: inline-flex;
+        gap: 4px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+      }
+
+      .stats-window__option {
+        padding: 5px 10px;
+        border: 0;
+        border-radius: var(--r-sm);
+        color: var(--ink-2);
+        background: none;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        cursor: pointer;
+      }
+
+      .stats-window__option:hover {
+        background: var(--surface-3);
+      }
+
+      .stats-window__option.is-active {
+        color: #fff;
+        background: var(--accent);
+      }
+
+      /* --- 折線圖 ---------------------------------------------------------
+       * 用 SVG 而不是 div 柱狀：這一頁要回答的是「趨勢」而不是「每天幾個」，
+       * 折線能表達連續變化，柱狀只能表達離散值。SVG 也不需要任何圖表函式庫
+       * —— 這個專案刻意不引入 chart 類相依。
+       *
+       * viewBox + preserveAspectRatio="none" 讓圖可以撐滿寬度而不失真；高度
+       * 由 CSS 固定，因此手機上換行時圖只是變矮，不會變形。
+       * ------------------------------------------------------------------ */
+      .stats-chart {
+        display: block;
+        width: 100%;
+        height: 220px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+      }
+
+      .stats-chart__grid {
+        stroke: var(--line);
+        stroke-width: 1;
+        vector-effect: non-scaling-stroke;
+      }
+
+      .stats-chart__axis {
+        fill: var(--ink-3);
+        font-size: 10px;
+        font-weight: 700;
+      }
+
+      /* 三條線各有一個 dash 樣式而不是只靠顏色區分：顏色在深淺色調下來回的
+         對比度不同，而線型在任何情況下都看得出來。三條線都不加點，因為
+         90 個點會把圖變成一條毛毯。 */
+      .stats-chart__line {
+        fill: none;
+        stroke-width: 2;
+        stroke-linejoin: round;
+        stroke-linecap: round;
+        vector-effect: non-scaling-stroke;
+      }
+
+      .stats-chart__line--users {
+        stroke: var(--accent);
+      }
+
+      .stats-chart__line--posts {
+        stroke: var(--ok);
+        stroke-dasharray: 6 3;
+      }
+
+      .stats-chart__line--comments {
+        stroke: var(--warn);
+        stroke-dasharray: 2 3;
+      }
+
+      .stats-chart__empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 220px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        color: var(--ink-3);
+        background: var(--surface-2);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .stats-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 16px;
+        margin: 12px 0 0;
+        color: var(--ink-2);
+        font-size: 11.5px;
+        font-weight: 700;
+        list-style: none;
+        padding: 0;
+      }
+
+      .stats-legend__item {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+
+      /* 圖例的線段樣式與圖上的線一一對應（同樣的三種 dash）。 */
+      .stats-legend__swatch {
+        display: block;
+        width: 22px;
+        height: 0;
+        border-top: 2px solid;
+      }
+
+      .stats-legend__swatch--users {
+        border-color: var(--accent);
+      }
+
+      .stats-legend__swatch--posts {
+        border-color: var(--ok);
+        border-top-style: dashed;
+      }
+
+      .stats-legend__swatch--comments {
+        border-color: var(--warn);
+        border-top-style: dotted;
+        border-top-width: 3px;
+      }
+
+      /* --- 排行榜 ---------------------------------------------------------
+       * 三個排行榜並排，各用一張 panel。它們是三種不同的資料（文章的互動、
+       * 標籤的分佈、作者的產量），硬塞進一個表格的代價是欄標題要同時服務三種
+       * 完全不同的語意（"數字"在三者分別是讚+留言、人數、文章數）。
+       * ------------------------------------------------------------------ */
+      .stats-boards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 14px;
+        align-items: start;
+      }
+
+      .stats-board {
+        min-width: 0;
+      }
+
+      .stats-rank {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 22px;
+        height: 22px;
+        border-radius: var(--r-sm);
+        color: var(--ink-2);
+        background: var(--surface-3);
+        font-size: 11px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 前三名用強調色：排行榜的用途是「找出值得看的那幾個」，而名次本身
+         就是排名資訊。 */
+      .stats-rank--top {
+        color: #fff;
+        background: var(--accent);
+      }
+
+      .stats-excerpt {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        color: var(--ink-2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .stats-excerpt:empty {
+        display: none;
+      }
+
+      /* 排行榜的窄表格：只需要名次、一個主值與一到兩個副值，欄寬都固定。 */
+      .stats-board .table th,
+      .stats-board .table td {
+        padding: 10px 12px;
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-stats.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-stats.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go）。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>登入與 Session｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 登入與 Session 管理（/admin/sessions）樣式
+       *
+       * 共用層在 /style.css。本區塊只放這一頁自己的東西。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 篩選列 ---------------------------------------------------------
+       * 只有一個輸入框 + 兩個按鈕，因此用 flex 靠左而不是 grid 攤滿寬度 ——
+       * 攤滿會讓一個 280px 的輸入框看起來像一個被遺忘的欄位。
+       * ------------------------------------------------------------------ */
+      .session-filter {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 10px;
+      }
+
+      .session-filter .field {
+        flex: 1 1 240px;
+        max-width: 340px;
+        min-width: 0;
+      }
+
+      /* --- 兩段說明 --------------------------------------------------------
+       * 兩者用不同的底色，因為它們回答的是不同層級的問題：
+       *   session-privacy 回答「為什麼少了東西」（安全性決策）
+       *   session-expire  回答「這個數字怎麼解讀」（機制說明）
+       * 混在同一個灰色框裡會讓後者看起來像前者的附註而���被略過。
+       * ------------------------------------------------------------------ */
+      .session-privacy {
+        display: grid;
+        gap: 6px;
+        margin: 0 0 14px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+      }
+
+      .session-privacy__title {
+        margin: 0;
+        color: var(--ink);
+        font-size: 12.5px;
+        font-weight: 800;
+      }
+
+      .session-privacy__note {
+        margin: 0;
+        color: var(--ink-2);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .session-expire {
+        margin: 0 0 14px;
+        color: var(--ink-3);
+        font-size: 11.5px;
+        line-height: 1.6;
+      }
+
+      /* 掃描被截斷時的提示。它用警告色而不是錯誤色：不是「壞了」，而是
+         「結果不完整」—— 而一個不完整的清單若沒有被標示，管理員會把它當成
+         完整的清單而漏掉某個 session。 */
+      .session-truncated {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 0 0 14px;
+        padding: 11px 14px;
+        border: 1px solid var(--warn);
+        border-radius: var(--r-md);
+        color: var(--ink);
+        background: var(--warn-soft, var(--surface-2));
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      /* --- Session 欄 ------------------------------------------------------
+       * token 前綴用等寬字體：那是識別碼而不是文案，而它的字元形狀
+       * （hex）正是管理員用來比對兩列的依據。
+       * ------------------------------------------------------------------ */
+      .session-token {
+        color: var(--ink-2);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        letter-spacing: 0.02em;
+      }
+
+      /* 欄標題一律靠左。共用層的 .table th 沒有指定對齊（它繼承自祖先），
+         結果是欄標題與它對應的資料各自對齊 —— 這一頁六欄的內容長度差異極大
+         （email 比 token 前綴長四倍），看起來特別明顯。 */
+      .session-table th {
+        text-align: start;
+      }
+
+      .session-table th.num {
+        text-align: end;
+      }
+
+      /* 剩餘時間的長條。寬度用 inline style 會被 CSP 擋掉（style-src 沒有
+         'unsafe-inline'），因此改用八個階梯 class —— 而那八階對「快要到期
+         嗎」這個判斷已經綽綽有餘。 */
+      .session-remaining {
+        display: block;
+        min-width: 64px;
+        height: 6px;
+        border-radius: 3px;
+        background: var(--surface-3);
+        overflow: hidden;
+      }
+
+      .session-remaining__fill {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+        background: var(--ok);
+      }
+
+      /* 由「剩得少」到「剩得多」：顏色從警示轉為正常，而不是反過來。
+         反過來會讓一根快滿的長條看起來比一根快空的長條更安全。 */
+      .session-remaining--0 .session-remaining__fill { width: 6%; background: var(--danger); }
+      .session-remaining--1 .session-remaining__fill { width: 14%; background: var(--danger); }
+      .session-remaining--2 .session-remaining__fill { width: 26%; background: var(--warn); }
+      .session-remaining--3 .session-remaining__fill { width: 40%; background: var(--warn); }
+      .session-remaining--4 .session-remaining__fill { width: 56%; background: var(--accent); }
+      .session-remaining--5 .session-remaining__fill { width: 70%; background: var(--accent); }
+      .session-remaining--6 .session-remaining__fill { width: 85%; background: var(--ok); }
+      .session-remaining--7 .session-remaining__fill { width: 96%; background: var(--ok); }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-sessions.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-sessions.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go）。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>IP 封鎖｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * IP 封鎖名單（/admin/blocks）樣式
+       *
+       * 共用層在 /style.css。本區塊只放這一頁自己的東西。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 三段說明 ---------------------------------------------------------
+       * 這一頁的價值有一半在文字上：管理員若不知道「封鎖只擋寫入」「不會自動
+       * 封鎖」「最長一年」，他就會在錯誤的期待下使用它 —— 例如以為封鎖會讓
+       * 那個人連讀都讀不到（於是另外去動帳號權限），或是以為一年後它還在。
+       *
+       * 三段用不同的底色，但它們**不是**嚴重度：scopeNote 是「功能範圍」、
+       * notAutoNote 是「這個機制不做什麼」、maxNote 是「一個限制」。它們都
+       * 是中性資訊，所以共用 --surface-2 而不是警告色 —— 用警告色會讓三者
+       * 看起來像三則告警，而那會讓人略過。
+       * ------------------------------------------------------------------ */
+      .block-notes {
+        display: grid;
+        gap: 10px;
+        margin: 0 0 16px;
+      }
+
+      .block-note {
+        margin: 0;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+        color: var(--ink-2);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .block-note__label {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--ink);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+
+      /* --- 封鎖表單 --------------------------------------------------------
+       * 用 field 群組（每個欄位自帶標籤）而不是一個橫排的 input+select：
+       * 這個表單有三個不同寬度的輸入（IP 最寬、時長最窄、原因最寬且要多行），
+       * 橫排在窄視窗上會各自被壓到看不清。
+       * ------------------------------------------------------------------ */
+      .block-form {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) minmax(120px, 200px);
+        gap: 12px 14px;
+        align-items: end;
+        margin-bottom: 18px;
+      }
+
+      .block-form__reason {
+        grid-column: 1 / -1;
+      }
+
+      .block-form__actions {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+      }
+
+      /* --- 封鎖清單 --------------------------------------------------------
+       * min-width 讓數值欄在最窄視窗下仍然不換行；IP 位址欄不設 min-width
+       * 因為它本來就短（最長 45 個字元的 IPv6 仍放得下）。
+       * ------------------------------------------------------------------ */
+      .block-table {
+        min-width: 520px;
+      }
+
+      /* 欄標題一律靠左。共用層的 .table th 沒有指定對齊（它繼承自祖先），
+         結果是欄標題跟著「數值欄靠右、文字欄靠左」的資料各自對齊，在這頁
+         特別明顯（第一欄的 IP 很短、第四欄的按鈕很窄）。 */
+      .block-table th {
+        text-align: start;
+      }
+
+      .block-table th.num {
+        text-align: end;
+      }
+
+      .block-ip {
+        color: var(--ink);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      /* 剩餘時間的長條：寬度用 inline style 會被 CSP 擋掉（style-src 沒有
+         'unsafe-inline'），因此改用八個階梯 class。顏色由「快滿」到「快空」
+         轉為正常，而不是反過來。 */
+      .block-remaining {
+        display: block;
+        min-width: 64px;
+        height: 6px;
+        border-radius: 3px;
+        background: var(--surface-3);
+        overflow: hidden;
+      }
+
+      .block-remaining__fill {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+        background: var(--ok);
+      }
+
+      .block-remaining--0 .block-remaining__fill { width: 6%; background: var(--danger); }
+      .block-remaining--1 .block-remaining__fill { width: 14%; background: var(--danger); }
+      .block-remaining--2 .block-remaining__fill { width: 26%; background: var(--warn); }
+      .block-remaining--3 .block-remaining__fill { width: 40%; background: var(--warn); }
+      .block-remaining--4 .block-remaining__fill { width: 56%; background: var(--accent); }
+      .block-remaining--5 .block-remaining__fill { width: 70%; background: var(--accent); }
+      .block-remaining--6 .block-remaining__fill { width: 85%; background: var(--ok); }
+      .block-remaining--7 .block-remaining__fill { width: 96%; background: var(--ok); }
+
+      /* --- 這一頁專屬的斷點 ------------------------------------------------
+       * 表單在 720px 以下改成單欄：IP 與時長並排在窄視窗上會讓兩者都被壓到
+       * 只剩半個位址的寬度。
+       * ------------------------------------------------------------------ */
+      @media (max-width: 720px) {
+        .block-form {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-blocks.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-blocks.tsx"></script>
+  </body>
+</html>

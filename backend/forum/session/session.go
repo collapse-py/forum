@@ -33,6 +33,10 @@ Package session 負責論壇的登入態（session）簽發、驗證與撤銷。
     撤銷不會因用戶端中途斷線而被取消；代價是放棄請求層級的逾時控制。
   - token 在 session 存續期間不會輪替，也不綁定 IP 或 UA，因此遭竊的 cookie
     在過期前可被完整重用；唯一能提前失效的手段是登出或直接清除 Redis key。
+    後臺的「列出 session」與「強制登出」是為了讓這件事可管理，見 session_list.go。
+
+  4. 建立時間寫進 hash（created_at），但**不回傳完整 token 給任何介面** ——
+    token 就是憑證，因此後臺只顯示前 8 個字元。詳見 session_list.go 檔頭。
 */
 
 import (
@@ -48,15 +52,17 @@ import (
 
 // Info 描述一支 session 在 Redis hash 中的語意欄位，欄位說明如下：
 //
-//	Expiry   這支 session 的到期時間點。Redis 以 key 的 TTL 為準，寫入時不會
-//	         另外存時間戳，因此要查到期時間必須讀 TTL，而不是這個欄位。
-//	IsAdmin  對應 hash 欄位 is_admin。管理員與否在登入當下由
-//	         config.IsAdminEmail 判定後寫死，不是每次請求即時重算。
-//	Email    對應 hash 欄位 email，即論壇唯一的身分識別。
+//	Expiry     這支 session 的到期時間點。Redis 以 key 的 TTL 為準，寫入時不會
+//	           另外存時間戳，因此要查到期時間必須讀 TTL，而不是這個欄位。
+//	IsAdmin    對應 hash 欄位 is_admin。管理員與否在登入當下由
+//	           config.IsAdminEmail 判定後寫死，不是每次請求即時重算。
+//	Email      對應 hash 欄位 email，即論壇唯一的身分識別。
+//	CreatedAt  對應 hash 欄位 created_at（Unix 秒）。這是後來才加入的欄位，
+//	           因此既有 session 沒有它；讀取時缺欄位要回零值而不是猜一個
+//	           （見 session_list.go 的 Record.CreatedAt 說明）。
 //
-// 現況下本套件只以 HGet 逐欄讀取，並沒有任何函式回傳 Info；保留此型別是為了
-// 集中記錄欄位語意，並預留日後「一次撈出整筆 session」或「列出某使用者所有
-// session」的擴充點。
+// 本型別與 List 回傳的 Record 並存，差別在用途：Info 是「查單一支 session」
+// 的結果，Record 是「掃描出很多支」的結果。保留 Info 是為了不動既有呼叫端。
 type Info struct {
 	Expiry  time.Time
 	IsAdmin bool
@@ -133,7 +139,20 @@ func (m *Manager) Create(email string, isAdmin bool) (string, error) {
 	// isAdmin 存成字串 "true"/"false"：Redis hash 的值只有字串型別，
 	// 用 strconv.FormatBool 與 Read 時的字串比較保持對稱。
 	// HSet 而非 Set，是為了之後擴充欄位時不必改變 key 的資料型別。
-	if err := m.rdb.HSet(ctx, key, "email", email, "is_admin", strconv.FormatBool(isAdmin)).Err(); err != nil {
+	//
+	// created_at 是後來才加入的欄位（見 List 的說明）：它讓後臺的 session 列表
+	// 能顯示「這支 session 是什麼時候建立的」。既有 session 沒有這個欄位，
+	// 而那一類 session 在介面上會顯示為「未知」—— 補寫回去是不可能的
+	// （建立時間已經過去了），而猜一個值只會產生比「不知道」更糟的資料。
+	//
+	// 存 Unix 秒而非 RFC3339：Unix 秒是固定長度的數字，比較與顯示都直接，
+	// 而且不帶時區資訊（UTC 這個事實由寫入端與讀取端各自固定，見
+	// session_list.go 的 CreatedAt 處理）。
+	if err := m.rdb.HSet(ctx, key,
+		"email", email,
+		"is_admin", strconv.FormatBool(isAdmin),
+		createdAtField, strconv.FormatInt(time.Now().Unix(), 10),
+	).Err(); err != nil {
 		return "", err
 	}
 	// HSet 與 Expire 分成兩道指令而非交易或 pipeline：兩者之間若當機，會留下

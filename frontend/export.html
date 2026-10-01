@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go）。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>匯出與批次｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 匯出與批次操作（/admin/export）樣式
+       *
+       * 共用層在 /style.css。本區塊只放匯出卡片與安全提示的排版。
+       *
+       * 這三份匯出是**唯讀的三個下載按鈕**，刻意沒有做成「點一個按鈕就開始
+       * 匯出」：那需要一個 POST（因為 GET 會被爬蟲與預讀觸發，而這三份檔案
+       * 含有全站使用者的 email 與自由文字）。用 <a download> 直接指向後端的
+       * GET 端點，語意最誠實 —— 它本來就是取得一份檔案，不是「執行一個動作」。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 匯出卡片 --------------------------------------------------------
+       * 用 grid 而不是 table：三張卡片的內容結構相同但寬度需求不同（使用者
+       * 清單的說明最短、檢舉工單最長），表格會讓最短的那張被迫配合最長的。
+       * min-width(280px) 是讓兩欄在三欄與一欄之間自然換行的臨界值。
+       * ------------------------------------------------------------------ */
+      .export-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 14px;
+      }
+
+      .export-card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 18px 20px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface);
+        box-shadow: var(--sh-1);
+      }
+
+      .export-card__name {
+        font-size: 14px;
+        font-weight: 800;
+      }
+
+      .export-card__note {
+        margin: 0;
+        color: var(--ink-2);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      /* .btn 在共用層；這裡只調大小 —— 下載是這一頁的主要動作，需要比
+         其他次要按鈕更醒目。
+         margin-top: auto 把按鈕推到卡片底部，因此三張卡的下載鈕落在同一條
+         水平線上：內容長度不同（檢舉工單的欄位清單比使用者清單長兩倍），
+         而按鈕參差不齊會讓「三個等價的下載」看起來像三個不同的層級。 */
+      .export-card__action {
+        align-self: flex-start;
+        margin-top: auto;
+        padding-top: 4px;
+      }
+
+      /* 欄位清單：等寬字體，因為那是資料結構而不是文案。 */
+      .export-card__columns {
+        margin: 0;
+        color: var(--ink-3);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        line-height: 1.6;
+        overflow-wrap: anywhere;
+      }
+
+      /* --- 安全提示 --------------------------------------------------------
+       * 這一段是整個功能裡最不能省的說明（見 messages.ts 裡 export.safetyPrefix
+       * 的註解）：管理員在匯出檔裡看到單引號前綴卻沒有任何說明時，會以為那是
+       * 資料損壞，然後可能會要求移除那個前綴。
+       *
+       * 因此它用中性灰（--surface-2）而不是警告黃：它描述的是「機制的運作
+       * 方式」而不是「某件事出了問題」，用警告色會讓它看起來像一則警告，
+       * 而那會被忽略。
+       * ------------------------------------------------------------------ */
+      .export-safety {
+        display: grid;
+        gap: 8px;
+        margin: 16px 0 0;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+        color: var(--ink-2);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .export-safety strong {
+        color: var(--ink);
+      }
+
+      /* --- 批次操作說明 ---------------------------------------------------- */
+      .export-batch-note {
+        margin: 0;
+        color: var(--ink-2);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      /* 清單與說明文字之間的間距。用 class 而不是 inline style：CSP 的
+         style-src 沒有 'unsafe-inline'，style 屬性會被整個擋掉（見
+         backend/forum/httpapi/securityheaders.go）。 */
+      .export-batch-note--after {
+        margin-top: 14px;
+      }
+
+      .export-batch-list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .export-batch-item {
+        display: grid;
+        gap: 4px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface);
+      }
+
+      .export-batch-item__name {
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .export-batch-item__note {
+        margin: 0;
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      /* --- 使用者頁的批次列 ------------------------------------------------
+       * 這些規則在 admin.html（用戶管理頁）的 <style> 裡，因為選取狀態只存在
+       * 那個頁面。共用層的 .panel__actions 已經提供 flex 與間距，這裡只補
+       * 三個那一頁特有的東西。
+       * ------------------------------------------------------------------ */
+      .batch-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .batch-bar__count {
+        color: var(--ink-2);
+        font-size: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .batch-bar__hint {
+        margin: 0;
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      /* 選取欄（核取方塊那一欄）。固定寬度讓表格的所有資料欄維持原本的對齊 ——
+         核取方塊欄的寬度若隨內容變動，右邊的數值欄會跟著左右移動。 */
+      .users-pick {
+        width: 1%;
+        white-space: nowrap;
+      }
+
+      .users-pick input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-export.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-export.tsx"></script>
+  </body>
+</html>

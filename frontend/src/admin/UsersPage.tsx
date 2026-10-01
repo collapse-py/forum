@@ -25,7 +25,7 @@ import { adminApi, checkAdmin } from '../api/admin';
 import { errorMessage, errorText, formatDateTime, formatNumber, text } from '../core';
 import { msg, t, tr, usePageTitle, type Message } from '../i18n';
 import { SITE_SHORT_NAME } from '../site';
-import type { AdminTag, AdminUser, AdminUserContent, AdminUserPost, ItemsResponse } from '../types';
+import type { AdminTag, AdminUser, AdminUserContent, AdminUserPost, BatchResult, ItemsResponse } from '../types';
 import { useAdmin } from './provider';
 import { AdminShell } from './shell';
 import {
@@ -39,7 +39,7 @@ import {
   type ListState,
 } from './ui';
 
-const USER_COLUMNS = 8;
+const USER_COLUMNS = 9;
 const TAG_COLUMNS = 5;
 
 type Gate = 'checking' | 'admin' | 'denied';
@@ -76,6 +76,18 @@ export function UsersPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, DetailState>>({});
+  /*
+   * 批次選取。
+   *
+   * 存成 Set 而不是陣列：勾選、切換、重載都會用到「包含測試」，而陣列
+   * 每次都要 O(n) 掃描。它是 state，因此每次更新都要產生新的 Set（React
+   * 靠參考相等判斷有沒有變），這在 200 個選取時是完全可以接受的。
+   *
+   * 這裡存的是 email 而非索引：索引會因為重新載入而失效，而 email 是這張
+   * 表的天然鍵（也是後端批次端點的識別值）。
+   */
+  const [selection, setSelection] = useState<ReadonlySet<string>>(() => new Set());
+  const [batchRunning, setBatchRunning] = useState<'suspend' | 'reinstate' | 'tags' | null>(null);
 
   /*
    * 標題取決於閘門結果：通過後是這個頁面的標題，沒通過就維持 admin.html 原本
@@ -380,6 +392,125 @@ export function UsersPage() {
     toast(t('users.refreshDone'), 'ok');
   };
 
+  /* --- 批次操作 ------------------------------------------------------------- */
+
+  /*
+   * 選取的 email 清單**在 render 時**從 users.items 推導，而不是直接用
+   * selection 的內容。
+   *
+   * 這個設計處理兩件不會報錯、但會讓操作結果無法解釋的事：
+   *   1. 使用者按「重新整理」之後，某個帳號可能已不存在（被刪掉、或資料
+   *      剛好換成沒有它的匯入結果）。若直接用 selection，那個 email 還是會
+   *      被送到後端，然後出現在 skipped 清單裡 —— 讓使用者以為是自己選錯了。
+   *   2. 選取必須依畫面上的順序（後端會依這個順序回 skipped，因此那個順序
+   *      是「與勾選順序一致」的保證）。
+   * 兩個需求一起指向「從當前列表推導」，而且它讓 selection 的生命週期變成
+   * 純粹的勾選意圖，不需要在重新載入時手動清理。
+   */
+  const selectedEmails = useMemo(() => {
+    if (users.phase !== 'ready' || selection.size === 0) return [];
+    return users.items.filter((user) => selection.has(user.email)).map((user) => user.email);
+  }, [selection, users]);
+
+  const toggleSelected = useCallback((email: string) => {
+    setSelection((previous) => {
+      const next = new Set(previous);
+      if (!next.delete(email)) next.add(email);
+      return next;
+    });
+  }, []);
+
+  // 全選 / 取消全選的按鈕放在批次列而不是表頭：表頭的核取方塊是「全選」最
+  // 直覺的位置，但那一欄還要在沒有選取時顯示「0 / 0」之類的輔助文字，而
+  // 批次列已經承載了選取相關的所有說明。
+  const allSelected = selectedEmails.length > 0 && selectedEmails.length === (users.phase === 'ready' ? users.items.length : 0);
+
+  const clearSelection = useCallback(() => setSelection(new Set()), []);
+
+  /*
+   * 批次操作的共用流程：確認 → 送出 → 報告結果 → 重載。
+   *
+   * 結果的呈現刻意分成兩段（toast 給一句話、skipped 給清單）：批次停權 200
+   * 個帳號而其中 3 個不存在時，只說「已更新 197 個」會讓使用者以為那 3 個
+   * 也被處理了。因此 skipped 一定被顯示，而且一定指出 email 與原因。
+   */
+  const runBatch = useCallback(
+    async (kind: 'suspend' | 'reinstate' | 'tags', tagIds: number[] | null, confirmMessage: string) => {
+      if (selectedEmails.length === 0) return;
+      const ok = await dialog.confirm({
+        title: kind === 'tags' ? t('export.batchTags') : t(kind === 'suspend' ? 'export.batchSuspend' : 'export.batchReinstate'),
+        message: confirmMessage,
+        confirmLabel: t('common.confirm'),
+      });
+      if (!ok) return;
+
+      setBatchRunning(kind);
+      try {
+        const path = kind === 'tags' ? '/api/admin/batch/tags' : '/api/admin/batch/status';
+        const body = kind === 'tags' ? { emails: selectedEmails, tagIds: tagIds ?? [] } : { emails: selectedEmails, status: kind === 'suspend' ? 'SUSPENDED' : 'ACTIVE' };
+        const result = await adminApi<BatchResult, typeof body>(path, { method: 'POST', body });
+        const updated = result?.counts?.updated ?? 0;
+        const unchanged = result?.counts?.unchanged ?? 0;
+        const skipped = result?.skipped ?? [];
+
+        let summary = t('export.batchDone', { updated: formatNumber(updated) });
+        if (unchanged > 0) {
+          summary += `　${t('export.batchDoneUnchanged', { unchanged: formatNumber(unchanged) })}`;
+        }
+        toast(summary, skipped.length > 0 ? 'error' : 'ok');
+
+        // skipped 逐項顯示 email 與後端給的原因。後端的 reason 是中文說明
+        // （例如「帳號不存在」），而 email 與 reason 都要原樣顯示 —— 這是
+        // 唯一能讓使用者知道「我該去處理什麼」的資訊。
+        for (const item of skipped) {
+          toast(`${item.email} — ${item.reason}`, 'error');
+        }
+
+        // 成功之後清掉選取：那一批已經處理完了，留著選取會讓使用者以為可以
+        // 再按一次（而那會得到「未變更」）。
+        clearSelection();
+        await loadUsers();
+      } catch (error) {
+        toast(errorMessage(error, t('common.updateFailed')), 'error');
+      } finally {
+        setBatchRunning(null);
+      }
+    },
+    [clearSelection, dialog, loadUsers, selectedEmails, toast],
+  );
+
+  const batchSuspend = useCallback(() => {
+    void runBatch('suspend', null, t('export.batchConfirm', {
+      count: formatNumber(selectedEmails.length),
+      action: t('export.batchSuspend'),
+    }));
+  }, [runBatch, selectedEmails.length]);
+
+  const batchReinstate = useCallback(() => {
+    void runBatch('reinstate', null, t('export.batchConfirm', {
+      count: formatNumber(selectedEmails.length),
+      action: t('export.batchReinstate'),
+    }));
+  }, [runBatch, selectedEmails.length]);
+
+  const batchTags = useCallback(async () => {
+    const available = tags.phase === 'ready' ? tags.items : [];
+    const picked = await dialog.pickTags({
+      title: t('export.batchTags'),
+      message: t('export.batchTagsNote'),
+      tags: available,
+      selectedIds: [],
+    });
+    if (picked === null) return;
+    const names = available.filter((tag) => picked.includes(tag.id)).map((tag) => tag.name);
+    // picked 為空陣列是「清除所有標籤」，不是「取消」。dialog 對取消回傳 null
+    // （見 provider 的 pickTags），因此這裡的空陣列一定是有意的選擇。
+    void runBatch('tags', picked, t('export.batchConfirmTags', {
+      count: formatNumber(selectedEmails.length),
+      tags: names.length > 0 ? names.join('、') : t('export.batchTagsNone'),
+    }));
+  }, [dialog, runBatch, selectedEmails.length, tags]);
+
   /* --- 畫面 --------------------------------------------------------------- */
 
   return (
@@ -430,11 +561,51 @@ export function UsersPage() {
                 </h2>
                 <p className="panel__note">{tr(usersSummary)}</p>
               </div>
+              {/* 批次列。位置在 panel__head 而不是表格上方：它是「對已選取者
+                  做什麼」的控制項，而選取狀態是從表格裡的核取方塊來的 ——
+                  把它放在表格正上方會讓它看起來像篩選器。 */}
+              {selectedEmails.length > 0 ? (
+                <div className="panel__actions batch-bar">
+                  <span className="batch-bar__count">{t('export.selected', { count: formatNumber(selectedEmails.length) })}</span>
+                  <BusyButton busy={batchRunning === 'suspend'} className="btn btn--sm btn--danger" onClick={batchSuspend}>
+                    {t('export.batchSuspend')}
+                  </BusyButton>
+                  <BusyButton busy={batchRunning === 'reinstate'} className="btn btn--sm" onClick={batchReinstate}>
+                    {t('export.batchReinstate')}
+                  </BusyButton>
+                  <BusyButton busy={batchRunning === 'tags'} className="btn btn--sm" onClick={() => void batchTags()}>
+                    {t('export.batchTags')}
+                  </BusyButton>
+                  <button className="btn btn--sm btn--ghost" onClick={clearSelection}>
+                    {t('export.clearSelection')}
+                  </button>
+                </div>
+              ) : (
+                <div className="panel__actions">
+                  <p className="batch-bar__hint">{t('export.noSelection')}</p>
+                </div>
+              )}
             </div>
             <div className="table-wrap">
               <table className="table table--users">
                 <thead>
                   <tr>
+                      <th scope="col" className="users-pick">
+                        <button
+                          className="btn btn--sm btn--ghost"
+                          onClick={() =>
+                            allSelected ? clearSelection() : setSelection(new Set(users.phase === 'ready' ? users.items.map((user) => user.email) : []))
+                          }
+                          disabled={users.phase !== 'ready' || users.items.length === 0}
+                          title={
+                            allSelected
+                              ? t('export.clearSelection')
+                              : t('export.selected', { count: formatNumber(users.phase === 'ready' ? users.items.length : 0) })
+                          }
+                        >
+                          {allSelected ? t('export.clearSelection') : t('common.selectAll')}
+                        </button>
+                      </th>
                     <th scope="col">{t('users.colUser')}</th>
                     <th scope="col">{t('users.colTags')}</th>
                     <th scope="col">{t('users.colStatus')}</th>
@@ -461,6 +632,14 @@ export function UsersPage() {
                         return (
                           <Fragment key={user.email}>
                             <tr>
+                              <td className="users-pick">
+                                <input
+                                  type="checkbox"
+                                  checked={selection.has(user.email)}
+                                  onChange={() => toggleSelected(user.email)}
+                                  aria-label={user.email}
+                                />
+                              </td>
                               <td>
                                 <span className="cell-primary">{text(user.nickname) || t('users.nicknameUnset')}</span>
                                 <span className="cell-sub">{user.email}</span>

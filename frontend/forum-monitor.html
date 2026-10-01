@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>系統監控｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 系統監控（/admin/monitor）樣式
+       *
+       * 共用層在 /style.css：<body class="admin-page"> 的元素 reset、後臺
+       * design tokens、rail / topbar / canvas 殼層、面板、按鈕、表單、表格
+       * 基礎、badge、列表狀態、對話框與 toast。本區塊只放這一頁自己渲染的
+       * 東西：狀態列、服務狀態卡、流量圖、依賴卡、監控專屬的表格變體。
+       *
+       * .stats / .stat / .stat__label / .stat__value / .stat--warn / .stat--ok
+       * 是從 admin.html（用戶管理頁）沿用過來的三組規則，而不是搬進
+       * style.css：那三組規則目前的文字長度、字重與圓角是為了配合用戶統計的
+       * 數字量級；監控頁多了「記憶體」「連線池」這類文字較長的值，間距需要
+       * 調整（見下面的 .monitor-stats）。共用一份規則再各自覆寫，會讓兩頁的
+       * 統計卡長得半像半不像。等第二個頁面真的長成一樣時再整組搬過去。
+       *
+       * <body> 上的 admin-page 是這支 CSS 與公開頁唯一的分界：共用層的元素
+       * reset（a 的顏色、h1~h4 的字重、focus 圈）對淺色公開頁是錯的，必須
+       * 有東西擋住它，而 body 的 class 是最便宜也最明確的開關。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 狀態列 ---------------------------------------------------------
+       * 三段（錯誤／最後更新／倒數）排在同一行，空的段落直接不渲染。
+       * 位置放在 page-head 之下而不是 panel 之內：它的作用是回答「下面這
+       * 些數字有多舊」，那個問題在看到任何數字之前就成立。
+       * ------------------------------------------------------------------ */
+      .monitor-status {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 16px;
+        margin: 0;
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      .monitor-status__error {
+        color: var(--danger);
+        font-weight: 700;
+      }
+
+      /* --- 自動更新開關 ---------------------------------------------------
+       * 不用 .field：那一組是表單欄位（含 field__label 與 field__hint 的直立
+       * 排列），而這是一個放進 page-head__actions 的單行控制項。
+       * ------------------------------------------------------------------ */
+      .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--ink-2);
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .switch input {
+        width: 15px;
+        height: 15px;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+
+      /* --- 統計卡 ---------------------------------------------------------
+       * 沿用 admin.html 的 .stats 網格，但最小欄寬放寬到 190px：監控頁的值
+       * 多半是「1.2 GiB」「24.0%」這種比純數字長的東西，太窄會讓字被截斷。
+       * ------------------------------------------------------------------ */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 14px;
+      }
+
+      .stat {
+        display: grid;
+        align-content: start;
+        gap: 4px;
+        padding: 15px 17px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface);
+        box-shadow: var(--sh-1);
+      }
+
+      .stat__label {
+        color: var(--ink-3);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .stat__value {
+        font-size: 24px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.25;
+      }
+
+      /* 副標（峰值、4xx／5xx 拆分）是「同一個數字的另一個面向」，因此刻意比
+         主值小兩級且用弱色：它是補充，不是第二個要比較的數字。 */
+      .stat__note {
+        color: var(--ink-3);
+        font-size: 10.5px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .stat--warn .stat__value {
+        color: var(--warn);
+      }
+
+      .stat--ok .stat__value {
+        color: var(--ok);
+      }
+
+      /* --- 服務狀態卡 -----------------------------------------------------
+       * auto-fit 而非固定三欄：依賴數量將來若增加（快取、佇列）時，
+       * 固定三欄會讓第四張卡掉到下一列的左邊緣。
+       * ------------------------------------------------------------------ */
+      .dep-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+      }
+
+      .dep {
+        display: grid;
+        align-content: start;
+        gap: 6px;
+        padding: 15px 17px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+      }
+
+      .dep__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 2px;
+      }
+
+      .dep__name {
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .dep__line {
+        margin: 0;
+        color: var(--ink-2);
+        font-size: 11.5px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 錯誤訊息用等寬字體：那是驅動程式或網路層的原始字串，比例字體下
+         句點、冒號與底線的粗細會糊在一起而難以閱讀。 */
+      .dep__error {
+        margin: 2px 0 0;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+        color: var(--danger);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+
+      /* --- 圖例 ----------------------------------------------------------- */
+      .monitor-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        margin: 0;
+        color: var(--ink-3);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .monitor-legend__item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .monitor-legend__swatch {
+        display: block;
+        width: 10px;
+        height: 10px;
+        border-radius: 3px;
+      }
+
+      .monitor-legend__swatch--volume {
+        background: var(--accent);
+      }
+
+      .monitor-legend__swatch--error {
+        background: var(--danger);
+      }
+
+      /* 重啟前的資料用虛線邊框而不是第三個顏色：顏色已經在表達「正常 vs
+         有 5xx」了，而「這段是重啟前的紀錄」是關於可信度的註記，不是另一種
+         事件。用同一個強調色配不同透明度，兩種維度就分開了。 */
+      .monitor-legend__swatch--history {
+        border: 1px dashed var(--ink-3);
+        background: var(--surface-3);
+      }
+
+      /* --- 分鐘流量圖 -----------------------------------------------------
+       * 固定高度 + align-items: flex-end：柱子由下往上長，這是時間序列的
+       * 預期方向（時間由左往右、數量由下往上）。
+       *
+       * overflow-x: auto 而不是縮放：144 根柱子在 1280px 的畫面下每根約 7px，
+       * 已經細到能看出波動；再窄就會讓鄰近的柱子黏成一條。因此寧可讓它捲動，
+       * 也不把「每分鐘」這個時間單位壓掉 —— 一張看不出分鐘的流量圖沒有用。
+       * 彈性基準與最小寬刻意讓 144 根柱子在大多數螢幕上「剛好放得下」：只要能
+       * 放下就不會出現那條永遠在的捲軸（它是整個版面最吵的一個元素），而窄
+       * 螢幕上再讓它捲。
+       * ------------------------------------------------------------------ */
+      .monitor-timeline {
+        display: flex;
+        align-items: flex-end;
+        gap: 1px;
+        height: 132px;
+        padding: 10px 12px;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--surface-2);
+      }
+
+      .monitor-timeline--empty {
+        align-items: center;
+      }
+
+      .monitor-bar {
+        position: relative;
+        display: flex;
+        flex: 1 1 4px;
+        align-items: flex-end;
+        height: 100%;
+        min-width: 3px;
+      }
+
+      /* 沒有資料的分鐘：畫一條基線而不是留白，讓「沒有流量」和「圖還沒
+         載入」在畫面上可區分 —— 空白很容易被當成載入中。 */
+      .monitor-bar__fill {
+        display: block;
+        width: 100%;
+        min-height: 2px;
+        border-radius: 2px 2px 0 0;
+        background: var(--accent);
+      }
+
+      .monitor-bar.has-error .monitor-bar__fill {
+        background: var(--danger);
+      }
+
+      /* 超出 95 百分位的分鐘：換成較深的強調色而不是拉高柱子。
+         柱子已經頂到天花板（第 8 階），若只靠高度表達「這一格特別高」就沒有了
+         任何對照；換色讓「這是異常值」在沒有刻度的圖上仍然看得出來。 */
+      .monitor-bar.is-over .monitor-bar__fill {
+        background: var(--accent-2);
+      }
+
+      .monitor-bar.is-over.has-error .monitor-bar__fill {
+        background: var(--danger);
+      }
+
+      .monitor-bar.is-history .monitor-bar__fill {
+        border: 1px dashed var(--ink-3);
+        background: var(--surface-3);
+      }
+
+      /* 八階量化。階梯而非連續高度是刻意的：見 MonitorPage 的 Timeline
+         註解 —— 高度越接近連續，讀者就越會把它當成精確數字。 */
+      .monitor-bar__fill--1 {
+        height: 6%;
+      }
+      .monitor-bar__fill--2 {
+        height: 16%;
+      }
+      .monitor-bar__fill--3 {
+        height: 28%;
+      }
+      .monitor-bar__fill--4 {
+        height: 42%;
+      }
+      .monitor-bar__fill--5 {
+        height: 56%;
+      }
+      .monitor-bar__fill--6 {
+        height: 70%;
+      }
+      .monitor-bar__fill--7 {
+        height: 84%;
+      }
+      .monitor-bar__fill--8 {
+        height: 100%;
+      }
+
+      /* 懸停提示。用 attr() 不行（內容要含格式化後的數字），因此提示文字
+         放在 .monitor-bar 內的一個 span，由 CSS 控制顯示。144 根柱子各多
+         一個 span 的成本可以忽略。 */
+      .monitor-bar__tip {
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 50%;
+        z-index: 2;
+        padding: 4px 8px;
+        border: 1px solid var(--line-2);
+        border-radius: var(--r-sm);
+        color: var(--ink);
+        background: var(--surface);
+        box-shadow: var(--sh-2);
+        font-size: 10.5px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        opacity: 0;
+        transform: translateX(-50%);
+        transition: opacity 120ms var(--ease);
+        pointer-events: none;
+      }
+
+      .monitor-bar:hover .monitor-bar__tip,
+      .monitor-bar:focus-within .monitor-bar__tip {
+        opacity: 1;
+      }
+
+      /* 右側最後 16 根柱子的提示改為靠右收邊。
+         提示框是以柱子中心為基準的絕對定位元素，寬度約 100px；最右邊那幾根柱子
+         的提示因此會伸出容器右緣之外。容器是 overflow-x: auto，超出的部分會
+         撐出一條捲軸 —— 而這條捲軸會「永遠」在（它撐出的量不隨 hover 改變），
+         於是整個版面多了一道與內容無關的吵鬧元素。往左收邊就消除了它。
+         16 是 100px ÷ 柱寬（約 7px）的向上取整。 */
+      .monitor-bar:nth-last-child(-n + 16) .monitor-bar__tip {
+        left: auto;
+        right: 0;
+        transform: none;
+      }
+
+      .monitor-hint {
+        margin: 10px 0 0;
+        color: var(--ink-3);
+        font-size: 11px;
+      }
+
+      /* --- 監控專屬的表格 -------------------------------------------------
+       * 只設 min-width（讓數值欄在最窄的視窗下不換行）與第一欄靠左，刻意
+       * 不設 max-height：資料量已由 MonitorPage 的 MAX_ROUTE_ROWS 封頂，
+       * 再套一層捲動容器只會讓「這一頁有幾條路由」變成看不見的事實，而那
+       * 正是這張表要回答的問題。頁面本身（.canvas）會捲。
+       *
+       * .monitor-routes th:first-child 的 text-align 是必要的修正：
+       * 共用層的 .table th 沒有指定對齊，因此在這個「數值欄靠右、文字欄
+       * 靠左」的表裡，欄標題會跟著內容量寬而看起來像置中，與它對應的資料
+       * 對不齊。
+       * ------------------------------------------------------------------ */
+      .monitor-routes {
+        min-width: 780px;
+      }
+
+      .monitor-routes th:first-child,
+      .monitor-limits th:first-child {
+        text-align: start;
+      }
+
+      .monitor-limits {
+        min-width: 560px;
+      }
+
+      /* 路由欄：method 與路徑並排。method 用等寬小字，讓「同一個 method 的
+         請求量」在視覺上成一組 —— 那才是這一頁要比較的東西。 */
+      .method {
+        display: inline-block;
+        min-width: 52px;
+        margin-inline-end: 8px;
+        padding: 2px 6px;
+        border: 1px solid var(--line-2);
+        border-radius: var(--r-sm);
+        color: var(--ink-2);
+        background: var(--surface-2);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      /* --- 這一頁專屬的斷點 ------------------------------------------------
+       * 依賴卡與統計卡都靠 auto-fit 自行換行，因此這裡只需要處理提示框在
+       * 窄螢幕上的位置：靠右邊緣的柱子如果把提示往右溢出，整個提示框會被
+       * 面板裁掉，滑鼠移到畫面最右邊那幾根柱子時就什麼都看不到。
+       * ------------------------------------------------------------------ */
+      @media (max-width: 720px) {
+        .monitor-bar__tip {
+          left: auto;
+          right: 0;
+          transform: none;
+        }
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/forum-monitor.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-monitor.tsx"></script>
+  </body>
+</html>

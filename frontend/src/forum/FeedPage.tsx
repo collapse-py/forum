@@ -25,6 +25,7 @@ import { LoginRequiredError, errorMessage, goToLogin, requestJSON } from '../cor
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import type { ForumPost } from '../types';
 import { SearchGlyph } from '../icons';
+import { AnnouncementBanner } from './AnnouncementBanner';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
@@ -304,6 +305,15 @@ export function FeedPage() {
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum" install={install} search={searchForm} />
 
       <main className="forum-main">
+        {/*
+         * 公告橫幅放在狀態列**之前**。
+         *
+         * 順序的理由：橫幅是「站方現在要說的事」，狀態列是「你剛才的操作結果」。
+         * 反過來的話，一次失敗的操作訊息會被推到橫幅下方，而那則站方公告會
+         * 被一個只與該使用者有關的訊息擋住 —— 而公告是給所有人看的。
+         */}
+        <AnnouncementBanner />
+
         {searching ? (
           <p className="status" role="status" aria-live="polite">
             {searchStatusText(search.state)}

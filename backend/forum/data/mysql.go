@@ -19,6 +19,9 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 	forum_user_tags              標籤字典
 	forum_user_tag_assignments   使用者與標籤的多對多關聯
 	forum_follows                追蹤關聯，以 (follower_email, target_email) 複合主鍵表示「一人追一人一次」
+	forum_request_metrics        分鐘級請求統計（監控頁的持久化來源；純衍生資料，可整表刪除）
+	forum_admin_actions           管理員操作稽核紀錄（欄位級 diff；只能由時間清理，不可透過 API 刪除）
+	forum_announcements           站內公告（同時只有一列 active；expires_at 可空＝永不自動過期）
 
 關鍵設計決策
 
@@ -533,6 +536,197 @@ func MigrateMySQL(db *sql.DB) error {
 	if postsAuthorIndexCount == 0 {
 		if _, err := db.Exec(`
 			ALTER TABLE forum_posts ADD INDEX idx_forum_posts_author_email (author_email)
+		`); err != nil {
+			return err
+		}
+	}
+
+	// 22) 分鐘級請求統計（監控頁 /admin/monitor 的持久化來源）。
+	//
+	//     一列代表一分鐘，因此主鍵就是 bucket_minute，沒有自增 id：這個表
+	//     永遠是 upsert 與範圍掃描兩種存取，用代理鍵只會讓兩者都要多走一次
+	//     二級索引。時間軸的查詢是 WHERE bucket_minute >= ? ORDER BY
+	//     bucket_minute，剛好就是主鍵的前綴掃描。
+	//
+	//     欄位刻意「足夠畫圖就好」：只存總量、4xx、5xx 與耗時總和，沒有
+	//     依路由分拆的明細表。原因是明細會隨路由數量線性成長，而維運真正
+	//     會回頭查「三小時前那波流量來自哪條路由」的機率非常低 —— 記憶體裡
+	//     的 120 分鐘即時資料已經涵蓋那個情境（見 metrics 套件的說明）。
+	//     需要依路由的長期資料是 access log 的工作，不是這張表的。
+	//
+	//     duration_sum_ms 存的是總和而非平均：平均在累加多個執行個體的分鐘
+	//     時無法正確合併（(10+20)/2 不等於 (30+40)/2），存總和則可以在查詢
+	//     時用 SUM()/COUNT() 得到正確的加權平均。
+	//
+	//     這張表是純衍生資料：刪掉它只會讓監控頁少一段重啟前的歷史，論壇
+	//     的任何功能都不依賴它（見 metrics 套件的「為什麼不做的東西」）。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_request_metrics (
+			bucket_minute DATETIME NOT NULL,
+			total BIGINT NOT NULL DEFAULT 0,
+			client_errors BIGINT NOT NULL DEFAULT 0,
+			server_errors BIGINT NOT NULL DEFAULT 0,
+			duration_sum_ms BIGINT NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket_minute)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 23) 管理員操作稽核紀錄。
+	//
+	//     這張表的唯一用途是回答「誰在什麼時候對哪個對象做了什麼、哪些欄位
+	//     從什麼變成什麼」。它涵蓋後臺所有會改變資料的操作（停權、刪文、
+	//     裁定檢舉、改標籤、代發文），而 access log 做不到這件事：log 只
+	//     記到「某個 IP 對 /api/admin/forum/reports/9 送出 DELETE」。
+	//
+	//     索引的三個方向各對應一個實際會被問的問題：
+	//       idx_created (created_at)          「最近發生了什麼」「清理過期」
+	//       idx_actor   (actor_email, created_at) 「某個管理員做了什麼」
+	//       idx_target  (target_type, target_id) 「某個對象被動過幾次」
+	//     刻意不為 changes 開全文索引：欄位是 JSON，而「哪個欄位被改成某值」
+	//     這種查詢在這個規模下先用 actor/action/target 篩出少量列再讀即可。
+	//
+	//     actor_email 沒有外鍵也沒有索引型別上的限制：它是文字而不是
+	//     forum_users 的參照，因為管理員不一定要有 forum_users 的列
+	//     （ALLOWED_ADMIN_EMAIL 白名單裡的人可能從未發文）。
+	//
+	//     這張表**沒有**提供任何刪除 API，只有依時間的清理
+	//     （audit.Pruner，保留期由 AUDIT_RETENTION_DAYS 控制）。一個能刪
+	//     除自己紀錄的稽核日誌等於沒有稽核日誌。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_admin_actions (
+			id BIGINT NOT NULL AUTO_INCREMENT,
+			actor_email VARCHAR(320) NOT NULL,
+			action VARCHAR(64) NOT NULL,
+			target_type VARCHAR(32) NOT NULL,
+			target_id VARCHAR(320) NOT NULL,
+			target_label VARCHAR(320) NOT NULL DEFAULT '',
+			changes TEXT NULL,
+			ip VARCHAR(64) NOT NULL DEFAULT '',
+			request_id VARCHAR(64) NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (id),
+			KEY idx_forum_admin_actions_created (created_at),
+			KEY idx_forum_admin_actions_actor (actor_email, created_at),
+			KEY idx_forum_admin_actions_target (target_type, target_id),
+			KEY idx_forum_admin_actions_action (action)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 24) forum_users 的 created_at 索引。
+	//
+	//     為什麼在這裡才加：第 10 步建表時沒有這個索引，而它唯一的用途是
+	//     內容趨勢統計（/admin/stats）的「每日新使用者」查詢
+	//     （WHERE created_at >= ? GROUP BY DATE(created_at)）。在那之前沒有
+	//     任何查詢會依 created_at 過濾 forum_users，所以這個索引是純粹的
+	//     新需求帶來的。
+	//
+	//     沒有的話那一條查詢是全表掃描。論壇的使用者數不多（每個都要經過
+	//     Google 登入才會建立），所以全表掃描在這個規模下其實不痛 —— 但
+	//     它是整個 /admin/stats 裡唯一一個「沒有任何可用索引」的查詢，
+	//     也就是唯一一個會隨使用者數成長而變慢的。與其讓它成為未來除錯時
+	//     的疑點，不如現在補上；索引維護的成本是每次建立帳號多寫一筆
+	//     B-tree，而建立帳號是後臺最少見的操作之一。
+	//
+	//     刻意**不**為 forum_posts.author_email 與 forum_posts 補複合索引：
+	//     「熱門作者排行」那條查詢會 GROUP BY author_email 而沒有可用索引，
+	//     但它被 WHERE created_at >= ? 限制在 30 天內，且論壇的文章總量本來
+	//     就遠小於使用者數的成長速度。為了一條有界的查詢在「最熱的表」上
+	//     加索引，是把成本放在每次發文而不是偶爾開一次後臺 —— 取捨不划算。
+	//     同一個理由也讓我沒有為 forum_post_likes.created_at 加索引（那條
+	//     查詢根本沒用到它）。
+	//
+	//     探測寫法照第 17、20、21 步：MySQL 沒有「ADD INDEX IF NOT EXISTS」，
+	//     重複執行同一句會得到 Error 1061（重複的 key 名稱），而整個
+	//     MigrateMySQL 的回傳錯誤會讓主流程 Fatal —— 症狀是「第一次啟動成功、
+	//     第二次之後每次啟動都死」，且錯誤訊息只有一個索引名，極難聯想到是
+	//     遷移本身不冪等。因此索引一律先以 information_schema 確認不存在才建立。
+	var usersCreatedAtIndexCount int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_users' AND INDEX_NAME = 'idx_forum_users_created_at'
+	`).Scan(&usersCreatedAtIndexCount); err != nil {
+		return err
+	}
+	if usersCreatedAtIndexCount == 0 {
+		if _, err := db.Exec(`
+			ALTER TABLE forum_users ADD INDEX idx_forum_users_created_at (created_at)
+		`); err != nil {
+			return err
+		}
+	}
+
+	// 25) 站內公告與文章置頂。
+	//
+	//     forum_announcements 一列是一則公告，而**同一時間只有一則是 active**。
+	//     這個限制是刻意的：公告在公開頁上是一條橫幅，若同時有兩三條，使用者
+	//     會看到一個被橫幅佔掉的上半頁，而其中兩條還可能是互相衝突的
+	//     （一則說「活動改期」、一則說「活動照常」）。表格保留多列是為了
+	//     留下「這則公告是什麼時候、經誰發布、之後被誰關掉」的歷史，而那正是
+	//     稽核紀錄之外的另一半脈絡。
+	//
+	//     expires_at 允許 NULL（永不自動到期）。它存在的理由是「過期」與
+	//     「手動停用」是兩件事：活動結束的公告會自然過期，而放錯一則需要
+	//     立刻消失 —— 前者不該要求管理員記得回來關，後者不該等到過期時間。
+	//
+	//     沒有「排序」欄位：既然同時只有一則 active，排序就沒有作用對象。
+	//     也沒有 FOREIGN KEY 指向 forum_users：公告可能由一個已刪除的
+	//     管理員帳號發布，而那一列仍然要留下。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_announcements (
+			id BIGINT NOT NULL AUTO_INCREMENT,
+			body VARCHAR(300) NOT NULL,
+			active TINYINT NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			created_by VARCHAR(320) NOT NULL,
+			updated_at DATETIME NOT NULL,
+			updated_by VARCHAR(320) NOT NULL DEFAULT '',
+			expires_at DATETIME NULL,
+			PRIMARY KEY (id),
+			KEY idx_forum_announcements_active_expires (active, expires_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 26) forum_posts.pinned 與對應的動態索引。
+	//
+	//     pinned 是 TINYINT 而非 BOOLEAN：MySQL 的 BOOLEAN 其實是 TINYINT(1)，
+	//     宣告成 TINYINT 讓「只有 0/1 兩種值」這件事在型別上直接可見。
+	//
+	//     索引刻意是**遞減**的（MySQL 8.0+ 才支援，README 的環境需求是 MySQL
+	//     8.x）：動態的排序是 pinned DESC, created_at DESC, id DESC，而
+	//     MySQL 的「反向掃描索引」會把**所有**欄位一起反向，因此一個
+	//     (pinned, created_at) 的遞增索引無法服務這個排序 —— 查詢最佳化器會
+	//     判定它不能用而退回 filesort。
+	//
+	//     保留既有的 idx_forum_posts_created_at：搜尋結果、
+	//     profile 的貼文列表與管理端的多處查詢都只按 created_at 排序，
+	//     那些地方不該為了支援置頂而多付一個無法命中的索引。
+	//
+	//     欄位與索引拆成兩句：欄位用 ADD COLUMN IF NOT EXISTS（同第 14、15 步），
+	//     索引則先探測 information_schema —— MySQL 沒有 ADD INDEX IF NOT EXISTS，
+	//     兩者混在一句 ALTER 裡的話，第二次啟動會因重複的 key 名稱（1061）
+	//     讓整個遷移失敗，而主流程會因此 Fatal。
+	if _, err := db.Exec(`
+		ALTER TABLE forum_posts
+			ADD COLUMN IF NOT EXISTS pinned TINYINT NOT NULL DEFAULT 0 AFTER image_url;
+	`); err != nil {
+		return err
+	}
+	var postsFeedIndexCount int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_posts' AND INDEX_NAME = 'idx_forum_posts_feed'
+	`).Scan(&postsFeedIndexCount); err != nil {
+		return err
+	}
+	if postsFeedIndexCount == 0 {
+		if _, err := db.Exec(`
+			ALTER TABLE forum_posts ADD INDEX idx_forum_posts_feed (pinned DESC, created_at DESC, id DESC)
 		`); err != nil {
 			return err
 		}

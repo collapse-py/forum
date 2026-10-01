@@ -116,11 +116,11 @@ func TestDisabledClientIsSafe(t *testing.T) {
 TestSearchDecodesHitsAndTotal 是本檔最重要的一個測試。
 
 它同時守住三件事：
-  1. hits.total 必須被正確解析成數字。這裡刻意使用兩層巢狀的舊寫法時會
-     靜默失效（encoding/json 不寫入值），因此測試用真正的 ES 9 回應格式
-     {"hits":{"total":{"value":7,...}}}。
-  2. 每個 hit 的 id 要從 _source.id 取得（缺漏時退回 _id）。
-  3. 沒有命中時要回空切片而不是 nil slice，呼叫端才不會對 nil range。
+ 1. hits.total 必須被正確解析成數字。這裡刻意使用兩層巢狀的舊寫法時會
+    靜默失效（encoding/json 不寫入值），因此測試用真正的 ES 9 回應格式
+    {"hits":{"total":{"value":7,...}}}。
+ 2. 每個 hit 的 id 要從 _source.id 取得（缺漏時退回 _id）。
+ 3. 沒有命中時要回空切片而不是 nil slice，呼叫端才不會對 nil range。
 */
 func TestSearchDecodesHitsAndTotal(t *testing.T) {
 	var got capturedRequest

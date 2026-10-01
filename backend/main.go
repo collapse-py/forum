@@ -20,6 +20,10 @@ POST /api/forum/image-tokens/release 釋放已不再使用的圖片存取 token�
 GET /api/forum/profile 目前使用者個人資料。
 GET /api/forum/public-profile 他人的公開資料。
 /api/admin/forum/**、/api/admin/users/**、/api/admin/tags/** 後臺管理 API。
+GET /api/admin/monitor 監控資料（Go 執行期、MySQL 連線池、Redis、搜尋引擎、
+請求統計與限流器計數），供 /admin/monitor 頁顯示。
+GET /api/admin/log 管理員操作稽核紀錄（含欄位級 diff），供 /admin/log 頁顯示。
+GET /api/admin/stats 內容趨勢統計（日別新增量與三份排行），供 /admin/stats 頁顯示。
 其餘路徑由 ServeMux 的 "/" catch-all 提供前端靜態檔案。
 本套件沒有匯出符號。
 
@@ -29,6 +33,12 @@ GET /api/forum/public-profile 他人的公開資料。
 直接壞掉首頁。超額回 429 並附 Retry-After。三組限流器的背景清理 goroutine
 由本檔在啟動時呼叫 httpapi.Server.StartRateLimitCleanup 啟動。
 
+【監控與持久化】
+每個請求都會被 metrics 套件計數（正規化後的路由、狀態碼分類、延遲直方圖、
+分鐘桶）。記憶體保留最近 120 分鐘；已結束的分鐘由背景 goroutine 每 20 秒寫進
+forum_request_metrics，保留 MONITOR_RETENTION_HOURS 小時（預設 24）後刪除。
+啟動時先把保留期內的既有彙總讀回記憶體，因此監控頁的時間軸在重啟後不會變空白。
+
 【主要依賴】
 forum/forum/config 設定檔解析。
 forum/forum/logger 全域 logger，其 Fatalf 會記錄後直接 os.Exit(1)。
@@ -36,6 +46,8 @@ forum/forum/data MySQL 連線池與建表遷移。
 forum/forum/session 以 Redis 儲存 session 的 cookie 管理器。
 forum/forum/auth Google OAuth2 授權碼流程。
 forum/forum/es Elasticsearch 傳輸層（貼文搜尋與索引重建）。
+forum/forum/metrics 請求統計容器與分鐘彙總的持久化。
+forum/forum/audit 管理員操作稽核的寫入、查詢與依時間清理。
 forum/forum/httpapi 路由、中介層與請求/回應格式。
 github.com/redis/go-redis/v9 Redis 用戶端。
 golang.org/x/oauth2 為間接依賴，經由 forum/forum/auth 使用。
@@ -72,15 +84,19 @@ package main
 import (
 	"context"
 	"errors"
+	"forum/forum/audit"
 	"forum/forum/auth"
 	"forum/forum/config"
 	"forum/forum/data"
 	"forum/forum/es"
 	"forum/forum/httpapi"
+	"forum/forum/ipban"
 	"forum/forum/logger"
+	"forum/forum/metrics"
 	"forum/forum/session"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -201,6 +217,101 @@ func main() {
 	}()
 
 	logger.Infof("[SERVER] Forum server started at %s", cfg.ServerPort)
+
+	/*
+	 * 啟動監控統計的持久化。
+	 *
+	 * 兩件事，順序有意義：
+	 *
+	 *  1. 先讀回重啟前的分鐘彙總（LoadHistory）。它只是把資料載進記憶體，
+	 *     失敗時只會讓監控頁少了重啟前的曲線 —— 因此錯誤只記警告，不影響
+	 *     服務啟動。監控是診斷工具，它自己缺一塊資料不該讓論壇開不了。
+	 *
+	 *  2. 再啟動定期寫入（StartFlusher）。放在 Handler() 之後才啟動是刻意的：
+	 *     從這一行開始，mux 才真的開始收請求；先啟動 flusher 只會讓第一個
+	 *     分鐘的桶多一點點內容，沒有實質差別，但「服務開始服務的時刻」因此
+	 *     仍然是一個明確的分界。
+	 *
+	 * ctx 用 context.Background()，理由與上面的限流清理相同：本程式沒有
+	 * graceful shutdown，沒有任何地方會取消它。未來接上 signal.Notify 時，
+	 * 只需把這個 ctx 換掉，flusher 就會自動跟著停止 —— StartFlusher 收到
+	 * ctx.Done() 會再做一次收尾寫入，因此不會留下未寫出的分鐘。
+	 *
+	 * 寫入週期 20 秒刻意不等於一分鐘：它寫的是「已結束的分鐘」，所以週期
+	 * 只影響「資料落盤的延遲上限」與「最壞情況下重啟會遺失多久的資料」。
+	 * 20 秒讓最壞情況是一分鐘（當前分鐘）加上零到 20 秒的排隊延遲，而不是
+	 * 一分鐘加上最多一整分鐘的 tick 延遲。
+	 */
+	registry := srv.Metrics()
+	if registry != nil {
+		since := time.Now().Add(-time.Duration(cfg.MonitorRetentionHours) * time.Hour)
+		if loaded, err := registry.LoadHistory(context.Background(), db, since); err != nil {
+			// 表不存在（首次部署尚未跑遷移）或權限不足都會走到這裡。監控頁
+			// 仍會顯示「本次啟動以來」的即時曲線，因此這是警告而不是錯誤。
+			logger.Warnf("[MONITOR] 無法讀回歷史請求統計（監控頁將只顯示本次啟動的資料）: %v", err)
+		} else if loaded > 0 {
+			logger.Infof("[MONITOR] 已讀回 %d 分鐘的歷史請求統計", loaded)
+		}
+		if err := registry.StartFlusher(context.Background(), metrics.FlusherOptions{
+			DB:             db,
+			Interval:       20 * time.Second,
+			RetentionHours: cfg.MonitorRetentionHours,
+		}); err != nil {
+			// 拿不到 *sql.DB 只會發生在 main 的組裝被改動時；此時監控頁
+			// 仍可用（只是沒有重啟前的歷史），因此記警告即可。
+			logger.Warnf("[MONITOR] 請求統計持久化未啟用: %v", err)
+		}
+	}
+
+	/*
+	 * 啟動稽核紀錄的定期清理。
+	 *
+	 * 這裡刻意不設任何中斷條件：稽核紀錄的寫入發生在每個後台操作裡（有交易
+	 * 保護），清理卻與論壇功能無關 —— 它只是讓這張表不會無限長大。若清理
+	 * 因為資料庫暫時不可用而停下來，後台操作本身完全不受影響，只是紀錄會
+	 * 暫時變多。因此用獨立的 goroutine 而不併入 metrics 的 flusher：
+	 * 兩者的失敗語意不同，綁在一起會讓其中一個的問題被誤判成另一個的。
+	 *
+	 * 清理週期一小時一次。稽核紀錄的用途是「有人來查」的時候還查得到，
+	 * 而多存幾小時完全沒有差別，因此小時級的粒度對這個用途綽綽有餘。
+	 */
+	go audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(context.Background())
+
+	/*
+	 * 啟動 IP 封鎖名單的定期清理。
+	 *
+	 * 清理的必要性：封鎖名單是 Redis sorted set，member 是 IP、score 是到期
+	 * 秒數。查詢時（ipban.IsBanned）會正確地把已過期的項目視為未封鎖，因此
+	 * **不清理不會造成功能錯誤** —— 它只會讓 ZSET 慢慢長大，而那個增長是
+	 * 單調的。一小時清理一次的寫入量可以忽略（見 ipban.NewPruner）。
+	 *
+	 * 與 session 的 StartCleanup 一樣用 context.Background()：本程式沒有
+	 * graceful shutdown，沒有任何地方會取消它。
+	 *
+	 * 這裡的 go 關鍵字不可省略：Pruner.Run 與 metrics flusher 一樣是「阻塞
+	 * 在 select 上直到 ctx 被取消」的迴圈，忘了 go 會讓主流程停在這裡，
+	 * 連 http.ListenAndServe 都還沒被呼叫 —— 症狀是行程活著、日誌印出
+	 * 「Forum server started」（那行在更前面）、但埠上沒有任何監聽，
+	 * 而且接下來的啟動日誌一條都不會再出現。與上面的稽核清理同一個寫法。
+	 */
+	if srv.Blocks() != nil {
+		go ipban.NewPruner(srv.Blocks(), time.Hour).Run(context.Background(),
+			func(removed int, err error) {
+				if err != nil {
+					logger.Warnf("[BLOCKLIST] 無法清理過期封鎖: %v", err)
+					return
+				}
+				if removed > 0 {
+					logger.Infof("[BLOCKLIST] 已清理 %d 筆過期封鎖", removed)
+				}
+			})
+		logger.Infof("[BLOCKLIST] IP 封鎖名單已啟用")
+	} else {
+		logger.Warnf("[BLOCKLIST] 未啟用 IP 封鎖名單（缺少 Redis 連線）")
+	}
+
+	logger.Infof("[AUDIT] 稽核紀錄保留 %d 天，過期紀錄每小時清理一次", cfg.AuditRetentionDays)
+
 	// 沒有 ReadHeaderTimeout 等逾時設定，也沒有 graceful shutdown（見檔案層說明）。
 	if err := http.ListenAndServe(cfg.ServerPort, srv.Handler()); err != nil {
 		// 綁定埠失敗（例如埠已被占用）同樣屬於不可降級的致命錯誤；

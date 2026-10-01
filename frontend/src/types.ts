@@ -124,6 +124,8 @@ export interface AdminPost {
   commentCount?: number;
   authorEmail?: string;
   createdAt?: string;
+  /** 是否為管理員置頂。用它決定那一列的按鈕是「取消置頂」還是「置頂」。 */
+  pinned?: boolean;
   comments?: AdminComment[];
   [key: string]: unknown;
 }
@@ -149,6 +151,428 @@ export interface AdminReport {
 }
 
 /* ==========================================================================
+   監控
+   ========================================================================== */
+
+/**
+ * GET /api/admin/monitor 的回應。
+ *
+ * 整個型別分成三塊，界線是「誰需要 I/O」：
+ *
+ *   - Stats  純記憶體，由 metrics 套件的快照組成。欄位名稱刻意與後端的
+ *            JSON 標籤一致（駝峰），因此這個介面同時就是「後端欄位改名時
+ *            編譯期會報錯」的那個東西。
+ *   - Dependencies  每次讀取都會真的送出 ping，因此帶 latencyMs 與可能為
+ *            空的 detail。state 有三種而不是兩種：disabled 不是健康的其中
+ *            一種，而是根本沒啟用，維運上必須能與「查得到但連不上」分開。
+ *   - Timeline 每格帶 source，用來標示這一分鐘是本次啟動的即時資料還是從
+ *            資料庫讀回的重啟前紀錄。兩者的可信度不同，混在一起會讓「重啟
+ *            之後數字變得很小」被誤讀成「服務沒有流量」。
+ *
+ * 延遲相關的欄位一律命名 MS／Ms：它們是毫秒，不是秒。p50/p95/p99 是延遲
+ * 直方圖的「桶上界」而不是精確值（見 backend/forum/metrics 的說明）。
+ */
+export interface MonitorResponse {
+  ok?: boolean;
+  now?: string;
+  forum?: string;
+  probesMs?: number;
+  stats: MonitorSnapshot;
+  dependencies: Record<'mysql' | 'redis' | 'search', MonitorDependency>;
+}
+
+export type MonitorDependencyState = 'ok' | 'down' | 'disabled' | (string & {});
+
+/** 單一依賴的探測結果。detail 的形狀因依賴而異，因此是索引簽章。 */
+export interface MonitorDependency {
+  state: MonitorDependencyState;
+  latencyMs: number;
+  error?: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface MonitorSnapshot {
+  startedAt?: string;
+  now?: string;
+  uptimeSeconds?: number;
+  windowMinutes?: number;
+  retentionHours?: number;
+  maxRoutes?: number;
+  runtime: MonitorRuntime;
+  requests: MonitorRequests;
+  timeline: MonitorTimelinePoint[];
+  rateLimits: MonitorRateLimit[];
+  historyLoaded?: boolean;
+}
+
+/** Go 執行期的使用量。記憶體數值是位元組，不是 KiB。 */
+export interface MonitorRuntime {
+  version: string;
+  goroutines: number;
+  numCpu: number;
+  gomaxprocs: number;
+  gcCycles: number;
+  allocBytes: number;
+  sysBytes: number;
+  heapAllocBytes: number;
+  heapInUseBytes: number;
+  heapObjects: number;
+  stackInUseBytes: number;
+  lastGcPauseMs: number;
+}
+
+export interface MonitorRequests {
+  total: number;
+  clientErrors: number;
+  serverErrors: number;
+  inFlight: number;
+  maxInFlight: number;
+  avgDurationMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  routes: MonitorRoute[];
+}
+
+export interface MonitorRoute {
+  method: string;
+  /** 已正規化的路由樣式（數字與 email 換成 :id）；上限用盡時為 "__other__"。 */
+  route: string;
+  total: number;
+  clientErrors: number;
+  serverErrors: number;
+  avgMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+}
+
+export interface MonitorTimelinePoint {
+  /** 分鐘起點，UTC 的 RFC 3339。 */
+  minute: string;
+  total: number;
+  clientErrors: number;
+  serverErrors: number;
+  avgDurationMs: number;
+  /** "live" = 本次啟動、"history" = 資料庫讀回、空字串 = 該分鐘沒有資料。 */
+  source: string;
+}
+
+export interface MonitorRateLimit {
+  /** "content" / "upload" / "auth"；後端只會回這三個。 */
+  name: string;
+  limit: number;
+  windowSeconds: number;
+  allowed: number;
+  blocked: number;
+  trackedKeys: number;
+}
+
+/* ==========================================================================
+   IP 封鎖名單
+   ========================================================================== */
+
+/**
+ * GET /api/admin/blocks 的回應。
+ *
+ * `available` 為 false 代表這台站沒有接 Redis，因此沒有封鎖功能。介面要說明
+ * 那件事，而不是假裝名單是空的 —— 空清單會讓管理員以為「沒有人被封」。
+ */
+export interface AdminBlocksResponse {
+  ok?: boolean;
+  items: AdminBlockView[];
+  available: boolean;
+}
+
+export interface AdminBlockView {
+  ip: string;
+  /** 到期時間（RFC 3339）。 */
+  expiresAt: string;
+  /** 剩餘秒數。與 expiresAt 一起給，前端不必自己做時區換算。 */
+  remainingSeconds: number;
+}
+
+/** POST /api/admin/blocks 的回應（封鎖）。 */
+export interface AdminBlockAddResponse {
+  ok?: boolean;
+  ip: string;
+  expiresAt: string;
+}
+
+/**
+ * POST /api/admin/blocks 的回應（解封，minutes <= 0）。
+ *
+ * `existed` 為 false 代表那個 IP 本來就沒被封 —— 那不是錯誤，介面應該說
+ * 「它本來就沒被封」而不是「解封失敗」。
+ */
+export interface AdminBlockRemoveResponse {
+  ok?: boolean;
+  ip: string;
+  existed: boolean;
+}
+
+/* ==========================================================================
+   Session 管理
+   ========================================================================== */
+
+/** GET /api/admin/sessions 的回應。 */
+export interface AdminSessionsResponse {
+  ok?: boolean;
+  items: AdminSessionView[];
+  /** 掃描期間數到的 session 總數（可能大於 items，差異來自篩選與 limit）。 */
+  totalActive: number;
+  /** 實際檢查過的 key 數。 */
+  scanned: number;
+  /**
+   * 為 true 代表掃描達到 key 數上限而提前放棄 —— `items` **不完整**。
+   *
+   * 這個欄位存在的理由：「沒列出來」若沒有被明確標成「沒掃完」，看起來就會
+   * 像「這個帳號只有這些 session」，而那是一個不實的結論。
+   */
+  truncated: boolean;
+  /** Session 的存續時間（小時）。配合滑動續期即「連續 N 小時沒活動才登出」。 */
+  expireInHours: number;
+}
+
+/**
+ * 一支 session 對外的樣子。
+ *
+ * 刻意沒有 token 欄位：token 就是憑證本身。`tokenPrefix` 是前 8 個字元，
+ * 足以讓管理員分辨「是不是同一支」，不足以還原。
+ */
+export interface AdminSessionView {
+  email: string;
+  isAdmin: boolean;
+  tokenPrefix: string;
+  /** 建立時間（RFC 3339）。空字串代表「既有 session，沒有記錄」。 */
+  createdAt: string;
+  /** 真正會失效的時間點（now + TTL）。空字串代表查不到。 */
+  expiresAt: string;
+  /** 剩餘秒數；負值代表 Redis 沒有回報 TTL。 */
+  ttlSeconds: number;
+}
+
+/** POST /api/admin/sessions/revoke 的回應。 */
+export interface AdminSessionRevokeResponse {
+  ok?: boolean;
+  email: string;
+  revoked: number;
+  scanned: number;
+}
+
+/* ==========================================================================
+   站內公告
+   ========================================================================== */
+
+/**
+ * GET /api/forum/announcement 的回應。
+ *
+ * `announcement` 為 null 是**壓倒性的常見情況**（沒有公告），因此端點回 200
+ * 而不是 404：前端每個頁面載入都會問一次，若「沒有公告」是 404，前端就得
+ * 區分「正常的沒有」與「端點壞了」兩種 404。
+ */
+export interface ForumAnnouncementResponse {
+  ok?: boolean;
+  announcement: ForumAnnouncement | null;
+}
+
+/**
+ * 一則生效中的公告。
+ *
+ * `body` 是管理員寫的**純文字**，不經過翻譯 —— 翻譯它需要一個翻譯資料庫，
+ * 而這個專案的多語系是介面層的（見 src/i18n）。圍著它的那些文字（標題、
+ * 關閉鈕、發佈時間）才走 i18n。
+ *
+ * 新��以 \n 分隔（本站沒有富文字編輯器，textarea 的換行會原樣送出）。
+ */
+export interface ForumAnnouncement {
+  body: string;
+  publishedAt: string;
+  /** 空字串代表永不自動過期。 */
+  expiresAt: string;
+}
+
+/** GET /api/admin/announcements 的回應。 */
+export interface AdminAnnouncementsResponse {
+  ok?: boolean;
+  items: AdminAnnouncementView[];
+}
+
+export interface AdminAnnouncementView {
+  id: number;
+  body: string;
+  /** 後臺的開關狀態。它可能與 effective 不同（見下）。 */
+  active: boolean;
+  /**
+   * 實際上會不會顯示在公開頁上。
+   *
+   * 刻意與 `active` 分開：一則 active 但已過期的公告在後臺看起來是「開著的」，
+   * 而它實際上什麼都不顯示。合成一個欄位會讓管理員以為橫幅還在。
+   */
+  effective: boolean;
+  createdBy: string;
+  createdAt: string;
+  updatedBy?: string;
+  updatedAt?: string;
+  /** 空字串代表永不自動過期。 */
+  expiresAt?: string;
+}
+
+/* ==========================================================================
+   匯出與批次操作
+   ========================================================================== */
+
+/** 匯出的三種資源。對應後端的三條 CSV 路由。 */
+export type ExportKind = 'users' | 'posts' | 'reports';
+
+/**
+ * 批次操作的回應。
+ *
+ * `counts` 刻意是一個字典而不是固定欄位（`updated` / `unchanged`）：不同操作
+ * 有不同的計數維度，而讓兩支端點共用一個型別比加一個永遠是 0 的欄位乾淨。
+ *
+ * `skipped` 逐項帶原因而不是只給總數 —— 管理員需要知道跳過的是「帳號不存在」
+ * 還是「格式錯誤」，兩者的下一步完全不同。
+ */
+export interface BatchResult {
+  ok?: boolean;
+  /** 送來的 email 數（去重之後）。與 counts 之和不一定要相等。 */
+  requested: number;
+  counts: Record<string, number>;
+  skipped: { email: string; reason: string }[];
+}
+
+/* ==========================================================================
+   內容趨勢統計
+   ========================================================================== */
+
+/**
+ * GET /api/admin/stats 的回應。
+ *
+ * 這是「站正在長成什麼樣子」的資料，與既有的三個後臺頁互補：那三頁都是
+ * 「現在是什麼」（總數、清單、待裁決的佇列），這裡是「變成這樣多久了」。
+ *
+ * `series` 的三個數字陣列與 `dates` **等長且同序**：連沒有資料的日子都在
+ * 陣列裡（值為 0）。刻意不做成稀疏 —��� 圖上缺一格和「那天真的是零」是兩件
+ * 不同的事，而稀疏的表示會讓前者看起來像後者。
+ */
+export interface ContentStatsResponse {
+  ok?: boolean;
+  now?: string;
+  forum?: string;
+  /** 視窗長度（天）。實際生效的值 —— 請求超過 90 天會被收斂到 90。 */
+  days: number;
+  series: ContentStatsSeries;
+  /** 視窗內的合計，不是目前的總數。 */
+  totals: ContentStatsTotals;
+  topPosts: ContentStatsPost[];
+  topTags: ContentStatsTag[];
+  topAuthors: ContentStatsAuthor[];
+}
+
+export interface ContentStatsSeries {
+  /** "YYYY-MM-DD"，由舊到新。 */
+  dates: string[];
+  users: number[];
+  posts: number[];
+  comments: number[];
+}
+
+export interface ContentStatsTotals {
+  users: number;
+  posts: number;
+  comments: number;
+  /** 視窗內**新按**的讚，與 topPosts 裡的累計讚數不同義。 */
+  likes: number;
+}
+
+export interface ContentStatsPost {
+  id: number;
+  authorEmail: string;
+  /** 貼文前 80 字（後端截斷，附省略號）。 */
+  excerpt: string;
+  createdAt: string;
+  comments: number;
+  likes: number;
+}
+
+export interface ContentStatsTag {
+  id: number;
+  name: string;
+  /** 綁定這個標籤的人數。 */
+  users: number;
+}
+
+export interface ContentStatsAuthor {
+  email: string;
+  posts: number;
+  comments: number;
+}
+
+/* ==========================================================================
+   管理員操作稽核紀錄
+   ========================================================================== */
+
+/**
+ * GET /api/admin/log 的回應。
+ *
+ * `items` 的每筆是一條「誰對哪個對象做了什麼」；`total` 是符合篩選的總筆數
+ * （不受分頁影響），前端用它算分頁與顯示「第 x-y 筆，共 n 筆」。
+ *
+ * `actions` 與 `actors` 是**從資料庫實際出現過的值**取出來的清單，不是前端
+ * 寫死的。理由見 MonitorPage 對 timeline source 的同樣考量：寫死會讓新增
+ * 的動作或管理員在篩選器裡選不到，而「選不到」看起來像「沒發生過」——
+ * 那正是稽核紀錄最不能被誤解的地方。
+ */
+export interface AdminActionLogResponse {
+  ok?: boolean;
+  items: AdminActionEntry[];
+  total: number;
+  pageSize: number;
+  actions: string[];
+  actors: string[];
+}
+
+/** 稽核紀錄的資源類別。與後端 audit.TargetType 一致。 */
+export type AdminActionTarget = 'user' | 'post' | 'comment' | 'report' | 'tag' | (string & {});
+
+/**
+ * 一筆稽核紀錄。
+ *
+ * `changes` 是欄位級 diff。刻意保留「改動前」與「改動後」兩個欄位而不是
+ * 只記最終狀態：資料庫裡永遠只有「現在是什麼」，而稽核紀錄的全部價值就在
+ * 於那個「原本是什麼」。
+ */
+export interface AdminActionEntry {
+  id: number;
+  /** 操作者的管理員 email。 */
+  actorEmail: string;
+  /** 機器可讀的動作名稱，例如 "post.delete"。 */
+  action: string;
+  targetType: AdminActionTarget;
+  /** 對象識別值：user 與 target label 用 email，其餘用數字字串。 */
+  targetId: string;
+  /** 給人看的對象摘要（貼文內容前綴、標籤名…）。 */
+  targetLabel?: string;
+  changes?: AdminActionChange[];
+  /** 操作來源的 IP 與 request ID；可用來和存取日誌對照。 */
+  clientIp?: string;
+  requestId?: string;
+  /** UTC 的 "YYYY-MM-DD HH:mm:ss"，由後端固定時區後傳出字串。 */
+  createdAt: string;
+}
+
+export interface AdminActionChange {
+  field: string;
+  /** 空字串代表「原本不存在這個值」或「已被清空」—— 兩者在介面上分開呈現。 */
+  before: string;
+  after: string;
+  /** 值被截到 200 字元（後端行為）。 */
+  truncated?: boolean;
+}
+
+/* ==========================================================================
    論壇公開頁
    ========================================================================== */
 
@@ -166,6 +590,8 @@ export interface ForumPost {
   createdAt?: string;
   imageUrl?: string;
   liked?: boolean;
+  /** 管理員是否置頂這一篇。省略未置頂的（見後端 forumPost 的說明）。 */
+  pinned?: boolean;
   likeCount?: number;
   commentCount?: number;
   [key: string]: unknown;

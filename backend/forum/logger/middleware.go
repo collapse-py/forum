@@ -27,7 +27,7 @@ Package logger 的 HTTP 存取記錄中介層與請求中繼資料管理。
   - 為什麼用自訂的 contextKey 型別而非直接用 string：Go 的 context 會對 key 做
     介面相等比較，若用裸 string 就有與其他套件撞 key、誤取到別的值。使用未匯出的
     專屬型別可讓「誤用別套件的 key」在編譯期就不可能發生。
-  - 為什麼包一層 responseWriter：為了在 handler 回應之後仍能知道實際狀態碼。
+  - 為什麼包一層 StatusWriter：為了在 handler 回應之後仍能知道實際狀態碼。
     直接包 http.ResponseWriter 會讓實作失去 http.Hijacker / http.Flusher 等選用介面，
     因此這裡逐一轉發 Hijack 與 Flush，確保串流／長連線與即時回應仍可運作。
   - 中介層在 Handler() 中被放在 session Refresh 之外側、mux 之內側：
@@ -150,26 +150,44 @@ func GetUserEmail(r *http.Request) string {
 }
 
 /*
-responseWriter 包裝 http.ResponseWriter，唯一的目的是「記住實際回傳的狀態碼」。
+StatusWriter 包裝 http.ResponseWriter，唯一的目的是「記住實際回傳的狀態碼」。
 
 為什麼需要：net/http 只在 handler 呼叫 WriteHeader 時才決定狀態碼，之後無法查詢。
-而很多 handler 會直接呼叫 Write 或 WriteJSON 而不呼叫 WriteHeader，此時狀態碼隱含為 200。
+而很多 handler 會直接呼叫 Write 或 writeJSON 而不呼叫 WriteHeader，此時狀態碼隱含為 200。
 把狀態碼存下來，存取記錄才能在 handler 結束後仍取得正確的數值。
 代價：包裝後本型別只轉發 Hijack 與 Flush，未實作 io.ReaderFrom 與已被棄用的
 http.CloseNotifier，因此 http.ServeFile 會失去 io.Copy 的 sendfile 快速路徑，
 大檔案的傳輸效能可能略降；換取的是可控的狀態碼記錄。
+
+為什麼匯出：存取記錄（LoggingMiddleware）與監控統計（httpapi 的 metrics 中介層）
+都需要「handler 結束後知道狀態碼」，兩者若各自實作一份包裝，就會有兩份
+Hijack/Flush 轉發邏輯必須同步維護 —— 而其中一份漏轉發的症狀是 WebSocket 升級
+在某些路徑上失效，非常難歸因。因此這裡匯出唯一一份實作，兩邊共用。
 */
-type responseWriter struct {
+type StatusWriter struct {
 	http.ResponseWriter
-	// statusCode 記錄已寫出的狀態碼。於 LoggingMiddleware 建立時預填 http.StatusOK，
-	// 對應「handler 只寫內容、未呼叫 WriteHeader」的情況。
+	// statusCode 記錄已寫出的狀態碼。NewStatusWriter 建立時預填
+	// http.StatusOK，對應「handler 只寫內容、未呼叫 WriteHeader」的情況。
 	statusCode int
+}
+
+// NewStatusWriter 包裝 w 並預填狀態碼為 200。
+//
+// 預填 200 是必要的：statusCode 若是零值，0 不是任何合法的 HTTP 狀態碼，
+// 而「只寫 body 不寫狀態碼」在 net/http 裡是完全正常（且常見）的寫法。
+func NewStatusWriter(w http.ResponseWriter) *StatusWriter {
+	return &StatusWriter{ResponseWriter: w, statusCode: http.StatusOK}
+}
+
+// StatusCode 回傳目前已寫出的狀態碼。在 handler 回應完之後呼叫才有意义。
+func (sw *StatusWriter) StatusCode() int {
+	return sw.statusCode
 }
 
 // Hijack 轉發給底層的 http.Hijacker 讓 WebSocket 等協定升級仍可進行。
 // 底層不支援時回傳明確錯誤，讓呼叫端知道無法升級，而不是得到 nil 造成後續 panic。
-func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hijacker, ok := rw.ResponseWriter.(http.Hijacker)
+func (sw *StatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := sw.ResponseWriter.(http.Hijacker)
 	if !ok {
 		return nil, nil, fmt.Errorf("response writer does not support hijacking")
 	}
@@ -179,8 +197,8 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Flush 轉發給底層的 http.Flusher，讓支援串流／SSE 的 handler 能逐段推送內容。
 // 以 if ok 檢查而非回傳錯誤：Flush 是「盡力而為」的最佳努力操作，底層不支援時靜默略過即可，
 // 這也讓測試用的 httptest.ResponseRecorder 等實作能安全通過。
-func (rw *responseWriter) Flush() {
-	flusher, ok := rw.ResponseWriter.(http.Flusher)
+func (sw *StatusWriter) Flush() {
+	flusher, ok := sw.ResponseWriter.(http.Flusher)
 	if ok {
 		flusher.Flush()
 	}
@@ -189,9 +207,9 @@ func (rw *responseWriter) Flush() {
 // WriteHeader 記錄狀態碼後轉發給底層。
 // 刻意不防止重複呼叫：net/http 對第二次 WriteHeader 會發出「superfluous WriteHeader」警告
 // 且忽略之，此處維持相同行為以免改變任何 handler 的既有語意。
-func (rw *responseWriter) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
+func (sw *StatusWriter) WriteHeader(code int) {
+	sw.statusCode = code
+	sw.ResponseWriter.WriteHeader(code)
 }
 
 // UserResolver 為身分解析函式的型別，由呼叫端注入。
@@ -258,7 +276,7 @@ func isNoisyRequest(r *http.Request) bool {
 //  1. 記錄起始時間，解析來源 IP 與使用者身分。
 //  2. 產生 request ID，寫入 context，並回寫 X-Request-ID 回應標頭。
 //     標頭必須在呼叫 next 之前寫入，否則 handler 一旦輸出內容就無法再補標頭。
-//  3. 以 responseWriter 包住 w，呼叫 next。
+//  3. 以 StatusWriter 包住 w，呼叫 next。
 //  4. 依狀態碼與耗時決定日誌等級：5xx → ERROR，4xx 或逾時 3 秒 → WARN，其餘 → INFO。
 //
 // 錯誤處理：resolveUser 或 newRequestID 失敗都不會讓請求失敗，改以替代值繼續
@@ -293,7 +311,7 @@ func LoggingMiddleware(next http.Handler, resolveUser UserResolver) http.Handler
 		w.Header().Set("X-Request-ID", requestID)
 
 		// 預填 200：handler 若只呼叫 Write 而未呼叫 WriteHeader，狀態碼應視為 200。
-		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		rw := NewStatusWriter(w)
 		next.ServeHTTP(rw, r)
 
 		// handler 回傳後才計算耗時；此時尚未記錄，因此耗時只涵蓋處理時間。

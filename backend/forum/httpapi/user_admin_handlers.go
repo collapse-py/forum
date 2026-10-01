@@ -28,6 +28,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -36,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"forum/forum/audit"
 	"forum/forum/logger"
 
 	"github.com/go-sql-driver/mysql"
@@ -158,7 +160,17 @@ func (s *Server) handleAdminTags(w http.ResponseWriter, r *http.Request) {
 
 	// 建立與更新時間同一瞬間，由應用層產生（此專案未使用 DB 端的時間函式）。
 	now := time.Now()
-	result, err := s.db.ExecContext(r.Context(), `INSERT INTO forum_user_tags (name, created_at, updated_at) VALUES (?, ?, ?)`, req.Name, now, now)
+	// 稽核：新增標籤是字典層級的操作（不影響任何使用者），但仍需記錄 ——
+	// 「這個名稱是什麼時候、經誰的手建立起來的」決定了後續看到這個標籤時
+	// 該不該信任它。
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to create user tag")
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(r.Context(), `INSERT INTO forum_user_tags (name, created_at, updated_at) VALUES (?, ?, ?)`, req.Name, now, now)
 	if err != nil {
 		// MySQL 錯誤碼 1062 = ER_DUP_ENTRY（唯一索引 uq_forum_user_tags_name 衝突）。
 		// 這是使用者可預期的營運錯誤，改回 409 Conflict 而非 500。
@@ -173,6 +185,15 @@ func (s *Server) handleAdminTags(w http.ResponseWriter, r *http.Request) {
 	// 取出剛才 INSERT 產生的自增主鍵，直接回給前端，省去一次查詢。
 	id, err := result.LastInsertId()
 	if err != nil {
+		internalError(w, "unable to read created user tag")
+		return
+	}
+	if err := s.recordAdminAction(r, tx, adminActionTagCreate, audit.TargetTag, strconv.FormatInt(id, 10), req.Name,
+		audit.Change{Field: "name", Before: "", After: req.Name}); err != nil {
+		internalError(w, "unable to create user tag")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		internalError(w, "unable to read created user tag")
 		return
 	}
@@ -203,7 +224,37 @@ func (s *Server) handleAdminTag(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "invalid origin")
 			return
 		}
-		result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_user_tags WHERE id = ?`, id)
+		// 稽核：刪除標籤會同時消掉它綁在多少人身上，因此那個數字本身就是
+		// 這次操作的重要資訊（「我剛剛讓 30 個人身上的分類消失」）。這也是
+		// 原本把「清除綁定」視為可接受失敗的寫法在有了稽核之後必須改掉的
+		// 原因：那個錯誤原本會被完全忽略，而現在它是稽核內容的一部分。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to delete user tag")
+			return
+		}
+		defer tx.Rollback()
+
+		var beforeName string
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT name FROM forum_user_tags WHERE id = ?`, id).Scan(&beforeName); err != nil {
+			if err == sql.ErrNoRows {
+				// 標籤不存在；DELETE 不會回 ErrNoRows，但先讀一次才能分辨
+				// 「不存在」與「刪了但沒清綁定」這兩種 404。
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load user tag")
+			return
+		}
+		var assignedCount int
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT COUNT(*) FROM forum_user_tag_assignments WHERE tag_id = ?`, id).Scan(&assignedCount); err != nil {
+			internalError(w, "unable to load user tag assignments")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `DELETE FROM forum_user_tags WHERE id = ?`, id)
 		if err != nil {
 			internalError(w, "unable to delete user tag")
 			return
@@ -215,8 +266,22 @@ func (s *Server) handleAdminTag(w http.ResponseWriter, r *http.Request) {
 		}
 		// forum_user_tag_assignments 沒有設定 FOREIGN KEY ... ON DELETE CASCADE，
 		// 因此需在此手動清除所有指向此標籤的綁定記錄，否則會留下孤兒資料。
-		// 這是「可接受的失敗」：即使清除失敗，標籤本身已刪除成功，故忽略其錯誤。
-		_, _ = s.db.ExecContext(r.Context(), `DELETE FROM forum_user_tag_assignments WHERE tag_id = ?`, id)
+		// 錯誤不再忽略：它與標籤的刪除在同一個交易裡，忽略等於留下孤兒綁定
+		// 並讓稽核紀錄宣稱「清掉了 N 個」而實際上沒有。
+		if _, err := tx.ExecContext(r.Context(), `DELETE FROM forum_user_tag_assignments WHERE tag_id = ?`, id); err != nil {
+			internalError(w, "unable to delete user tag")
+			return
+		}
+		if err := s.recordAdminAction(r, tx, adminActionTagDelete, audit.TargetTag, strconv.FormatInt(id, 10), beforeName,
+			audit.Change{Field: "name", Before: beforeName, After: "（標籤已刪除）"},
+			audit.Change{Field: "assignmentsRemoved", Before: "", After: strconv.Itoa(assignedCount)}); err != nil {
+			internalError(w, "unable to delete user tag")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to delete user tag")
+			return
+		}
 		writeOK(w, map[string]bool{"ok": true})
 		return
 	}
@@ -243,7 +308,27 @@ func (s *Server) handleAdminTag(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "標籤名稱需為 1 至 50 字")
 		return
 	}
-	result, err := s.db.ExecContext(r.Context(), `UPDATE forum_user_tags SET name = ?, updated_at = ? WHERE id = ?`, req.Name, time.Now(), id)
+	// 稽核：重新命名標籤要記下舊名 —— 稽核紀錄的讀者看到一個標籤名時，
+	// 常見的問題是「這個人三個月前被標成 A，A 又是什麼」；沒有舊名就答不出來。
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to update user tag")
+		return
+	}
+	defer tx.Rollback()
+
+	var beforeName string
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT name FROM forum_user_tags WHERE id = ?`, id).Scan(&beforeName); err != nil {
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		internalError(w, "unable to load user tag")
+		return
+	}
+
+	result, err := tx.ExecContext(r.Context(), `UPDATE forum_user_tags SET name = ?, updated_at = ? WHERE id = ?`, req.Name, time.Now(), id)
 	if err != nil {
 		// 同樣處理唯一索引衝突：改名撞到既有標籤名稱時回 409。
 		var mysqlErr *mysql.MySQLError
@@ -258,6 +343,15 @@ func (s *Server) handleAdminTag(w http.ResponseWriter, r *http.Request) {
 	// 因此用舊名稱覆寫自己會被判成 404；正常情況前端會自動帶入現有名稱，實際上是送出新名稱。
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		http.NotFound(w, r)
+		return
+	}
+	if err := s.recordAdminAction(r, tx, adminActionTagUpdate, audit.TargetTag, strconv.FormatInt(id, 10), beforeName,
+		audit.Change{Field: "name", Before: beforeName, After: req.Name}); err != nil {
+		internalError(w, "unable to update user tag")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		internalError(w, "unable to update user tag")
 		return
 	}
 	writeOK(w, map[string]bool{"ok": true})
@@ -385,14 +479,52 @@ func (s *Server) handleAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 一併更新 updated_at，讓此使用者在使用者列表的排序往前移動。
-	result, err := s.db.ExecContext(r.Context(), `UPDATE forum_users SET status = ?, updated_at = ? WHERE email = ?`, req.Status, time.Now(), email)
+	//
+	// 稽核：停權與恢復分成兩個動作名稱（見 audit_log.go 的常數說明），且必須
+	// 記下改動前的狀態 —— 資料庫裡只留得到「現在是 SUSPENDED」，答不出
+	// 「原本是 ACTIVE 還是從未被停過」。
+	tx, err := s.beginAdminTx(r)
 	if err != nil {
 		internalError(w, "unable to update user")
 		return
 	}
-	// 影響列數為 0 代表此 email 尚未登入過（forum_users 無此列），回 404。
+	defer tx.Rollback()
+
+	// 讀取改動前的狀態。影響列數為 0 與「狀態沒變」是兩件事：前者是 404，
+	// 後者 MySQL 回報 0 變更列（DSN 沒加 clientFoundRows），因此必須先讀
+	// 才能把兩者分開。
+	var beforeStatus string
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT status FROM forum_users WHERE email = ?`, email).Scan(&beforeStatus); err != nil {
+		if err == sql.ErrNoRows {
+			// 此 email 尚未登入過（forum_users 無此列），回 404。
+			http.NotFound(w, r)
+			return
+		}
+		internalError(w, "unable to load user")
+		return
+	}
+
+	result, err := tx.ExecContext(r.Context(), `UPDATE forum_users SET status = ?, updated_at = ? WHERE email = ?`, req.Status, time.Now(), email)
+	if err != nil {
+		internalError(w, "unable to update user")
+		return
+	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		http.NotFound(w, r)
+		return
+	}
+	action := adminActionUserReinstate
+	if req.Status == "SUSPENDED" {
+		action = adminActionUserSuspend
+	}
+	if err := s.recordAdminAction(r, tx, action, audit.TargetUser, email, email,
+		adminStatusChange(beforeStatus, req.Status)); err != nil {
+		internalError(w, "unable to update user")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		internalError(w, "unable to update user")
 		return
 	}
 	// 停權效果由 server.go 的 requireLogin 讀取 status 判定，並擋下該使用者的寫入請求。
@@ -514,6 +646,29 @@ func (s *Server) handleAdminUserTags(w http.ResponseWriter, r *http.Request, raw
 	// 若已成功 Commit，Rollback 會回傳 ErrTxDone（無副作用），可安全忽略。
 	defer tx.Rollback()
 
+	// 稽核的「改動前」必須在 DELETE 之前讀取：這兩步都在同一個交易裡，
+	// 因此讀到的值就是操作前的狀態，不受本交易自身的寫入影響。
+	//
+	// diff 記的是「原本的標籤名清單」與「送來的標籤名清單」兩行，而不是
+	// 逐項比對。理由是這個操作的本質是「整組被換掉」：逐項 diff 會產生
+	// 2N 列重複內容（舊的 N 個 + 新的 N 個），而稽核要回答的問題是
+	// 「這個人現在被標成什麼、原本被標成什麼」—— 那正是兩個整組清單。
+	beforeTagNames, err := loadAdminUserTagNames(r.Context(), tx, email)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[AUDIT] 讀取改動前標籤失敗 email=%s: %v", email, err)
+		internalError(w, "unable to update user tags")
+		return
+	}
+	afterTagNames := make([]string, 0, len(req.TagIDs))
+	for _, tagID := range req.TagIDs {
+		var name string
+		if err := tx.QueryRowContext(r.Context(), `SELECT name FROM forum_user_tags WHERE id = ?`, tagID).Scan(&name); err != nil {
+			internalError(w, "unable to update user tags")
+			return
+		}
+		afterTagNames = append(afterTagNames, name)
+	}
+
 	// 全量覆寫的第一步：清空此使用者的所有既有綁定（也涵蓋「取消全部標籤」的情境）。
 	if _, err := tx.ExecContext(r.Context(), `DELETE FROM forum_user_tag_assignments WHERE user_email = ?`, email); err != nil {
 		logger.ErrorfContext(r.Context(), "[ADMIN-TAGS] delete assignments failed email=%s: %v", email, err)
@@ -535,6 +690,13 @@ func (s *Server) handleAdminUserTags(w http.ResponseWriter, r *http.Request, raw
 			internalError(w, "unable to update user tags")
 			return
 		}
+	}
+	// 提交後重新讀取一次，讓回應內容即為資料庫的權威狀態（依名稱排序）。
+	if err := s.recordAdminAction(r, tx, adminActionUserTags, audit.TargetUser, email, email,
+		audit.Change{Field: "tags", Before: strings.Join(beforeTagNames, ", "), After: strings.Join(afterTagNames, ", ")}); err != nil {
+		logger.ErrorfContext(r.Context(), "[AUDIT] 寫入標籤變更紀錄失敗 email=%s: %v", email, err)
+		internalError(w, "unable to update user tags")
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		logger.ErrorfContext(r.Context(), "[ADMIN-TAGS] commit failed email=%s: %v", email, err)
@@ -578,6 +740,45 @@ func (s *Server) loadAdminUserTags(ctx context.Context, email string) ([]adminUs
 	}
 	// 迭代層級的錯誤於此回傳，統一以 rows.Err() 收斂。
 	return tags, rows.Err()
+}
+
+// loadAdminUserTagNames 讀出某位使用者已綁定的標籤「名稱」清單（依名稱排序）。
+//
+// 與 loadAdminUserTags 的差別：後者回傳完整的 adminUserTag（含 id 與時間戳），
+// 供前端渲染；這個只給稽核用，且刻意放在刪除既有綗定**之前**呼叫。
+// 稽核紀錄要保存的是「這個人被標成什麼」，而標籤名稱比 id 有意義得多 ——
+// 稽核紀錄的讀者是人，而人看到 id=7 只會去猜那是什麼。
+//
+// q 參數刻意接受查詢介面而非固定用 s.db：稽核的「改動前」讀取必須在
+// 同一個交易裡，否則在並發的標籤覆寫下會讀到別人的結果。
+func loadAdminUserTagNames(ctx context.Context, q queryer, email string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT t.name
+		FROM forum_user_tag_assignments a JOIN forum_user_tags t ON t.id = a.tag_id
+		WHERE a.user_email = ? ORDER BY t.name ASC`, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := make([]string, 0, 4)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+// queryer 是 *sql.DB 與 *sql.Tx 都滿足的查詢介面。
+//
+// 存在的理由與 audit.Execer 相同：讓「要嘛在交易內讀、要嘛在交易外讀」的
+// 函式不必為兩種接收者各寫一份。
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // decodeAdminUserEmail 將路徑中的 email 片段還原為原始信箱字串。
@@ -722,7 +923,17 @@ func (s *Server) createAdminUserPost(w http.ResponseWriter, r *http.Request, raw
 	}
 	// author_email 使用路徑中的目標 email，而非目前的管理員身分 — 這正是此功能的目的。
 	createdAt := time.Now()
-	result, err := s.db.ExecContext(r.Context(), `
+	// 稽核：記 user.posts.create，target 放在「被代發的使用者」而不是文章 ——
+	// 見 audit_log.go 的常數說明。targetLabel 帶上文章編號與內容前綴，讓稽核
+	// 紀錄不必另外查一次 forum_posts 才知道這是什麼。
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to create user post")
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(r.Context(), `
 		INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)`,
 		email, req.Content, createdAt)
 	if err != nil {
@@ -734,9 +945,20 @@ func (s *Server) createAdminUserPost(w http.ResponseWriter, r *http.Request, raw
 		internalError(w, "unable to read created user post")
 		return
 	}
+	if err := s.recordAdminAction(r, tx, adminActionUserPost, audit.TargetUser, email, email,
+		audit.Change{Field: "postId", Before: "", After: strconv.FormatInt(id, 10)},
+		audit.Change{Field: "authorEmail", Before: "", After: email},
+		audit.Change{Field: "content", Before: "", After: req.Content}); err != nil {
+		internalError(w, "unable to create user post")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		internalError(w, "unable to read created user post")
+		return
+	}
 	// 搜尋索引（best-effort，失敗只記日誌）。這條路徑寫入的作者是目標使用者本人，
 	// 因此索引裡的 authorEmail 必須跟著是對方 —— 後臺的「以信箱找出所有貼文」
-	// 才不會漏掉代發的那些。
+	// 才不會漏掉代發的那些。刻意放在 Commit 之後（索引是外部系統）。
 	s.indexForumPost(r.Context(), id, req.Content, email, createdAt)
 	// 回傳新文章 id，讓前端可立即在畫面中插入該筆資料。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"ok": true, "id": id})
@@ -779,7 +1001,17 @@ func (s *Server) createAdminUserComment(w http.ResponseWriter, r *http.Request, 
 		http.NotFound(w, r)
 		return
 	}
-	result, err := s.db.ExecContext(r.Context(), `
+	// 稽核：記 user.comments.create（理由同 createAdminUserPost）。留言與文章
+	// 不同，這裡額外記下 postId —— 同一個管理員可以在不同文章下代留言，
+	// 少了它就答不出「這句話是回應哪一篇」。
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to create user comment")
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(r.Context(), `
 		INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, ?, ?, ?)`,
 		req.PostID, email, req.Content, time.Now())
 	if err != nil {
@@ -788,6 +1020,18 @@ func (s *Server) createAdminUserComment(w http.ResponseWriter, r *http.Request, 
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
+		internalError(w, "unable to read created user comment")
+		return
+	}
+	if err := s.recordAdminAction(r, tx, adminActionUserComment, audit.TargetUser, email, email,
+		audit.Change{Field: "commentId", Before: "", After: strconv.FormatInt(id, 10)},
+		audit.Change{Field: "postId", Before: "", After: strconv.FormatInt(req.PostID, 10)},
+		audit.Change{Field: "authorEmail", Before: "", After: email},
+		audit.Change{Field: "content", Before: "", After: req.Content}); err != nil {
+		internalError(w, "unable to create user comment")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		internalError(w, "unable to read created user comment")
 		return
 	}

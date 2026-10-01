@@ -199,7 +199,26 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
               />
             ) : null}
           </div>
-          <time>{formatDateTime(post.createdAt)}</time>
+          {/*
+            置頂徽章與時間同一行，因此包一層 .post-meta。
+
+ * 為什麼需要這一層：.post-identity 是 flex-direction: column（作者一行、
+ * 時間一行），而 .pinned 與 <time> 各自是它的直接子元素時，它們會變成
+ * 第三個與第四個 flex item —— 也就是各自一行，徽章會孤零零地掛在作者名
+ * 下面。包一層橫向的容器才能讓它們真的並排。
+ *
+ * 順序是「徽章在時間之前」：時間是「這篇什麼時候說的」，置頂是「這篇現在
+ * 的狀態」。把狀態放在時間前面，讀者掃過一行時會先看到「這篇被特別對待」
+ * 再看到日期，而那正是置頂想傳達的優先順序。
+ *
+ * 用 <span> 加上 .pinned 而不放進 .author-line：那裡放的是「這個人的標籤」，
+ * 而置頂是「這篇文章的屬性」—— 兩者混在同一個清單裡會讓讀者以為是標籤的
+ * 一種，而那會讓它在後臺的標籤指派介面裡看起來可以被移除。
+          */}
+          <span className="post-meta">
+            {post.pinned ? <span className="pinned">{t('announce.pinnedBadge')}</span> : null}
+            <time>{formatDateTime(post.createdAt)}</time>
+          </span>
         </div>
         <div className="post-menu" ref={menuRef}>
           <button

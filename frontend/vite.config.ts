@@ -104,11 +104,11 @@ function copyForumRuntimeAssets(): Plugin {
 }
 
 /*
- * 入口仍是九個 HTML 檔，不是單一 SPA。
+ * 入口仍是十六個 HTML 檔，不是單一 SPA。
  *
  * 為什麼不合成一個：後端 server.go 的 handleForumPage / handleForumLoginPage
  * 逐一把 /forum、/forum/new、/forum/profile、/forum/others-profile、/forum/login
- * 與三個 /admin* 路徑對應到各自的 HTML 檔名，而「未列出的子路徑必須 404」是
+ * 與十個 /admin* 路徑對應到各自的 HTML 檔名，而「未列出的子路徑必須 404」是
  * 那段 switch 的刻意設計。改成 SPA fallback 就要把這層白名單換成「任何路徑都
  * 吐同一份 index.html」，等於放寬了一條刻意的路由規則。
  *
@@ -124,7 +124,7 @@ function copyForumRuntimeAssets(): Plugin {
  *     的 inlineStyleHashes）。雜湊的輸入就是這裡建置出來的 dist/*.html，因此
  *     不論 Vite 有沒有改寫內聯樣式，授權都會自動跟上。
  *
- * frontendShellFiles（後端）列的九個檔名必須與上面的 input 一致：少一個，那一頁
+ * frontendShellFiles（後端）列的十六個檔名必須與上面的 input 一致：少一個，那一頁
  * 的 <style> 就沒有授權，症狀是整頁沒有版面。
  *
  * 混淆（vite-plugin-javascript-obfuscator）刻意只做最低限度的一組選項。
@@ -184,6 +184,13 @@ export default defineConfig({
         admin: 'admin.html',
         forumAdmin: 'forum-admin.html',
         forumReport: 'forum-report.html',
+        forumMonitor: 'forum-monitor.html',
+        auditLog: 'audit-log.html',
+        forumStats: 'forum-stats.html',
+        forumExport: 'export.html',
+        sessions: 'sessions.html',
+        blocks: 'blocks.html',
+        announcements: 'announcements.html',
       },
     },
   },

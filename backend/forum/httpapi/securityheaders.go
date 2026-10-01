@@ -124,6 +124,13 @@ var frontendShellFiles = []string{
 	"admin.html",
 	"forum-admin.html",
 	"forum-report.html",
+	"forum-monitor.html",
+	"audit-log.html",
+	"forum-stats.html",
+	"export.html",
+	"sessions.html",
+	"blocks.html",
+	"announcements.html",
 }
 
 // inlineStyleHashes 掃出各頁面 HTML 裡的 <style> 區塊內容，算出 CSP 需要的

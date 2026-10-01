@@ -54,6 +54,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"forum/forum/audit"
 	"net/http"
 	"strconv"
 	"strings"
@@ -449,7 +450,31 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 		// 刪除的是檢舉記錄本身，被檢舉的文章／留言保持不動。
 		// forum_reports 沒有任何外鍵（target_id 只是數字），所以不需要先刪子表，
 		// 也不會因外鍵約束而失敗。
-		result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_reports WHERE id = ?`, id)
+		//
+		// 稽核：刪除檢舉是不可逆的（無論被檢舉的內容之後如何，檢舉本身都不在了），
+		// 因此把刪除前的 status 與 reason 一起記進 diff —— 事後要回答
+		// 「這筆被刪掉的是誰檢舉的、原因是什麼」時，資料必須在紀錄裡。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to delete forum report")
+			return
+		}
+		defer tx.Rollback()
+
+		var beforeStatus, beforeReason string
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT status, reason FROM forum_reports WHERE id = ?`, id).Scan(&beforeStatus, &beforeReason); err != nil {
+			if err == sql.ErrNoRows {
+				// 資源不存在 → 404。放在交易內是安全的：這個分支會回滾，
+				// 交易裡只有一次唯讀查詢，沒有任何寫入。
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load forum report")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `DELETE FROM forum_reports WHERE id = ?`, id)
 		if err != nil {
 			internalError(w, "unable to delete forum report")
 			return
@@ -459,6 +484,15 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 			// 對同一筆檢舉重複送出 DELETE 時，第二次必然落到這個分支，此時資源確實已經
 			// 不存在，語意仍然正確。
 			http.NotFound(w, r)
+			return
+		}
+		if err := s.recordAdminAction(r, tx, adminActionReportDelete, audit.TargetReport, strconv.FormatInt(id, 10), beforeStatus,
+			audit.Change{Field: "reason", Before: beforeReason, After: "（檢舉記錄已刪除）"}); err != nil {
+			internalError(w, "unable to delete forum report")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to delete forum report")
 			return
 		}
 		writeOK(w, map[string]bool{"ok": true})
@@ -514,10 +548,34 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 		// 不是被檢舉內容的作者（TargetAuthor）、也不是檢舉人（ReporterEmail）。
 		// requireAdminForum 已保證 is_admin 為 true，因此這裡不會寫入空字串。
 		// 這個 UPDATE 的所有值都來自 body 或 session，沒有一個字元被拼進 SQL 文字。
-		result, err := s.db.ExecContext(r.Context(), `
+		actor := s.sessions.ResolveUser(r)
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to update forum report")
+			return
+		}
+		defer tx.Rollback()
+
+		// PUT 是全欄位取代，因此 diff 要涵蓋它改動的每一欄：被檢舉對象、檢舉人、
+		// 原因、狀態。只記狀態會讓「審核動作不該改動檢舉內容」這個規則被繞過時
+		// 完全看不出來 —— 而那正是 PUT 最需要被稽核的情況。
+		var beforeTargetType, beforeTargetID, beforeReporter, beforeReason, beforeStatus string
+		if err := tx.QueryRowContext(r.Context(), `
+			SELECT target_type, target_id, reporter_email, reason, status
+			FROM forum_reports WHERE id = ?`, id).
+			Scan(&beforeTargetType, &beforeTargetID, &beforeReporter, &beforeReason, &beforeStatus); err != nil {
+			if err == sql.ErrNoRows {
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load forum report")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `
 			UPDATE forum_reports
 			SET target_type = ?, target_id = ?, reporter_email = ?, reason = ?, status = ?, reviewed_at = ?, reviewed_by = ?
-			WHERE id = ?`, req.TargetType, req.TargetID, req.ReporterEmail, req.Reason, req.Status, reviewedAt, s.sessions.ResolveUser(r), id)
+			WHERE id = ?`, req.TargetType, req.TargetID, req.ReporterEmail, req.Reason, req.Status, reviewedAt, actor, id)
 		if err != nil {
 			internalError(w, "unable to update forum report")
 			return
@@ -526,6 +584,21 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 			// 同樣把「影響 0 筆」當成 404。注意 reviewed_at 每次都是新的 time.Now()，
 			// 因此只要 status 有離開 PENDING，實際變更的列數就會是 1。
 			http.NotFound(w, r)
+			return
+		}
+		if err := s.recordAdminAction(r, tx, adminReportAction(beforeStatus, req.Status), audit.TargetReport, strconv.FormatInt(id, 10), beforeStatus,
+			onlyChanged(
+				audit.Change{Field: "targetType", Before: beforeTargetType, After: req.TargetType},
+				audit.Change{Field: "targetId", Before: beforeTargetID, After: strconv.FormatInt(req.TargetID, 10)},
+				audit.Change{Field: "reporterEmail", Before: beforeReporter, After: req.ReporterEmail},
+				audit.Change{Field: "reason", Before: beforeReason, After: req.Reason},
+				audit.Change{Field: "status", Before: beforeStatus, After: req.Status},
+			)...); err != nil {
+			internalError(w, "unable to update forum report")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to update forum report")
 			return
 		}
 		writeOK(w, map[string]bool{"ok": true})
@@ -581,16 +654,40 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	// 這是本檔案處理動態 SQL 的唯一准則：白名單決定「結構」，佔位符綁定「資料」。
 	// 同一個原則也出現在 ensureForumReportTarget（表名來自 if/else 白名單，ID 走佔位符）。
 	query := `UPDATE forum_reports SET status = ?, reviewed_at = ?, reviewed_by = ?`
+	// reviewed_by 記錄的是當下操作的管理員（session 的 email 欄位），不是被檢舉對象、
+	// 也不是檢舉人。requireAdminForum 已保證 is_admin 為 true。
+	actor := s.sessions.ResolveUser(r)
 	// args 的順序必須與 query 中佔位符出現的順序嚴格一致，否則值會被寫進錯誤的欄位。
-	// reviewed_by 與 PUT 分支同義：記錄當下操作的管理員，而非被檢舉對象或檢舉人。
-	args := []interface{}{req.Status, reviewedAt, s.sessions.ResolveUser(r)}
+	args := []interface{}{req.Status, reviewedAt, actor}
 	if req.Reason != "" {
 		query += `, reason = ?`
 		args = append(args, req.Reason)
 	}
 	query += ` WHERE id = ?`
 	args = append(args, id)
-	result, err := s.db.ExecContext(r.Context(), query, args...)
+
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to update forum report")
+		return
+	}
+	defer tx.Rollback()
+
+	// 讀取改動前的 reason 與 status。PATCH 只會動 status 與（選擇性的）reason，
+	// 因此 diff 只涵蓋這兩個欄位；target 與 reporter 不在此列，因為 PATCH 的
+	// 語意就是不碰它們。
+	var beforeReason, beforeStatus string
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT reason, status FROM forum_reports WHERE id = ?`, id).Scan(&beforeReason, &beforeStatus); err != nil {
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		internalError(w, "unable to load forum report")
+		return
+	}
+
+	result, err := tx.ExecContext(r.Context(), query, args...)
 	if err != nil {
 		internalError(w, "unable to update forum report")
 		return
@@ -603,7 +700,42 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
+	changes := onlyChanged(audit.Change{Field: "status", Before: beforeStatus, After: req.Status})
+	if req.Reason != "" {
+		changes = onlyChanged(append(changes, audit.Change{Field: "reason", Before: beforeReason, After: req.Reason})...)
+	}
+	if err := s.recordAdminAction(r, tx, adminReportAction(beforeStatus, req.Status), audit.TargetReport, strconv.FormatInt(id, 10), beforeStatus, changes...); err != nil {
+		internalError(w, "unable to update forum report")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		internalError(w, "unable to update forum report")
+		return
+	}
 	writeOK(w, map[string]bool{"ok": true})
+}
+
+/*
+adminReportAction 依「從什麼狀態變到什麼狀態」決定稽核的動作名稱。
+
+	→ RESOLVED	report.resolve（成立）
+	→ REJECTED	report.reject（不成立）
+	其他（含 PENDING）	report.update
+
+分成三支而不是一律記 "report.update" 的理由：這三個動作在後臺的語意與
+後果都不同 —— resolve 通常伴隨刪除被檢舉的內容，reject 表示內容沒問題。
+把它們混在 "update" 底下，稽核紀錄就答不出「這週有幾件檢舉被判定為成立」，
+而那正是檢舉機制唯一需要被追蹤的數字。
+*/
+func adminReportAction(beforeStatus, afterStatus string) string {
+	switch afterStatus {
+	case "RESOLVED":
+		return adminActionReportResolve
+	case "REJECTED":
+		return adminActionReportReject
+	default:
+		return adminActionReportUpdate
+	}
 }
 
 /*
@@ -670,7 +802,18 @@ func (s *Server) createAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	// 讓寫入的時間能被還原成 time.Time，loc=Local 則保證時區與伺服器一致。
 	// reviewed_at / reviewed_by 不在 INSERT 欄位中：新建立的檢舉一定是「尚未審核」，
 	// 這兩個欄位交由資料庫預設（NULL 與空字串），也讓 INSERT 語句保持簡單。
-	result, err := s.db.ExecContext(r.Context(), `
+	//
+	// 稽核：管理員手動建立的檢舉要記 reason 與 reporterEmail。理由是這條路徑
+	// 最容易產生「站上根本沒有人檢舉過」的紀錄（客服代登、或補登歷史資料），
+	// 事後要能分辨它與使用者自己送的檢舉。
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to create forum report")
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(r.Context(), `
 		INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, req.TargetType, req.TargetID, req.ReporterEmail, req.Reason, req.Status, time.Now())
 	if err != nil {
@@ -683,6 +826,18 @@ func (s *Server) createAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
+		internalError(w, "unable to read created report")
+		return
+	}
+	if err := s.recordAdminAction(r, tx, adminActionReportCreate, audit.TargetReport, strconv.FormatInt(id, 10), req.Status,
+		audit.Change{Field: "target", Before: "", After: req.TargetType + "/" + strconv.FormatInt(req.TargetID, 10)},
+		audit.Change{Field: "reporterEmail", Before: "", After: req.ReporterEmail},
+		audit.Change{Field: "reason", Before: "", After: req.Reason},
+	); err != nil {
+		internalError(w, "unable to create forum report")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		internalError(w, "unable to read created report")
 		return
 	}
@@ -1004,7 +1159,18 @@ func (s *Server) createAdminForumPost(w http.ResponseWriter, r *http.Request) {
 	// （圖片只能經由 /api/forum/images 由登入使用者上傳並取得媒體 token）。
 	// 寫空字串而非 NULL，是因為該欄位為 NOT NULL，且此處兩種寫法的語意相同。
 	createdAt := time.Now()
-	result, err := s.db.ExecContext(r.Context(), `
+	// 稽核：記 post.create，因為這裡是以管理員「自己」的身分發文，作者欄位
+	// 就是操作者本人。以他人身分代發的那條路徑（user_admin_handlers.go 的
+	// createAdminUserPost）才記 user.posts.create —— 兩者的差別正是「稽核
+	// 紀錄上作者是不是操作者」。
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to create forum post")
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(r.Context(), `
 		INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, ?, ?)`,
 		author, req.Content, "", createdAt)
 	if err != nil {
@@ -1016,7 +1182,18 @@ func (s *Server) createAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "unable to read created post")
 		return
 	}
+	if err := s.recordAdminAction(r, tx, adminActionPostCreate, audit.TargetPost, strconv.FormatInt(id, 10), req.Content,
+		audit.Change{Field: "authorEmail", Before: "", After: author},
+		audit.Change{Field: "content", Before: "", After: req.Content}); err != nil {
+		internalError(w, "unable to create forum post")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		internalError(w, "unable to read created post")
+		return
+	}
 	// 與一般使用者的發文路徑一樣，MySQL 寫入成功後才更新搜尋索引（best-effort）。
+	// 刻意放在 Commit 之後：索引是外部系統，這個交易只涵蓋 MySQL。
 	s.indexForumPost(r.Context(), id, req.Content, author, createdAt)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"ok": true, "id": id})
 }
@@ -1076,7 +1253,30 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		// 只更新 content：不用動態組裝 SQL，因為後台能修改的欄位就只有這一個。
 		// 若日後開放修改附圖或作者，請比照 handleAdminForumReport 的動態 UPDATE 做法，
 		// 欄位名用白名單字串、值一律走佔位符。
-		result, err := s.db.ExecContext(r.Context(), `UPDATE forum_posts SET content = ? WHERE id = ?`, req.Content, id)
+		//
+		// 稽核：改文必須記下改動前後的內容。原因是這是「以管理員身分改寫使用者
+		// 的文字」，而使用者看到的是被改過的版本 —— 沒有前後對照就無法向他們
+		// 說明改了什麼。兩個值都會被 audit 截到 200 字元（長文的前 200 字
+		// 足以辨識，完整內容仍在 forum_posts）。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to update forum post")
+			return
+		}
+		defer tx.Rollback()
+
+		var beforeContent string
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT content FROM forum_posts WHERE id = ?`, id).Scan(&beforeContent); err != nil {
+			if err == sql.ErrNoRows {
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load forum post")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `UPDATE forum_posts SET content = ? WHERE id = ?`, req.Content, id)
 		if err != nil {
 			internalError(w, "unable to update forum post")
 			return
@@ -1089,16 +1289,52 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if err := s.recordAdminAction(r, tx, adminActionPostUpdate, audit.TargetPost, strconv.FormatInt(id, 10), beforeContent,
+			audit.Change{Field: "content", Before: beforeContent, After: req.Content}); err != nil {
+			internalError(w, "unable to update forum post")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to update forum post")
+			return
+		}
 		// 內容改了，搜尋索引必須跟著改，否則管理介面搜得到使用者已看不到的舊文字。
 		// 用「依 id 回讀整列再重建索引」而不是「把新內容塞進索引」：索引還有作者與
 		// 建立時間兩個欄位（後臺以作者精確比對、同分時以時間排序），只送 content
 		// 會把這兩項清成空值。
+		//
+		// 刻意放在 Commit 之後：搜尋索引是外部系統，而這個交易只涵蓋 MySQL。
+		// 若在 Commit 之前呼叫而它失敗，索引會指向一筆被回滾的文章；反過來
+		// （先提交再索引）最壞是索引暫時過期，而 reindexForumPostByID 會在
+		// 下次讀取時以 id 為準修正。
 		s.reindexForumPostByID(r.Context(), id)
 		writeOK(w, map[string]bool{"ok": true})
 	case http.MethodDelete:
-		// 單一 DELETE 即完成：留言與按讚沒有外鍵約束，不需要先刪子表（理由見上方說明），
-		// 也不需要交易。
-		result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_posts WHERE id = ?`, id)
+		// 單一 DELETE 即完成：留言與按讚沒有外鍵約束，不需要先刪子表（理由見上方說明）。
+		//
+		// 稽核：刪文是不可逆的，而它是這個後臺最常被使用的操作（檢舉的
+		// 「通過（刪文）」就走這條路）。把刪除前的內容與作者記下來，事後才能
+		// 回答「這篇文是誰寫的、寫了什麼、為什麼被刪」。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to delete forum post")
+			return
+		}
+		defer tx.Rollback()
+
+		var beforeAuthor, beforeContent string
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT author_email, content FROM forum_posts WHERE id = ?`, id).Scan(&beforeAuthor, &beforeContent); err != nil {
+			if err == sql.ErrNoRows {
+				// 沒有比對到資料列即視為不存在 → 404。
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load forum post")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `DELETE FROM forum_posts WHERE id = ?`, id)
 		if err != nil {
 			internalError(w, "unable to delete forum post")
 			return
@@ -1106,6 +1342,16 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		if affected, _ := result.RowsAffected(); affected == 0 {
 			// 沒有比對到資料列即視為不存在 → 404。
 			http.NotFound(w, r)
+			return
+		}
+		if err := s.recordAdminAction(r, tx, adminActionPostDelete, audit.TargetPost, strconv.FormatInt(id, 10), beforeContent,
+			audit.Change{Field: "authorEmail", Before: beforeAuthor, After: "（文章已刪除）"},
+			audit.Change{Field: "content", Before: beforeContent, After: "（文章已刪除）"}); err != nil {
+			internalError(w, "unable to delete forum post")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to delete forum post")
 			return
 		}
 		// 一定要同步移除索引文件。檢舉的「通過（刪文）」走的正是這條路徑，
@@ -1209,15 +1455,38 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 		// 留言作者取自 session（也就是留言的管理員本人），不接受 body 傳入，
 		// 與 createAdminForumPost 相同：留下真實操作者。
 		// 另注意 PostID 來自 body 而非路徑，因此完全依賴上面的存在性檢查把關。
-		result, err := s.db.ExecContext(r.Context(), `
+		//
+		// 稽核：管理員新增的留言要以留言的身分記錄（user.comments.create），
+		// 而不是 comment.create —— 這筆留言在公開頁上會被當成該管理員說的話，
+		// 稽核要能從「這位管理員代發過什麼」查出來。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to create forum comment")
+			return
+		}
+		defer tx.Rollback()
+
+		author := s.sessions.ResolveUser(r)
+		result, err := tx.ExecContext(r.Context(), `
 			INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, ?, ?, ?)`,
-			req.PostID, s.sessions.ResolveUser(r), req.Content, time.Now())
+			req.PostID, author, req.Content, time.Now())
 		if err != nil {
 			internalError(w, "unable to create forum comment")
 			return
 		}
 		id, err := result.LastInsertId()
 		if err != nil {
+			internalError(w, "unable to read created comment")
+			return
+		}
+		if err := s.recordAdminAction(r, tx, adminActionCommentPost, audit.TargetComment, strconv.FormatInt(id, 10), req.Content,
+			audit.Change{Field: "postId", Before: "", After: strconv.FormatInt(req.PostID, 10)},
+			audit.Change{Field: "authorEmail", Before: "", After: author},
+			audit.Change{Field: "content", Before: "", After: req.Content}); err != nil {
+			internalError(w, "unable to create forum comment")
+			return
+		}
+		if err := tx.Commit(); err != nil {
 			internalError(w, "unable to read created comment")
 			return
 		}
@@ -1273,7 +1542,28 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		// 只更新 content：留言的作者、建立時間、所屬文章都是不可變的來源紀錄。
-		result, err := s.db.ExecContext(r.Context(), `UPDATE forum_post_comments SET content = ? WHERE id = ?`, req.Content, id)
+		//
+		// 稽核：同 post.update —— 記下改動前後的內容，因為使用者看到的是被改過
+		// 的版本，沒有前後對照就無法向他們說明。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to update forum comment")
+			return
+		}
+		defer tx.Rollback()
+
+		var beforeContent string
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT content FROM forum_post_comments WHERE id = ?`, id).Scan(&beforeContent); err != nil {
+			if err == sql.ErrNoRows {
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load forum comment")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `UPDATE forum_post_comments SET content = ? WHERE id = ?`, req.Content, id)
 		if err != nil {
 			internalError(w, "unable to update forum comment")
 			return
@@ -1285,17 +1575,56 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 			http.NotFound(w, r)
 			return
 		}
+		if err := s.recordAdminAction(r, tx, adminActionCommentPut, audit.TargetComment, strconv.FormatInt(id, 10), beforeContent,
+			audit.Change{Field: "content", Before: beforeContent, After: req.Content}); err != nil {
+			internalError(w, "unable to update forum comment")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to update forum comment")
+			return
+		}
 		writeOK(w, map[string]bool{"ok": true})
 	case http.MethodDelete:
 		// 刪除留言不影響其父文章，也沒有任何表以留言為父（forum_reports 只存數字 target_id，
-		// 沒有外鍵），因此單句 DELETE 即完成，不需要先刪子表、也不需要交易。
-		result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_post_comments WHERE id = ?`, id)
+		// 沒有外鍵），因此單句 DELETE 即完成，不需要先刪子表。
+		//
+		// 稽核：同 post.delete —— 記下刪除前的作者與內容。
+		tx, err := s.beginAdminTx(r)
+		if err != nil {
+			internalError(w, "unable to delete forum comment")
+			return
+		}
+		defer tx.Rollback()
+
+		var beforeAuthor, beforeContent string
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT author_email, content FROM forum_post_comments WHERE id = ?`, id).Scan(&beforeAuthor, &beforeContent); err != nil {
+			if err == sql.ErrNoRows {
+				http.NotFound(w, r)
+				return
+			}
+			internalError(w, "unable to load forum comment")
+			return
+		}
+
+		result, err := tx.ExecContext(r.Context(), `DELETE FROM forum_post_comments WHERE id = ?`, id)
 		if err != nil {
 			internalError(w, "unable to delete forum comment")
 			return
 		}
 		if affected, _ := result.RowsAffected(); affected == 0 {
 			http.NotFound(w, r)
+			return
+		}
+		if err := s.recordAdminAction(r, tx, adminActionCommentDel, audit.TargetComment, strconv.FormatInt(id, 10), beforeContent,
+			audit.Change{Field: "authorEmail", Before: beforeAuthor, After: "（留言已刪除）"},
+			audit.Change{Field: "content", Before: beforeContent, After: "（留言已刪除）"}); err != nil {
+			internalError(w, "unable to delete forum comment")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			internalError(w, "unable to delete forum comment")
 			return
 		}
 		writeOK(w, map[string]bool{"ok": true})

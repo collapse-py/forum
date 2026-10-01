@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go）。
+      前端 src/site.ts 在模組層讀下面這兩個 meta 標記，因此第一次繪製就是正確
+      站名，不會先畫出預設值再換掉。佔位符必須留在樣式區塊之外：各頁的內嵌
+      樣式是被 CSP 以 SHA-256 授權的，區塊內容只要一個位元組不同，整頁就會
+      沒有版面。這段註解因此刻意不寫出樣式標籤本身。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>操作紀錄｜{{FORUM_SHORT_NAME}} 後臺</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <style>
+      /*
+       * 管理員操作稽核紀錄（/admin/log）樣式
+       *
+       * 共用層在 /style.css：<body class="admin-page"> 的元素 reset、後臺
+       * design tokens、rail / topbar / canvas 殼層、面板、按鈕、表單、表格
+       * 基礎、badge、列表狀態與 toasts。本區塊只放這一頁自己渲染的東西：
+       * 篩選列、欄位級 diff、對象按鈕與分頁位置的微調。
+       *
+       * .pagination / .pagination__info 是沿用 forum-admin.html 的分頁樣式
+       * （那一頁的貼文列表也有上一頁／下一頁），而不是搬進 style.css：那組
+       * 規則的尺寸是配合「列表頁底部的翻頁列」，而這裡的翻頁列在稽核紀錄
+       * 頁面同樣位於 panel__foot，語意與尺寸都一致。等第三個頁面用到時再
+       * 整組搬過去。
+       */
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      /* --- 篩選列 ---------------------------------------------------------
+       * 用 grid 而不是 flex：六個條件的寬度差異很大（操作者的 email 可能
+       * 超過 200px，而日期欄固定 150px 就夠）。flex 會讓 email 欄被壓到看
+       * 不全，而 grid 的 auto-fit minmax 讓每一格自己決定寬度。
+       *
+       * targetId 那格刻意不限寬：它的值是 email 或數字字串，兩者差異極大，
+       * 而它又是「從某一列點進來」時最常被填的那一格。
+       * ------------------------------------------------------------------ */
+      .log-filters {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px 14px;
+      }
+
+      .log-filters__actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      /* 已套用條件的摘要。它是「畫面上的資料對應哪一組條件」的唯一指示，
+         因此放在按鈕旁邊而不是表格上方 —— 使用者是按完「套用篩選」才來看
+         這裡的。 */
+      .log-filters__active {
+        color: var(--ink-3);
+        font-size: 11.5px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      /* --- 紀錄表 ---------------------------------------------------------
+       * min-width 讓欄位在窄視窗下換成橫向捲動而不是把 diff 擠成豎排 ——
+       * 這一頁的內容是「文字的前後對照」，擠成豎排就完全無法比對了。
+       * ------------------------------------------------------------------ */
+      .log-table {
+        min-width: 960px;
+      }
+
+      .log-table th:first-child,
+      .log-table td:first-child {
+        white-space: nowrap;
+      }
+
+      /* 欄標題一律靠左。共用層的 .table th 沒有指定對齊（它繼承自祖先），
+         結果是欄標題跟著「文字欄靠左、數值欄靠右」的資料各自對齊 —— 在這
+         一頁尤其明顯，因為六欄的內容長度差異極大，看起來像兩張不同的表疊在
+         一起。這裡不加 .num 的例外，因為這一頁沒有純數值欄。 */
+      .log-table th {
+        text-align: start;
+      }
+
+      /* 時間用等寬數字，讓同一分鐘內的多筆紀錄在垂直方向對齊 —— 查帳時
+         「這幾筆是同一個人同一分鐘做的」是一個重要的判斷。 */
+      .log-time {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-2);
+      }
+
+      /* --- 對象欄 ---------------------------------------------------------
+       * 用 button 而非 a：點擊是「帶參數重新查詢」，不該被中鍵開新分頁
+       * （那會讓稽核紀錄在新分頁裡缺少當前的其他篩選條件）。
+       * ------------------------------------------------------------------ */
+      .log-target {
+        display: block;
+        width: 100%;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: var(--ink);
+        font: inherit;
+        text-align: start;
+        cursor: pointer;
+      }
+
+      .log-target:hover .log-target__id {
+        color: var(--accent-ink);
+        text-decoration: underline;
+      }
+
+      .log-target:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: var(--r-sm);
+      }
+
+      .log-target__id {
+        display: block;
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+
+      /* 對象的內容摘要（貼文前綴、標籤名）。clamp 成一行：这一頁的資訊密度
+         已經很高，而摘要只是「辨識用的線索」，完整內容在 forum_posts。 */
+      .log-target__label {
+        display: -webkit-box;
+        -webkit-line-clamp: 1;
+        -webkit-box-orient: vertical;
+        max-width: 30ch;
+        overflow: hidden;
+      }
+
+      /* --- 欄位級 diff ------------------------------------------------------
+       * 用 ul/li 而不是表格或定義清單：diff 的「列數」是資料決定的（一次
+       * 覆寫 40 個標籤只有 1 列，改一篇文只有 1 列），而 li 的排版不需要
+       * 事先知道有幾列。
+       * ------------------------------------------------------------------ */
+      .log-changes {
+        display: grid;
+        gap: 4px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .log-change {
+        display: grid;
+        gap: 1px;
+        font-size: 12px;
+      }
+
+      /* 欄位名用固定最小寬度，讓同一列裡的「舊值 → 新值」對齊。沒有這個，
+         「狀態」與「作者」會各自從不同位置開始，看起來像兩筆不同的東西。 */
+      .log-change__field {
+        color: var(--ink-3);
+        font-size: 10.5px;
+        font-weight: 700;
+      }
+
+      .log-change__values {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 4px 6px;
+      }
+
+      /* 舊值與新值都不加刪除線或背景色：這裡的值是使用者寫的文字，
+         而「改文」是覆寫不是刪除。用視覺刪除記號會讓稽核紀錄讀起來像
+         「管理員刪了這段話」—— 那正是這一頁要避免的誤讀。 */
+      .log-change__value {
+        overflow-wrap: anywhere;
+      }
+
+      .log-change__value--before {
+        color: var(--ink-2);
+      }
+
+      .log-change__value--after {
+        color: var(--ink);
+        font-weight: 700;
+      }
+
+      /* 「（新增）」與「（已刪除）」用弱色斜體：它們是佔位說明而不是實際值，
+         不該和真實內容競爭注意力。 */
+      .log-change__empty {
+        color: var(--ink-3);
+        font-size: 11px;
+        font-style: italic;
+      }
+
+      .log-change__arrow {
+        color: var(--ink-3);
+        font-size: 11px;
+      }
+
+      /* 截斷標記用虛線框而不是實心 badge：它是一個「關於這個值」的註記，
+         不是另一種狀態。實心 badge 會讓它看起來像「這個值被改成了某個
+         特別的東西」。 */
+      .log-change__cut {
+        padding: 0 5px;
+        border: 1px dashed var(--line-2);
+        border-radius: var(--r-sm);
+        color: var(--ink-3);
+        font-size: 10px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      /* --- 保留期說明 ------------------------------------------------------
+       * 放在最後而不是篩選列：它是「這份資料可以信賴多久」的背景知識，
+       * 不是操作的一部分。位置靠後也符合它的讀取時機 —— 查帳查到一半才會
+       * 想確認「這段期間內的紀錄還在不在」。
+       * ------------------------------------------------------------------ */
+      .log-retention {
+        margin: 0;
+        color: var(--ink-3);
+        font-size: 11.5px;
+      }
+
+      /* --- 分頁 ------------------------------------------------------------
+       * 只放翻頁按鈕與頁數，不放頁碼列表。理由見 AdminLogPage 的說明：
+       * 稽核紀錄的查閱是「往回翻找某個時間點」，跳頁會跳過中間的紀錄。
+       * ------------------------------------------------------------------ */
+      .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+      }
+
+      .pagination__info {
+        color: var(--ink-2);
+        font-size: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* --- 這一頁專屬的斷點 ------------------------------------------------
+       * 篩選列在窄視窗上讓每一格變成滿版寬（auto-fit 的 minmax 讓格子在
+       * 容器窄於 minmax 時佔滿一列），因此它不需要額外的斷點。只有對象
+       * 摘要的截斷長度在窄螢幕上要放寬 —— 30ch 在 360px 的畫面會佔掉
+       * 三分之一的寬度。
+       * ------------------------------------------------------------------ */
+      @media (max-width: 720px) {
+        .log-target__label {
+          max-width: 18ch;
+        }
+      }
+    </style>
+  </head>
+  <body class="admin-page">
+    <!-- 見 forum.html：整頁由 src/entries/audit-log.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/audit-log.tsx"></script>
+  </body>
+</html>

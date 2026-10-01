@@ -185,6 +185,8 @@ type Config struct {
 	LogLevel                 string        // LOG_LEVEL
 	LogFile                  string        // LOG_FILE
 	LogFormat                string        // LOG_FORMAT（"json" 或 "text"）
+	MonitorRetentionHours    int           // MONITOR_RETENTION_HOURS（分鐘彙總保留小時數）
+	AuditRetentionDays       int           // AUDIT_RETENTION_DAYS（稽核紀錄保留天數）
 	ForumName                string        // FORUM_NAME（站台顯示名稱，預設 "forum 論壇"）
 	ForumShortName           string        // FORUM_SHORT_NAME（標誌短名，留空＝沿用 ForumName）
 	ForumDescription         string        // FORUM_DESCRIPTION（manifest 說明，留空＝沿用 ForumName）
@@ -353,6 +355,19 @@ func Load(path string) (Config, error) {
 			cfg.LogFile = val
 		case "LOG_FORMAT":
 			cfg.LogFormat = val
+		case "AUDIT_RETENTION_DAYS":
+			// 與 MONITOR_RETENTION_HOURS 同一個理由：保留 0 天等於「不保存任何
+			// 稽核紀錄」，那會讓這張表形同虛設，靜默接受它比拒絕更危險。
+			if days, ok := parsePositiveInt(val); ok {
+				cfg.AuditRetentionDays = days
+			}
+		case "MONITOR_RETENTION_HOURS":
+			// 沿用 parsePositiveInt 的「非正值就拒絕」：保留 0 小時等於
+			// 「不要保存任何歷史」，那不是一個可用的設定值，靜默接受它會讓
+			// 監控頁看起來正常卻永遠只有當下的資料。
+			if hours, ok := parsePositiveInt(val); ok {
+				cfg.MonitorRetentionHours = hours
+			}
 		case "FORUM_NAME":
 			// 原樣保留：站名可能含中文與空白，解析端沒有任何格式要求。
 			cfg.ForumName = val
@@ -444,6 +459,21 @@ func (c *Config) applyDefaults() {
 	if c.LogFormat == "" {
 		// 只有 "json" 與 "text" 兩種輸出；其他值都會落到 text 分支。
 		c.LogFormat = "text"
+	}
+	if c.AuditRetentionDays <= 0 {
+		// 90 天。稽核紀錄與監控資料的價值曲線相反：監控是「最近幾小時」，
+		// 稽核是「上季有人動過什麼」—— 後者需要跨月保留才有稽核意義。
+		// 但也不能無限保留：這張表每分鐘會長出數列（停權、改標籤、裁決檢舉
+		// 都會產生），而其中保存了使用者的文字片段，保留越久就越像一份
+		// 沒有用途的個人資料備份。
+		c.AuditRetentionDays = 90
+	}
+	if c.MonitorRetentionHours <= 0 {
+		// 24 小時。這個值決定 forum_request_metrics 裡留多少分鐘級彙總，也
+		// 因此決定監控頁的時間軸長度。刻意給一個有限的值：這張表是每分鐘
+		// 都會長出一列的，只增不減的監控資料在幾個月後就會變成資料庫裡
+		// 最大的一張表，而它的價值隨時間急遽下降（維運看的是「最近幾小時」）。
+		c.MonitorRetentionHours = 24
 	}
 	// 站名的三個欄位有相依的兜底順序，因此集中在最後：短名與說明預設都取
 	// 「完整站名」，而完整站名必須先有值。順序若調換，短名會變成空字串 ——
