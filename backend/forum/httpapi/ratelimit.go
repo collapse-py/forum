@@ -72,6 +72,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"forum/forum/metrics"
 )
 
 // RateLimiter 是以滑動視窗日誌為基礎的行程內限流器，欄位語意如下：
@@ -342,17 +344,23 @@ func (rl *RateLimiter) Middleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// clientIP 決定限流計數用的用戶端識別值，信任順序為 X-Forwarded-For 最左一項
-// → X-Real-IP → RemoteAddr（去掉埠號）。
+// clientIPDetail 決定限流計數用的用戶端識別值，並一併回報它是從哪裡來的。
+//
+// 信任順序為 X-Forwarded-For 最左一項 → X-Real-IP → RemoteAddr（去掉埠號）。
 // 這是純函式，不做 I/O。
 //
 // 安全假設與限制：X-Forwarded-For 與 X-Real-IP 都是可由用戶端設定的表頭，
-// 只有在「 本站前面確實有一道會覆寫這些表頭的代理，且使用者無法繞過它直連」
+// 只有在「本站前面確實有一道會覆寫這些表頭的代理，且使用者無法繞過它直連」
 // 時，裡面的值才可信。當服務可被直連、或代理採用附加而非覆寫的寫法時，
 // 攻擊者可以偽造來源來取得新的額度（限流被繞過），甚至用隨機值把 hits 撐大
 // （見檔頭的記憶體成長說明）。因此本檔案的安全性依賴部署方式的假設，而非
-// 程式本身的保證。
-func clientIP(r *http.Request) string {
+// 程式本身的保證。回傳的 source 讓呼叫端（每 IP 監控）能把這個假設暴露出來。
+//
+// 回傳的 source 給「每 IP 監控」使用，讓介面能標示這個位址的可信度（xff /
+// real-ip / peer）。刻意不讓 clientIP 回傳兩個值：那個函式被三個地方當成單值
+// 純函式使用（Middleware、withBlocklistHandler、限流統計），為了它們多寫一次
+// `_, _ :=` 會讓「取得來源」變成一個比實際需要更麻煩的呼叫。
+func clientIPDetail(r *http.Request) (string, string) {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		// 取最左一項：XFF 是由左往右「代理逐層附加」，最左邊才是原始的發起者；
 		// 越靠右越接近本站、可信度越高。
@@ -360,12 +368,12 @@ func clientIP(r *http.Request) string {
 		// 若 XFF 全是逗號或空白，splitComma 會回傳長度 0 的切片，這時
 		// 不應回傳空字串當作 key，否則所有這類請求會共用同一個額度。
 		if len(parts) > 0 {
-			return parts[0]
+			return parts[0], metrics.ClientSourceXFF
 		}
 	}
 	// 部分反向代理（Nginx 預設）會設定 X-Real-IP，作為第二順位來源。
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
+		return xri, metrics.ClientSourceRealIP
 	}
 	// 最後退回 RemoteAddr（net/http 保證是 "host:port"），去掉埠號只留主機。
 	ip := r.RemoteAddr
@@ -375,6 +383,12 @@ func clientIP(r *http.Request) string {
 	if idx := lastIndexByte(ip, ':'); idx != -1 {
 		ip = ip[:idx]
 	}
+	return ip, metrics.ClientSourcePeer
+}
+
+// clientIP 只取用戶端識別值，等同 clientIPDetail 的第一個回傳值。
+func clientIP(r *http.Request) string {
+	ip, _ := clientIPDetail(r)
 	return ip
 }
 

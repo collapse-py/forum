@@ -33,6 +33,7 @@ package httpapi
 */
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -103,10 +104,57 @@ func withBlocklistHandler(rl *RateLimiter, store *ipban.Store, next http.Handler
 		}
 		logBlocklistRecovered()
 		if banned {
-			writeBannedResponse(w, until)
+			writeBannedResponse(w, r, until)
 			return
 		}
 		limited(w, r)
+	}
+}
+
+// bannedRequestKey 是 metricsMiddleware 放進 context 的「本次請求擋下狀態」容器。
+//
+// 為什麼要透過 context 傳遞，而不是讓 metricsMiddleware 從狀態碼反推：403 在這
+// 個專案裡同時來自封鎖名單、requireAdminForum（不是管理員）與 isTrustedOrigin
+// （CSRF）。從狀態碼反推會讓「這個位址被硬闖了 N 次」這個數字混入完全不相干的
+// 403，而管理員看到「被封鎖的位址正在嘗試寫入」時會據此判斷封鎖有效 —— 用錯的
+// 數字會讓他得出相反的結論。
+//
+// 傳的是**指標**而不是 bool：blocklist 中介層在 metricsMiddleware 的內側，它
+// 拿到的 r 是 metricsMiddleware 傳下去的那一份副本，因此在內層呼叫
+// r.WithContext 造出來的新 request 不會回到外層。指標讓內外兩層指向同一個
+// 可變狀態，這是 context 唯一被用來攜帶「跨中介層的單一事實」的地方（其他跨層
+// 狀態走的是包裝 ResponseWriter 或明確的函式參數）。
+//
+// 替代方案是讓 metricsMiddleware 掛在 blocklist 的內側，但那會改變 stats 涵蓋
+// 的請求集合 —— 它現在刻意涵蓋整棵 mux，包括被擋下的請求，而那正是「有人在打
+// 這個位址」的證據。
+type bannedRequestKey struct{}
+
+// bannedMarker 是本次請求的擋下狀態。
+//
+// 單一 bool 欄位而非一個 map：目前只有封鎖名單一種來源需要標記，而「未來會有
+// 第二種」不是現在就該為它設計的理由。真的加了第二種時，這裡換成計數器。
+type bannedMarker struct {
+	blocked bool
+}
+
+// withBannedMarker 在 context 裡放一個本次請求專用的 marker，回傳帶它的 request。
+//
+// 只由 metricsMiddleware 呼叫（見它的說明）。base 刻意用 r.Context() 而不是
+// context.Background()：沿用原來的 context 才不會讓下游 handler 看不到用戶端
+// 取消與逾時，而 marker 的生命週期只到本次回應結束，不會外洩。
+func withBannedMarker(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), bannedRequestKey{}, &bannedMarker{}))
+}
+
+// markBannedRequest 標記這個請求是因封鎖名單而被擋下的。
+//
+// context 裡沒有 marker 時（例如這支中介層被單獨測試而沒有包在
+// metricsMiddleware 內）靜靜不做事：那個情境沒有任何人在讀這個旗標，而為了
+// 一個沒有人在讀的狀態去改變行為會讓單元測試變複雜。
+func markBannedRequest(r *http.Request) {
+	if marker, ok := r.Context().Value(bannedRequestKey{}).(*bannedMarker); ok {
+		marker.blocked = true
 	}
 }
 
@@ -116,7 +164,13 @@ func withBlocklistHandler(rl *RateLimiter, store *ipban.Store, next http.Handler
 // （攻擊者可以輪流試不同 IP 並記下哪些被回 403）。Retry-After 照樣送出，因為
 // 它是 RFC 9110 對「暫時性拒絕」的標準做法，而且能讓自動化的客戶端在到期後
 // 自動恢復 —— 那正是「限時封鎖」想要的行為。
-func writeBannedResponse(w http.ResponseWriter, until time.Time) {
+//
+// r 只為了寫進 context 標記，讓每 IP 監控知道這次 403 是「封鎖」而不是
+// 「不是管理員」（見 markBannedRequest）。刻意不把 IP 或到期時間放進去：那兩者
+// 已經由 metricsMiddleware 自己從 request 取得，而這裡多放一個值就多一個
+// 「兩邊算出不同結果」的機會。
+func writeBannedResponse(w http.ResponseWriter, r *http.Request, until time.Time) {
+	markBannedRequest(r)
 	if wait := time.Until(until); wait > 0 {
 		seconds := int((wait + time.Second - 1) / time.Second)
 		if seconds < 1 {

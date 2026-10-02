@@ -198,8 +198,14 @@ export interface MonitorSnapshot {
   windowMinutes?: number;
   retentionHours?: number;
   maxRoutes?: number;
+  /** 最多追蹤幾個來源位址；超出時後端驅逐最久沒出現的那一個。 */
+  maxClients?: number;
+  /** 因達到上限而被驅逐的累計次數。大於 0 代表這份來源清單不完整。 */
+  clientsDropped?: number;
   runtime: MonitorRuntime;
   requests: MonitorRequests;
+  /** 依請求數由多到少排序（相同時依最後活動時間、再依位址字串）。 */
+  clients: MonitorClient[];
   timeline: MonitorTimelinePoint[];
   rateLimits: MonitorRateLimit[];
   historyLoaded?: boolean;
@@ -267,6 +273,42 @@ export interface MonitorRateLimit {
   allowed: number;
   blocked: number;
   trackedKeys: number;
+}
+
+/**
+ * 單一來源位址的統計。
+ *
+ * `source` 是這個位址**怎麼來的**，不是它有多可信：
+ *
+ *   - `peer`     取自 RemoteAddr（TCP 連線對端）。直連時才是真人；在反向
+ *                代理後面它是代理的位址。
+ *   - `xff`      取自 X-Forwarded-For 最左一項。使用者可以自己設定這個標頭，
+ *                因此**不經可信代理驗證時，這個值不足以拿來封人**。
+ *   - `real-ip`  取自 X-Real-IP。同樣使用者可控。
+ *
+ * 介面必須把這個差異呈現出來：管理員看到一個位址時需要知道它是「連線對端」
+ * 還是「自己剛才送的那個標頭」。後端刻意不做可信代理白名單（那需要先確認
+ * 部署的代理拓撲），所以誠實的呈現方式是標記來源，而不是假裝它可信。
+ */
+export type MonitorClientSource = 'peer' | 'xff' | 'real-ip' | (string & {});
+
+export interface MonitorClient {
+  ip: string;
+  source: MonitorClientSource;
+  total: number;
+  clientErrors: number;
+  serverErrors: number;
+  /** 回 429 的次數 —— 「這個位址已經超出額度」的直接證據。 */
+  rateLimited: number;
+  /**
+   * 因在封鎖名單上而被擋下的次數。後端由 blocklist 中介層經 context 標記，
+   * 不是從 403 推導（403 同時來自「不是管理員」與 CSRF 檢查）。
+   */
+  banned: number;
+  firstSeen: string;
+  lastSeen: string;
+  /** 最近一次打到哪條已正規化的路由。 */
+  lastRoute: string;
 }
 
 /* ==========================================================================

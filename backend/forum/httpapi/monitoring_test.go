@@ -14,6 +14,10 @@
      這個端點會回傳連線池水位、Redis 鍵數與執行期統計，任何人可讀等同把內部
      拓撲公開；順序反過來則可用一個不支援的 method 拿到 405，等於洩漏
      「這條路由存在且需要管理員身分」。
+  4. 每 IP 統計有沒有真的被接上，以及「被封鎖名單擋下」這件事是怎麼傳到
+     metricsMiddleware 的。第 4 點是這一組裡最脆的一條：中間層靠 context 指標
+     傳遞（見 blocklist.go 的 bannedRequestKey），而把它改回「從 403 推導」會
+     讓管理員看到「被封鎖的位址在硬闖」——而那些 403 其實是未登入的後台請求。
 
 刻意沒有測的：handleAdminMonitor 回 200 的路徑。那需要一個真的 *sql.DB
 （probeDatabase 會呼叫 PingContext 與 Stats），而這個專案目前的測試策略是
@@ -36,6 +40,7 @@ import (
 	"testing"
 	"time"
 
+	"forum/forum/ipban"
 	"forum/forum/metrics"
 	"forum/forum/session"
 
@@ -138,8 +143,12 @@ func TestMetricsMiddlewareHandlesConcurrentRequests(t *testing.T) {
 		go func(id int) {
 			defer func() { done <- struct{}{} }()
 			for i := range perGoroutine {
-				inner.ServeHTTP(httptest.NewRecorder(),
-					httptest.NewRequest(http.MethodGet, "/api/forum/posts/"+strconvItoa(id*perGoroutine+i), nil))
+				request := httptest.NewRequest(http.MethodGet, "/api/forum/posts/"+strconvItoa(id*perGoroutine+i), nil)
+				// 刻意給每個 goroutine 不同的來源：httptest.NewRequest 的
+				// 預設 RemoteAddr 是同一個（192.0.2.1），那樣 clients 只會有
+				// 一列，測不出「不同 key 併發寫入同一個 map」。
+				request.RemoteAddr = "198.51.100." + strconvItoa(id+1) + ":1000"
+				inner.ServeHTTP(httptest.NewRecorder(), request)
 			}
 		}(g)
 	}
@@ -153,6 +162,121 @@ func TestMetricsMiddlewareHandlesConcurrentRequests(t *testing.T) {
 	}
 	if snapshot.Requests.InFlight != 0 {
 		t.Fatalf("inFlight = %d, want 0", snapshot.Requests.InFlight)
+	}
+	// 併發寫入 clients map 的正確性。若 ObserveClient 少了鎖，這裡的
+	// len/total 會對不上；-race 則會直接報出競爭。
+	if got := len(snapshot.Clients); got != goroutines {
+		t.Errorf("clients = %d, want %d（每個 goroutine 各自的 RemoteAddr）", got, goroutines)
+	}
+}
+
+/* ==========================================================================
+   每 IP 統計的接線
+   ========================================================================== */
+
+// metricsMiddleware 必須把來源位址記進 clients，否則監控頁的「來源位址」一欄
+// 永遠是空的，而那正是這一頁存在的理由。
+func TestMetricsMiddlewareRecordsClientAddress(t *testing.T) {
+	server := &Server{metrics: metrics.New(metrics.Options{})}
+	inner := server.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/api/forum/posts", nil)
+	request.RemoteAddr = "203.0.113.9:54321"
+	inner.ServeHTTP(httptest.NewRecorder(), request)
+
+	clients := server.metrics.Snapshot(0).Clients
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	if clients[0].IP != "203.0.113.9" {
+		t.Errorf("ip = %q, want 203.0.113.9（埠號要去掉）", clients[0].IP)
+	}
+	// 沒有任何代理標頭時必須標成 peer —— 管理員要能分辨「這是連線對端」。
+	if clients[0].Source != metrics.ClientSourcePeer {
+		t.Errorf("source = %q, want peer", clients[0].Source)
+	}
+	if clients[0].Total != 1 || clients[0].LastRoute != "/api/forum/posts" {
+		t.Errorf("total=%d lastRoute=%q, want 1 /api/forum/posts", clients[0].Total, clients[0].LastRoute)
+	}
+}
+
+// X-Forwarded-For 的位址必須被標成 xff，讓介面能提示它不可信。
+//
+// 這一條同時守住 clientIPDetail 的兩半：值仍然是 XFF 最左一項（既有行為不能
+// 因為加了標記而改變），而 source 必須如實回報它的來源。
+func TestMetricsMiddlewareMarksForwardedAddress(t *testing.T) {
+	server := &Server{metrics: metrics.New(metrics.Options{})}
+	inner := server.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/api/forum/posts", nil)
+	request.RemoteAddr = "10.0.0.1:1234"
+	request.Header.Set("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
+	inner.ServeHTTP(httptest.NewRecorder(), request)
+
+	clients := server.metrics.Snapshot(0).Clients
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	if clients[0].IP != "198.51.100.7" {
+		t.Errorf("ip = %q, want 198.51.100.7（XFF 最左一項）", clients[0].IP)
+	}
+	if clients[0].Source != metrics.ClientSourceXFF {
+		t.Errorf("source = %q, want xff", clients[0].Source)
+	}
+}
+
+// 被封鎖名單擋下的請求必須被算成 banned，而不是從 403 推導。
+//
+// 這一支把 blocklist 中介層與 metricsMiddleware 串在一起（context 指標的那條
+// 路徑）。若 markBannedRequest 被移除，banned 會是 0，而畫面上「被封鎖的位址
+// 正在嘗試寫入」這個判斷會失去依據。
+func TestBannedRequestIsMarkedForMetrics(t *testing.T) {
+	server := &Server{
+		metrics: metrics.New(metrics.Options{}),
+		blocks:  ipban.New(nil), // 不會被查到，但 IsBanned 會回 ErrNoStore
+	}
+	// 直接測 context 標記這條路徑：真的連 Redis 封一個位址會讓這支測試變成
+	// 依賴 miniredis，而它要驗證的只是「標記有沒有被記下來」。
+	inner := server.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		markBannedRequest(r)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/api/forum/posts", nil)
+	request.RemoteAddr = "203.0.113.9:54321"
+	inner.ServeHTTP(httptest.NewRecorder(), request)
+
+	clients := server.metrics.Snapshot(0).Clients
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	if clients[0].Banned != 1 {
+		t.Errorf("banned = %d, want 1", clients[0].Banned)
+	}
+	// 403 仍然是 4xx：banned 是額外的訊號，不是把 clientErrors 換掉。
+	if clients[0].ClientErrors != 1 {
+		t.Errorf("clientErrors = %d, want 1", clients[0].ClientErrors)
+	}
+}
+
+// 沒有 marker 的 request 不該被算成 banned —— 未登入的後台請求也是 403。
+func TestUnmarkedForbiddenRequestIsNotBanned(t *testing.T) {
+	server := &Server{metrics: metrics.New(metrics.Options{})}
+	inner := server.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	request.RemoteAddr = "203.0.113.9:54321"
+	inner.ServeHTTP(httptest.NewRecorder(), request)
+
+	clients := server.metrics.Snapshot(0).Clients
+	if len(clients) != 1 || clients[0].Banned != 0 {
+		t.Fatalf("未標記的 403 不該算成 banned: %+v", clients)
 	}
 }
 

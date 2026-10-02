@@ -386,12 +386,30 @@
       }
 
       .monitor-routes th:first-child,
-      .monitor-limits th:first-child {
+      .monitor-limits th:first-child,
+      .monitor-clients th:first-child {
         text-align: start;
       }
 
       .monitor-limits {
         min-width: 560px;
+      }
+
+      /* --- 來源位址 -----------------------------------------------------
+       * min-width 780px 與路由表相同：這兩張表的欄位組成幾乎一樣（位址／來源／
+       * 四個數字／路由／動作），讓它們共用同一個寬度下限可以讓表格在換頁時
+       * 不會突然變寬。
+       * ------------------------------------------------------------------ */
+      .monitor-clients {
+        min-width: 780px;
+      }
+
+      /* 位址用等寬字體：IPv4 的四段與 IPv6 的八組都是要逐組比對的東西，比例
+       * 字體下的「1」與「7」、「0」與「8」長得不像同一個寬度，比對時會看錯。 */
+      .client-ip {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        font-weight: 700;
       }
 
       /* 路由欄：method 與路徑並排。method 用等寬小字，讓「同一個 method 的

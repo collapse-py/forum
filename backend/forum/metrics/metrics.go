@@ -243,9 +243,18 @@ type Registry struct {
 	// windowMinutes 是 buckets 保留的分鐘數，也是時間軸長度的來源。
 	windowMinutes int
 	maxRoutes     int
+	// maxClients 與 clientIdleMinutes 守著「每 IP 統計」的記憶體上限，
+	// 理由與風險見 clients.go 的檔頭。
+	maxClients        int
+	clientIdleMinutes int
 
 	routes  map[string]*routeStat
-	buckets map[int64]*minuteBucket
+	clients map[string]*clientStat
+	// clientsDropped 是「因為達到 maxClients 而被驅逐掉的來源」的累計次數。
+	// 它存在的唯一理由是可觀察性：驅逐會讓某個來源的計數整筆消失，而這個
+	// 計數器讓「這一頁可能漏了東西」變成介面上看得見的事實。
+	clientsDropped int64
+	buckets        map[int64]*minuteBucket
 	// history 是從資料庫讀回來、只用於顯示的歷史桶。與 buckets 分開是因為
 	// 兩者的寫入語意相反：buckets 會被寫進資料庫，history 永遠不會。
 	history map[int64]*minuteBucket
@@ -270,6 +279,11 @@ type Options struct {
 	WindowMinutes int
 	// MaxRoutes 為最多追蹤幾條不同路由，小於等於 0 時用預設 200。
 	MaxRoutes int
+	// MaxClients 為最多追蹤幾個不同來源位址，小於等於 0 時用預設 200。
+	MaxClients int
+	// ClientIdleMinutes 為一個來源在多久沒有再出現後被視為閒置而移除，
+	// 小於等於 0 時用 WindowMinutes（因此預設就是記憶體視窗的長度）。
+	ClientIdleMinutes int
 	// Now 為取時間的函式，nil 時用 time.Now。測試可注入假時鐘。
 	Now func() time.Time
 }
@@ -288,19 +302,33 @@ func New(opts Options) *Registry {
 	if maxRoutes <= 0 {
 		maxRoutes = defaultMaxRoutes
 	}
+	maxClients := opts.MaxClients
+	if maxClients <= 0 {
+		maxClients = defaultMaxClients
+	}
+	// 預設讓來源閒置期等於記憶體視窗：兩個視窗回答的是同一個問題
+	//（「最近這段時間發生了什麼」），長度不一致只會讓管理員困惑於「為什麼
+	// 曲線上還看得到那個位址，但它的計數已經歸零」。
+	clientIdleMinutes := opts.ClientIdleMinutes
+	if clientIdleMinutes <= 0 {
+		clientIdleMinutes = windowMinutes
+	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
 	return &Registry{
-		startedAt:     now(),
-		now:           now,
-		windowMinutes: windowMinutes,
-		maxRoutes:     maxRoutes,
-		routes:        make(map[string]*routeStat),
-		buckets:       make(map[int64]*minuteBucket),
-		history:       make(map[int64]*minuteBucket),
-		bucketsAll:    make([]int64, overflowIndex+1),
+		startedAt:         now(),
+		now:               now,
+		windowMinutes:     windowMinutes,
+		maxRoutes:         maxRoutes,
+		maxClients:        maxClients,
+		clientIdleMinutes: clientIdleMinutes,
+		routes:            make(map[string]*routeStat),
+		clients:           make(map[string]*clientStat),
+		buckets:           make(map[int64]*minuteBucket),
+		history:           make(map[int64]*minuteBucket),
+		bucketsAll:        make([]int64, overflowIndex+1),
 	}
 }
 
@@ -568,9 +596,14 @@ type Snapshot struct {
 	MaxRoutes      int              `json:"maxRoutes"`
 	Runtime        RuntimeSnapshot  `json:"runtime"`
 	Requests       RequestsSnapshot `json:"requests"`
-	Timeline       []TimelinePoint  `json:"timeline"`
-	Limits         []LimitSnapshot  `json:"rateLimits"`
-	HistoryLoaded  bool             `json:"historyLoaded"`
+	Clients        []ClientSnapshot `json:"clients"`
+	// MaxClients 與 ClientsDropped 一起讓「來源清單被截斷了」這件事可見：
+	// 沒有它們，一個輪換位址的攻擊者會讓畫面看起來只是「今天沒什麼人來」。
+	MaxClients   int              `json:"maxClients"`
+	ClientsDropped int64          `json:"clientsDropped"`
+	Timeline     []TimelinePoint  `json:"timeline"`
+	Limits       []LimitSnapshot  `json:"rateLimits"`
+	HistoryLoaded bool            `json:"historyLoaded"`
 }
 
 // Snapshot 組出一份可 JSON 序列化的統計快照。
@@ -595,6 +628,11 @@ func (r *Registry) Snapshot(retentionHours int) Snapshot {
 	defer r.mu.Unlock()
 
 	now := r.now()
+	// 剪枝放在這裡（持有 mu）而不是只留給 flusher：沒有資料庫可寫的部署不會
+	// 啟動 StartFlusher，那時唯一的清理機會就是有人真的在看監控頁。閒置來源
+	// 對記憶體的影響很小，但「讓 map 的內容與 now 之後仍然一致」這件事值得
+	// 在唯一保證有人在意它的時刻做掉。
+	r.pruneClientsLocked(now)
 	return Snapshot{
 		StartedAt:      r.startedAt.UTC().Format(time.RFC3339),
 		Now:            now.UTC().Format(time.RFC3339),
@@ -629,9 +667,12 @@ func (r *Registry) Snapshot(retentionHours int) Snapshot {
 			MaxMS:         durationMS(r.maxDuration),
 			Routes:        r.routesLocked(),
 		},
-		Timeline:      r.timelineLocked(now),
-		Limits:        r.limitsLocked(),
-		HistoryLoaded: len(r.history) > 0,
+		Clients:        r.clientsLocked(),
+		MaxClients:     r.maxClients,
+		ClientsDropped: r.clientsDropped,
+		Timeline:       r.timelineLocked(now),
+		Limits:         r.limitsLocked(),
+		HistoryLoaded:  len(r.history) > 0,
 	}
 }
 
@@ -920,6 +961,10 @@ func (r *Registry) pruneLocked(now time.Time) {
 			delete(r.history, minute)
 		}
 	}
+	// 每 IP 統計的剪枝條件不同（用「最後活動」而不是分鐘索引），因此獨立
+	// 呼叫而不是併進上面的迴圈。放在這裡是為了讓「不論有沒有資料庫，來源都會
+	// 被清理」這個不變條件只有一個實作點。
+	r.pruneClientsLocked(now)
 }
 
 // LoadHistory 從資料庫讀回 since 之後的分鐘彙總，讓時間軸在重啟後仍有東西可畫。

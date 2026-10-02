@@ -58,6 +58,9 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// marker 在 context 裡被 blocklist 中介層填入（見 markBannedRequest），
+		// 因此 r 要先換成帶 marker 的那一份再往下傳。
+		r = withBannedMarker(r)
 		// Begin 必須在 handler 之前呼叫：End 會把 inFlight 減一，而這兩個
 		// 數字要涵蓋 handler 正在執行的期間。defer 保證 panic 被 net/http
 		// 轉成 500 時，計數仍然收得回來。
@@ -65,7 +68,12 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		rw := logger.NewStatusWriter(w)
 		defer func() {
 			s.metrics.End()
-			s.metrics.Observe(r.Method, r.URL.Path, rw.StatusCode(), time.Since(start))
+			d := time.Since(start)
+			status := rw.StatusCode()
+			s.metrics.Observe(r.Method, r.URL.Path, status, d)
+			ip, source := clientIPDetail(r)
+			marker, _ := r.Context().Value(bannedRequestKey{}).(*bannedMarker)
+			s.metrics.ObserveClient(ip, source, r.URL.Path, status, marker != nil && marker.blocked)
 		}()
 		next.ServeHTTP(rw, r)
 	})

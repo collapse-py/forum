@@ -416,6 +416,31 @@ export const zhTW = {
   'monitor.colErrors': '錯誤',
   'monitor.routeOther': '其他（已達路由數上限）',
 
+  'monitor.clientsTitle': '來源位址',
+  'monitor.clientsNote':
+    '依請求量由多到少列出目前活躍的來源。位址取自 X-Forwarded-For 或 X-Real-IP 時並未經可信代理驗證，管理員可以先確認這兩道代理是否會覆寫這些標頭，再決定要不要封鎖。',
+  'monitor.noClients': '尚未追蹤到任何來源。',
+  'monitor.noClientsBody':
+    '每個請求都會被記到它的來源位址上。目前這一欄是空的。',
+  'monitor.clientsDropped':
+    '來源數量已達上限 {limit}，先前列出的 {count} 個位址已被移出追蹤（移出的是最久沒再出現的那些）。看到這一行的意思是這份清單不完整，而不是「只有這麼多人來過」。',
+  'monitor.colIp': '位址',
+  'monitor.colSource': '來源',
+  'monitor.colRateLimited': '限流阻擋',
+  'monitor.colBanned': '封鎖擋下',
+  'monitor.colLastRoute': '最近打到',
+  'monitor.colActions': '動作',
+  'monitor.colBlock': '封鎖',
+  'monitor.blocking': '封鎖中…',
+  'monitor.sourcePeer': '連線對端',
+  'monitor.sourceXff': 'X-Forwarded-For',
+  'monitor.sourceRealIp': 'X-Real-IP',
+  'monitor.blockTitle': '封鎖 {ip}',
+  'monitor.blockMessage':
+    '這個位址的寫入型請求（發文、留言、按讚、檢舉、上傳圖片、登入跳轉）會被拒絕 {duration}，閱讀不受影響。確定要封嗎？',
+  'monitor.blockReason': '從監控頁封鎖',
+  'monitor.blocked': '已封鎖 {ip}',
+  'monitor.blockFailed': '封鎖操作失敗。',
   'monitor.limitsTitle': '限流器',
   'monitor.limitsNote': '每組額度依端點成本分開計算；阻擋次數是本次啟動以來回 429 的總量。',
   'monitor.colLimiter': '限流器',

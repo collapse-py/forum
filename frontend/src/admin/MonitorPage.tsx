@@ -47,6 +47,20 @@ const MAX_ROUTE_ROWS = 40;
 
 const ROUTE_COLUMNS = 7;
 const LIMIT_COLUMNS = 6;
+const CLIENT_COLUMNS = 8;
+
+/** 來源位址表格最多顯示幾列。與路由表同樣在 .table-wrap 內捲動。 */
+const MAX_CLIENT_ROWS = 40;
+
+/**
+ * 從監控頁直接封鎖一個位址時使用的預設時長（分鐘）。
+ *
+ * 24 小時而不是「永久」或「一小時」：這個動作是在管理員**看見正在發生的濫用**
+ * 時做的，一小時很可能在攻擊還沒停时就到期；一年則是一個在兩個星期後就已經
+ * 沒有人記得為什麼而做的承諾。封鎖頁（/admin/blocks）仍然提供完整的時長選項，
+ * 那裡才是能認真思考長度的地方。
+ */
+const QUICK_BLOCK_MINUTES = 60 * 24;
 
 /* ==========================================================================
    格式化
@@ -120,7 +134,7 @@ function detailNumber(detail: Record<string, unknown> | undefined, key: string):
 export function MonitorPage() {
   usePageTitle('title.adminMonitor');
 
-  const { toast } = useAdmin();
+  const { toast, dialog } = useAdmin();
   const [data, setData] = useState<MonitorResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -210,7 +224,39 @@ export function MonitorPage() {
   const stats = data?.stats ?? null;
   const dependencies = data?.dependencies ?? null;
   const routes = useMemo(() => (stats?.requests.routes ?? []).slice(0, MAX_ROUTE_ROWS), [stats]);
+  const clients = useMemo(() => (stats?.clients ?? []).slice(0, MAX_CLIENT_ROWS), [stats]);
   const limits = stats?.rateLimits ?? [];
+
+  // 正在封鎖的位址。單一字串而不是計數：同一個位址連點兩次時，第二下必須被
+  // 擋住（否則會送出兩次 POST、產生兩筆稽核紀錄），而不同的位址之間不需要互斥。
+  const [blocking, setBlocking] = useState<string | null>(null);
+
+  const quickBlock = useCallback(
+    async (client: MonitorResponse['stats']['clients'][number]) => {
+      const ok = await dialog.confirm({
+        title: t('monitor.blockTitle', { ip: client.ip }),
+        message: t('monitor.blockMessage', { duration: t('common.oneDay') }),
+        confirmLabel: t('monitor.colBlock'),
+      });
+      if (!ok) return;
+      setBlocking(client.ip);
+      try {
+        // 原因固定寫成「從監控頁封鎖」：稽核紀錄必須說明「為什麼」，而這個頁面
+        // 不提供輸入框 —— 一個在攻擊進行中要填的欄位，多半會被留空。
+        await adminApi('/api/admin/blocks', {
+          method: 'POST',
+          body: { ip: client.ip, minutes: QUICK_BLOCK_MINUTES, reason: t('monitor.blockReason') },
+        });
+        toast(t('monitor.blocked', { ip: client.ip }), 'ok');
+        await load({ quiet: true });
+      } catch (thrown) {
+        toast(errorMessage(thrown, t('monitor.blockFailed')), 'error');
+      } finally {
+        setBlocking(null);
+      }
+    },
+    [dialog, load, toast],
+  );
   const errorRate = stats && stats.requests.total > 0
     ? ((stats.requests.clientErrors + stats.requests.serverErrors) / stats.requests.total) * 100
     : 0;
@@ -443,6 +489,114 @@ export function MonitorPage() {
               <p className="monitor-hint">{t('monitor.timelineNoHistory')}</p>
             ) : null}
           </div>
+        </section>
+
+        {/* --- 來源位址 ----------------------------------------------------
+            * 位置刻意放在「依路由統計」之前：路由統計回答「哪條端點被打了」，
+            * 來源位址回答「誰打的」。看到症狀之後要立刻能問第二個問題，否則管理
+            * 員得自己在兩張表之間來回對照 —— 而在攻擊正在進行時，那個來回就是
+            * 延遲。 */}
+        <section className="panel" aria-labelledby="monitor-clients-title">
+          <div className="panel__head">
+            <div className="panel__titles">
+              <h2 className="panel__title" id="monitor-clients-title">
+                {t('monitor.clientsTitle')}
+              </h2>
+              <p className="panel__note">{t('monitor.clientsNote')}</p>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table className="table monitor-clients">
+              <thead>
+                <tr>
+                  <th scope="col">{t('monitor.colIp')}</th>
+                  <th scope="col">{t('monitor.colSource')}</th>
+                  <th scope="col" className="num">
+                    {t('monitor.colCount')}
+                  </th>
+                  <th scope="col" className="num">
+                    {t('monitor.colErrors')}
+                  </th>
+                  <th scope="col" className="num">
+                    {t('monitor.colRateLimited')}
+                  </th>
+                  <th scope="col" className="num">
+                    {t('monitor.colBanned')}
+                  </th>
+                  <th scope="col">{t('monitor.colLastRoute')}</th>
+                  <th scope="col">{t('monitor.colActions')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {clients.length === 0 ? (
+                  <tr>
+                    <td colSpan={CLIENT_COLUMNS}>
+                      <EmptyState title={t('monitor.noClients')}>{t('monitor.noClientsBody')}</EmptyState>
+                    </td>
+                  </tr>
+                ) : (
+                  clients.map((client) => (
+                    <tr key={client.ip}>
+                      <td>
+                        <span className="client-ip">{client.ip}</span>
+                      </td>
+                      <td>
+                        <span className={`badge ${SOURCE_BADGE[client.source] ?? 'badge--info'}`}>
+                          {sourceName(client.source)}
+                        </span>
+                      </td>
+                      <td className="num">{formatNumber(client.total)}</td>
+                      <td className="num">
+                        {client.clientErrors + client.serverErrors > 0 ? (
+                          <span className="badge badge--warn">
+                            {formatNumber(client.clientErrors + client.serverErrors)}
+                          </span>
+                        ) : (
+                          <span className="muted">0</span>
+                        )}
+                      </td>
+                      <td className="num">
+                        {client.rateLimited > 0 ? (
+                          <span className="badge badge--warn">{formatNumber(client.rateLimited)}</span>
+                        ) : (
+                          <span className="muted">0</span>
+                        )}
+                      </td>
+                      <td className="num">
+                        {client.banned > 0 ? (
+                          <span className="badge badge--danger">{formatNumber(client.banned)}</span>
+                        ) : (
+                          <span className="muted">0</span>
+                        )}
+                      </td>
+                      <td>
+                        <span className="cell-sub u-mono">{client.lastRoute || t('common.placeholder')}</span>
+                      </td>
+                      <td>
+                        <button
+                          className="btn btn--sm"
+                          disabled={blocking === client.ip}
+                          onClick={() => void quickBlock(client)}
+                        >
+                          {blocking === client.ip ? t('monitor.blocking') : t('monitor.colBlock')}
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+          {/* 清單被截斷時必須說出來。少了這行，「來源位址只有 200 個」會被讀成
+              「今天只有 200 個人來過」—— 而實際上是有更多來源被驅逐掉了。 */}
+          {(stats?.clientsDropped ?? 0) > 0 ? (
+            <p className="monitor-hint">
+              {t('monitor.clientsDropped', {
+                count: formatNumber(stats?.clientsDropped ?? 0),
+                limit: formatNumber(stats?.maxClients ?? 0),
+              })}
+            </p>
+          ) : null}
         </section>
 
         {/* --- 依路由統計 ------------------------------------------------ */}
@@ -779,6 +933,30 @@ function referenceVolume(values: number[]): number {
 function barLevel(value: number, reference: number): number {
   if (value <= 0 || reference <= 0) return 1;
   return Math.min(8, Math.max(1, Math.ceil((value / reference) * 8)));
+}
+
+/* ==========================================================================
+   來源位址列
+   ========================================================================== */
+
+/**
+ * 來源標記 → badge 樣式。
+ *
+ * peer 用中性色而另外兩個用 info：peer 是「不可辯解的事實」，xff / real-ip 是
+ * 「使用者自己說的」。用不同顏色讓一整欄的可信度在掃視時就能讀出來，而不是要
+ * 逐列去讀文字。
+ */
+const SOURCE_BADGE: Record<string, string> = {
+  peer: 'badge--ok',
+  xff: 'badge--info',
+  'real-ip': 'badge--info',
+};
+
+function sourceName(source: string): string {
+  if (source === 'peer') return t('monitor.sourcePeer');
+  if (source === 'xff') return t('monitor.sourceXff');
+  if (source === 'real-ip') return t('monitor.sourceRealIp');
+  return source;
 }
 
 /* ==========================================================================
