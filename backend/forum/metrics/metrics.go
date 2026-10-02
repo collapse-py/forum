@@ -872,9 +872,10 @@ func (r *Registry) StartFlusher(ctx context.Context, opts FlusherOptions) error 
 			select {
 			case <-ctx.Done():
 				// 離開前再寫一次，把最後一次 tick 之後結束的分鐘送出。
-				// 本程式目前沒有 graceful shutdown（見 main.go 的說明），
-				// 因此這條路徑實際上不會被觸發；但它讓未來接上 signal.Notify
-				// 時不必回頭修改這個檔案。
+				// 這條路徑由 main 的優雅停止流程觸發（它取消傳給本函式的
+				// ctx）。main 另外還會同步呼叫一次 FlushPending，因此不要
+				// 把這裡當成「資料一定會寫出去」的保證 —— 那個保證屬於
+				// main 的同步呼叫，這裡只是讓 ctx 的取消語意完整。
 				r.FlushPending(context.WithoutCancel(ctx), opts.DB)
 				return
 			case <-ticker.C:

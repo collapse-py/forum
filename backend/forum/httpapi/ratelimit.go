@@ -286,9 +286,8 @@ func (rl *RateLimiter) Cleanup() int {
 
 // StartCleanup 以背景 goroutine 定期呼叫 Cleanup，直到 ctx 被取消。
 //
-// 為什麼用 ctx 而非單純的 time.Ticker：main 目前沒有 graceful shutdown
-// （見 main.go 的說明），但把取消條件綁在 context 上代表未來接上
-// signal.Notify 時，清理 goroutine 能自動跟著停下，不必再改這裡。
+// 為什麼用 ctx 而非單純的 time.Ticker：main 的優雅停止流程（shutdown.go）
+// 只取消一個 context，這裡因此能在停止時自動退出，不必修改 httpapi 套件。
 //
 // interval <= 0 時退回一分鐘。這個函式立刻返回，不會阻塞呼叫端；
 // ctx 已取消時它直接返回而不啟動 goroutine，避免關閉流程中反而多一個

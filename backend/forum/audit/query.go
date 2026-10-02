@@ -339,7 +339,8 @@ func NewPruner(db *sql.DB, retention, interval time.Duration) *Pruner {
 // Run 定期執行清理，直到 ctx 被取消。
 //
 // 為什麼是「按 ctx 取消」而不是一個 Stop() 方法：與 metrics 套件的 flusher
-// 同一個理由 —— 未來接上 signal.Notify 時，context 是唯一已經接好的取消管道。
+// 同一個理由 —— main 的優雅停止流程（shutdown.go）只取消一個 context，
+// 這是所有背景工作唯一需要的控制點。
 func (p *Pruner) Run(ctx context.Context) {
 	if p == nil || p.db == nil {
 		return

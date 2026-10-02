@@ -348,8 +348,10 @@ func NewPruner(store *Store, interval time.Duration) *Pruner {
 
 // Run 定期清理直到 ctx 被取消。
 //
-// 與 metrics 的 flusher 一樣用 context 而非 Stop()：本專案沒有 graceful
-// shutdown，未來接上 signal.Notify 時，context 是唯一已經接好的取消管道。
+// 與 metrics 的 flusher 一樣用 context 而非 Stop()：main 的優雅停止流程
+// （shutdown.go）只會取消一個 context，讓所有背景工作都靠它結束。
+// ctx 取消時直接返回、不做最後一次清理：過期項目在查詢時本來就被視為未封鎖，
+// 因此漏掉最後一次清理不會造成封鎖失效（見 NewPruner 的說明）。
 func (p *Pruner) Run(ctx context.Context, removed func(int, error)) {
 	if p == nil || p.store == nil {
 		return

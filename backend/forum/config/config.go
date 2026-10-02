@@ -64,6 +64,16 @@ import (
 // ServerPort 是 net/http 的監聽位址，形如 "host:port"，開頭的「:」代表綁定所有
 // 網路介面卡，實際對外服務通常再由反向代理做 TLS 終結。解析時不做格式驗證，
 // 寫錯要到 ListenAndServe 才會失敗。
+// ReadHeaderTimeout 是「從接到連線到讀完整份請求標頭」的期限，設定檔單位為秒。
+// 它只管標頭、不管本文，是刻意與 ReadTimeout 分開：貼文附圖會讓請求本文長達
+// 50 MB 且轉送給檔案伺服器（見 forum_handlers.go 的 ParseMultipartForm），用
+// ReadTimeout 連本文一起計時會在慢速上傳時把正常使用者中途砍斷；只卡標頭則足以
+// 擋掉 Slowloris —— 那種攻擊送完一點點標頭就停住不再送本文。0 或負值不被接受
+// （見 parsePositiveSeconds），因為「不設標頭期限」正是這個值要擋掉的狀態。
+// ShutdownTimeout 是收到停止訊號後、強制結束前等待在途請求完成的秒數。超過就
+// 直接中斷尚未完成的請求。取值要對齊部署環境的停止上限（systemd 的
+// TimeoutStopSec、Docker 的 --stop-timeout、k8s 的 terminationGracePeriodSeconds），
+// 設得比它長只會讓部署端先動手殺掉行程，那與直接砍掉請求沒有差別。
 // PublicBaseURL 是本站對外的根網址，載入時去掉尾端「/」以便之後直接串接路徑。
 // 程式內目前只有 applyDefaults 會讀它，用途是作為 TrustedOrigins 的預設來源。
 // TrustedOrigins 是允許的來源白名單，由 httpapi.isTrustedOrigin 以 strings.EqualFold
@@ -156,6 +166,12 @@ type Config struct {
 	SessionExpire  time.Duration // SESSION_EXPIRE_HOURS（設定檔單位：小時）
 	CookieSecure   bool          // COOKIE_SECURE
 	ServerPort     string        // SERVER_PORT（net/http 的 "host:port" 形式）
+	// ReadHeaderTimeout 是讀取請求標頭的期限（READ_HEADER_TIMEOUT_SECONDS，單位：秒）。
+	// 只卡標頭、不卡本文，理由見上方欄位說明（貼文附圖的本文可達 50 MB）。
+	ReadHeaderTimeout time.Duration
+	// ShutdownTimeout 是優雅停止時等待在途請求的期限（SHUTDOWN_TIMEOUT_SECONDS，
+	// 單位：秒）。超過即強制關閉連線，尚未完成的請求會被中斷。
+	ShutdownTimeout time.Duration
 	PublicBaseURL  string        // PUBLIC_BASE_URL
 	TrustedOrigins []string      // TRUSTED_ORIGINS（逗號分隔）
 	// TrustedProxyCIDRs 是可信任反向代理的位址段（TRUSTED_PROXY_CIDRS，逗號分隔，
@@ -272,6 +288,19 @@ func Load(path string) (Config, error) {
 			// 原樣轉交，不做任何檢查：net/http 要求 "host:port" 形式，
 			// 寫錯時會在 ListenAndServe 才以錯誤回應。
 			cfg.ServerPort = val
+		case "READ_HEADER_TIMEOUT_SECONDS":
+			// 非正值一律拒絕（保留預設值）：0 語意是「不設期限」，那正是這個
+			// 設定要擋掉的狀態，因此不能讓設定檔把它關掉 —— 與三組限流視窗
+			// 拒絕 0 是同一個理由。
+			if timeout, ok := parsePositiveSeconds(val); ok {
+				cfg.ReadHeaderTimeout = timeout
+			}
+		case "SHUTDOWN_TIMEOUT_SECONDS":
+			// 同樣只接受正數。刻意**不**提供 0（立即強制關閉）這個選項：
+			// 那等於把「優雅停止」整個關掉，卻又不會有任何提示。
+			if timeout, ok := parsePositiveSeconds(val); ok {
+				cfg.ShutdownTimeout = timeout
+			}
 		case "PUBLIC_BASE_URL":
 			// 去掉尾端 "/"：後續可能直接用字串相加組出完整路徑，
 			// 留著尾斜線會產生 "//" 這種語意不對但仍可請求的網址。
@@ -424,6 +453,20 @@ func (c *Config) applyDefaults() {
 	if c.ServerPort == "" {
 		// net/http 需要 "host:port"；以 ":" 開頭代表綁定所有介面。
 		c.ServerPort = ":8088"
+	}
+	if c.ReadHeaderTimeout <= 0 {
+		// 10 秒。這個值只需要涵蓋「正常客戶端把標頭送完」：標頭是一小段文字，
+		// Slowloris 之所以有效正是因為它送完標頭後可以無限期停下來不送本文，
+		// 因此期限必須涵蓋「標頭送完之前」這一段。
+		// 取 10 秒而不是更短，是為了不誤傷高延遲連線（行動網路、跨洲 proxy）；
+		// 取不更長，是因為每個卡住的連線都佔著一個 goroutine。
+		c.ReadHeaderTimeout = 10 * time.Second
+	}
+	if c.ShutdownTimeout <= 0 {
+		// 15 秒。在途請求通常只有數十毫秒，這個上限是給「卡住的請求」准备的；
+		// 超過它就強制中斷，讓部署流程（systemd / docker / k8s）能在自己的
+		// 停止上限內拿到行程結束。
+		c.ShutdownTimeout = 15 * time.Second
 	}
 	if c.PublicBaseURL == "" {
 		// 隱含的欄位順序相依：這裡直接使用 c.ServerPort，因此上面的補值必須

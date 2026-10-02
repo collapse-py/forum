@@ -1,6 +1,6 @@
 /*
 httpapi 套件的組裝層：把設定、MySQL 連線、Redis session 與前端靜態檔案組成
-一個可直接交給 http.ListenAndServe 的 http.Handler。
+一個可直接交給 http.Server.Serve 的 http.Handler。
 
 對外介面只有 Server、NewServer 與 (*Server).Handler；requireLogin、
 frontendRoot、safeStaticFileServer 等其餘符號都是套件內部實作細節，
@@ -224,7 +224,7 @@ func (s *Server) Blocks() *ipban.Store {
 // 時間值 —— 太频繁只是徒增鎖競爭，太稀疏則舊 key 存活較久。
 //
 // 這個函式必須在 NewServer 之後、開始服務之前呼叫。ctx 取消時三個 goroutine
-// 都會停止，因此未來接上 graceful shutdown 不需要再改動這裡。
+// 都會停止，main 的優雅停止流程正是靠取消那個 context 來收掉它們。
 //
 // 這裡刻意只回傳、不等待：StartCleanup 本身會立刻返回。
 func (s *Server) StartRateLimitCleanup(ctx context.Context, interval time.Duration) {

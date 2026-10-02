@@ -241,6 +241,12 @@ go build .
 > `filepath.Join("config", "config.conf")`，相對於工作目錄而不是執行檔所在目錄，
 > 在別的目錄跑會直接 fatal。
 
+停止後端按 Ctrl-C（或 `kill`／`systemctl stop`／`docker stop`）即可：收到
+`SIGINT` / `SIGTERM` 之後會停止接受新連線、等在途請求完成（上限
+`SHUTDOWN_TIMEOUT_SECONDS`）、寫出最後一次分鐘彙總，然後以 exit code 0 結束。
+超過上限仍有請求沒完成時會記警告並強制中斷 —— 那時 `docker stop` 預設 10 秒的
+停止上限通常會先到，所以容器部署時要一併把 `--stop-timeout` 調大（見「部署」）。
+
 ---
 
 ## 設定檔
@@ -259,6 +265,8 @@ go build .
 | `SESSION_EXPIRE_HOURS` | `72` | **滑動**續期，所以是「閒置多久失效」 |
 | `COOKIE_SECURE` | `false` | 走 HTTPS 就必須 `true` |
 | `SERVER_PORT` | `:8088` | `net/http` 的 `host:port` |
+| `READ_HEADER_TIMEOUT_SECONDS` | `10` | 讀完**請求標頭**的期限。只卡標頭不卡本文（貼文附圖本文可達 50 MB 且要轉送檔案伺服器）。0 與負值不被接受 |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `15` | 收到停止訊號後等待在途請求的秒數，超過即強制中斷。必須小於部署環境的停止上限 |
 | `PUBLIC_BASE_URL` | `http://localhost` + `SERVER_PORT` | 尾斜線會被自動去掉 |
 | `TRUSTED_ORIGINS` | `[PUBLIC_BASE_URL]` | CSRF 來源白名單。**留空等於關閉 CSRF 防護** |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。留空 = 舊的「標頭優先」行為（限流與封鎖可被偽造標頭繞過） |
@@ -920,9 +928,10 @@ go test ./forum/audit/...    # 稽核（CSV 防護、佔位符、截斷）
 go test ./forum/session/...  # Session 列舉與撤銷（miniredis）
 go test ./forum/ipban/...    # IP 封鎖名單（miniredis；過期、清理、長度上下限）
 go test ./forum/es/...       # ES 傳輸層（用 httptest 與 fake server）
+go test .                    # 監聽逾時與優雅停止（package main，含在途請求排空）
 ```
 
-現有的十個測試檔：
+現有的測試檔：
 
 | 檔案 | 覆蓋 |
 | --- | --- |
@@ -939,6 +948,8 @@ go test ./forum/es/...       # ES 傳輸層（用 httptest 與 fake server）
 | `backend/forum/audit/audit_test.go` | 稽核寫入的參數順序與錯誤傳遞、UTF-8 邊界截斷、變更筆數上限、查詢條件的佔位符與分頁收斂 |
 | `backend/forum/metrics/metrics_test.go` | 路徑正規化（含基數上限）、延遲分桶、排序、時間軸連續性與歷史來源 |
 | `backend/forum/es/es_test.go` | ES 傳輸層約 16 個案例（`httptest` 假伺服器） |
+| `backend/forum/httpapi/trustedproxy_test.go` | `TRUSTED_PROXY_CIDRS` 的解析與信任模型（標頭優先 vs 白名單） |
+| `backend/shutdown_test.go` | 逾時設定（**含「刻意留白」的 `ReadTimeout` / `WriteTimeout`**）、停止訊號與監聽錯誤的分流、**`Shutdown` 會等在途請求完成** |
 
 `go.mod` 有宣告 `miniredis`（供 Redis 相關測試），但目前實際用到的 ES 測試是
 `httptest`。`httpapi` 大部分 handler 沒有測試覆蓋。
@@ -969,6 +980,19 @@ flowchart LR
 4. **Google Cloud Console 的授權_redirect URI** 與 `GOOGLE_REDIRECT_URL` 完全一致。
 5. **代理必須放行 `Service-Worker-Allowed` 與 `/service-worker.js`**，否則 PWA 不會更新。
 6. `/files/*` 若走代理並由瀏覽器直接取圖，代理**不得**吃掉 `?token=` 查詢參數。
+7. **停止訊號要送得對，而且要給夠時間**。後端收到 `SIGTERM` / `SIGINT` 後會排空
+   在途請求，上限是 `SHUTDOWN_TIMEOUT_SECONDS`（預設 15 秒）；超過就強制中斷。
+   因此部署環境的停止上限必須**大於**它，否則部署端會先動手殺掉行程：
+
+   | 環境 | 預設停止上限 | 怎麼調 |
+   | --- | --- | --- |
+   | systemd | `TimeoutStopSec=90s` | 通常已足夠 |
+   | Docker | `--stop-timeout=10` | `docker run --stop-timeout=20 …` 或 compose 的 `stop_grace_period` |
+   | Kubernetes | `terminationGracePeriodSeconds=30` | 部署 manifest 內設定 |
+   | 裸執行 | — | 會送出 `SIGINT`，Ctrl-C 即可 |
+
+   另一個方向是讓反向代理**先**把流量抽掉再轉送停止訊號給後端，那樣後端收到
+   訊號時本來就沒有新請求要接，排空會是瞬間完成的事。
 
 建置指令：
 
@@ -993,6 +1017,9 @@ cd ../backend && go build -o forum .
 - **限流**：三段獨立額度，依端點成本區分。啟動時有背景清理 goroutine。
 - **檔名**：落地一律 UUID v4 + 原副檔名，不使用使用者提供的檔名；副檔名白名單。
 - **媒體權杖**：圖片網址綁短 TTL 的 Redis token，前端離開頁面時可主動釋放。
+- **Slowloris**：`READ_HEADER_TIMEOUT_SECONDS`（預設 10 秒）限制讀完請求標頭的
+  時間；`IdleTimeout` 讓閒置的 keep-alive 連線在一分鐘內被回收。`ReadTimeout` /
+  `WriteTimeout` 刻意不設，理由見「已知問題」
 - **資源大小**：上傳有 `max_size` 上限。
 - **密鑰不進版控**：`config.conf` 被 gitignore。唯一例外是 `FILES_SERVER_TOKEN`
   可用環境變數注入（供 CI/CD 或容器使用）。
@@ -1057,8 +1084,16 @@ node ../../tools/i18n/verify-catalogs.mjs
 - **`npm run dev` 開箱即壞**。沒有 `server.proxy`，相對路徑的 API 請求打不到後端。
 - **兩個 Go 模組版本不一致**：backend 要 1.25、files_server 要 1.26。
 - **`MEDIA_TOKEN_TTL_SECONDS` 的兜底值是 30 天**，對正式環境明顯過長。
-- **後端沒有優雅關閉**（沒有 `signal` 處理、沒有 `Server.Shutdown`），也沒有設定
-  `ReadHeaderTimeout`，直接用零值 `http.ListenAndServe`。
+- **後端刻意不設 `ReadTimeout` 與 `WriteTimeout`**（`shutdown.go`）。這是刻意的：
+  前者會連請求本文一起計時，而貼文附圖的本文可達 50 MB 且還要轉送給檔案伺服器；
+  後者會在回應寫完前砍斷連線，而 CSV 匯出的耗時就落在這段裡。補上這兩項時必須
+  同時評估上傳與匯出路徑，而不是照常見範例填 30 秒。`ReadHeaderTimeout` 與
+  `IdleTimeout` 有設，Slowloris 與 keep-alive 連線累積這兩個曝露面是關掉的。
+- **`files_server` 仍然沒有優雅停止**。它用的是零值 `http.ListenAndServe`
+  （`files_server/main.go:644`），收到 `SIGTERM` 會直接死，沒有逾時也沒有排空。
+  後端轉送上傳的那一條連線因此可能在停止時被中斷 —— 症狀是「貼文存得下但圖片
+  上傳失敗」。它的請求都是單一的短命上傳／讀取，影響面遠小於後端，但這是兩個
+  Go 模組之間唯一還沒處理的停止流程差異。
 - **管理端點沒有限流**（刻意如此，但值得知道）。`/api/admin/monitor` 尤其
   不限流：它是監控頁每十秒打一次的合法流量，限流它只會在真正出事時多一條
   混淆的訊息。
@@ -1074,9 +1109,10 @@ node ../../tools/i18n/verify-catalogs.mjs
   `X-Forwarded-For`），因此 map 一定要有上限。驅逐掉的那個位址，其計數會**整筆
   消失**（沒有併進任何彙總槽 —— IP 在這個頁面上是可操作的，彙總槽裡的假位址無法
   操作也沒有意義）；`stats.clientsDropped` 是唯一的線索，介面會把它顯示出來。
-- **非正常結束會遺失最多一分鐘的監控資料**（`main.go` 沒有 graceful shutdown，
-  `metrics` 的收尾寫入走的是 `ctx.Done()`，實際上不會被觸發）。這與「監控本來
-  就是取樣」相符，但它確實是一個已知的資料缺口。
+- **被強制殺掉的行程仍會遺失當前分鐘的監控資料**（`SIGKILL`、容器被硬殺、或
+  排空超過 `SHUTDOWN_TIMEOUT_SECONDS` 之後被部署端殺掉）。優雅停止會同步寫出
+  最後一次分鐘彙總，因此「正常重啟」不再有這個缺口；剩下的只有非正常結束，
+  那與「監控本來就是取樣」相符，但確實是一個已知的資料缺口。
 - **延遲分位數是分桶上界**，P95 只會落在 1/2/5/10/25/50/100/250/500ms 或
   1/2/5/10s 上。介面上照實標示，但拿它跟精確的 APM 數字比較會失望。
 - **多執行個體時監控頁只顯示打到這個行程的流量**。限流器的 hits map 本來就是

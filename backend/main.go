@@ -4,7 +4,9 @@ main 是 forum 論壇後端的執行進入點（package main，不可被其他�
 【職責】
 本檔只做「組裝與啟動」，不承載任何業務邏輯。啟動順序固定為：
 讀取設定 → 初始化日誌 → 連線 Redis → 連線 MySQL → schema 遷移
-→ 初始化 Google OAuth2 → 建立 Session Manager → 掛載 HTTP Handler → 阻塞監聽。
+→ 初始化 Google OAuth2 → 建立 Session Manager → 掛載 HTTP Handler → 監聽，
+收到停止訊號後依 shutdown.go 的流程排空在途請求再結束。
+逾時取值、訊號處理與監聽等待位於同模組的 shutdown.go。
 
 【對外介面：HTTP 路由】
 路由全部在 httpapi.Server.Handler() 註冊，main 本身不註冊任何路由。
@@ -31,13 +33,20 @@ GET /api/admin/stats 內容趨勢統計（日別新增量與三份排行），�
 寫入型端點依成本分成三組獨立額度（內容寫入、圖片上傳、OAuth），全部以
 用戶端 IP 為單位，只擋非 GET 請求 —— 讀取端點對匿名訪客開放，限流它們會
 直接壞掉首頁。超額回 429 並附 Retry-After。三組限流器的背景清理 goroutine
-由本檔在啟動時呼叫 httpapi.Server.StartRateLimitCleanup 啟動。
+由本檔在啟動時呼叫 httpapi.Server.StartRateLimitCleanup 啟動，並共用同一個
+可取消的背景 context（見 main 的 stopBackground 說明）。
 
 【監控與持久化】
 每個請求都會被 metrics 套件計數（正規化後的路由、狀態碼分類、延遲直方圖、
 分鐘桶）。記憶體保留最近 120 分鐘；已結束的分鐘由背景 goroutine 每 20 秒寫進
 forum_request_metrics，保留 MONITOR_RETENTION_HOURS 小時（預設 24）後刪除。
 啟動時先把保留期內的既有彙總讀回記憶體，因此監控頁的時間軸在重啟後不會變空白。
+
+【停止流程】
+背景 goroutine（限流清理、監控落盤、ES 索引重建、稽核清理、封鎖清理）共用一個
+context.WithCancel 建立的 context。優雅停止的順序是「停止接受新請求 → 等在途
+請求 → 取消背景 context → 同步寫出最後一次分鐘彙總」，四步的順序本身是這段程式
+唯一需要注意的地方，理由見各步旁的註解。
 
 【主要依賴】
 forum/forum/config 設定檔解析。
@@ -62,13 +71,16 @@ logger.Fatalf 都會寫進預設 stdout，設定的日誌檔拿不到真正的�
 logger.Fatalf 走 os.Exit(1)，被呼叫點之後的 defer 都不會執行，下方的 defer
 只在正常流程走到底時才有意義。
 
-沒有 graceful shutdown：未註冊 signal.Notify，也沒有在收到 SIGTERM 時停止接受
-新連線並等待在途請求完成。部署時的優雅停止需由外部系統（容器或反向代理）
-負責，否則進行中的請求會被硬生生中斷。
+優雅停止由 notifyOnSignal 與 http.Server.Shutdown 組成：收到 SIGINT／SIGTERM 後
+先停止接受新連線，再等在途請求完成（上限 SHUTDOWN_TIMEOUT_SECONDS），最後才讓
+背景 goroutine 停止並寫出最後一次監控彙總。沒有這個流程時，部署（重啟、容器
+更新、systemd restart）會直接中斷進行中的請求 —— 症狀是使用者看到「貼文貼到
+一半不見了」、圖片上傳失敗，而且沒有任何錯誤訊息。
 
-http.ListenAndServe 使用的是零值 Server，沒有設定 ReadHeaderTimeout、
-ReadTimeout、WriteTimeout，也沒有 IdleTimeout。這在文字型論壇的流量下可接受，
-但同樣代表缺少 ReadHeaderTimeout 帶來的 Slowloris 曝露面。
+http.Server 刻意只設定 ReadHeaderTimeout 與 IdleTimeout，不設定 ReadTimeout 與
+WriteTimeout。前者是 Slowloris 的解藥；後者兩者會誤傷貼文附圖的上傳路徑
+（本文可達 50 MB，且後端還要轉送給檔案伺服器），那是全站最長單一請求。
+沒有逾時的代價由 IdleTimeout 收斂：keep-alive 連線不會無限期佔住 goroutine。
 
 設定檔路徑由 filepath.Join("config", "config.conf") 相對於「行程的工作目錄」
 組成，而不是執行檔所在目錄。好處是切換環境只需換工作目錄，代價是必須從
@@ -94,17 +106,20 @@ import (
 	"forum/forum/logger"
 	"forum/forum/metrics"
 	"forum/forum/session"
-	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// main 依固定順序建立所有相依元件，最後進入阻塞監聽。
+// main 依固定順序建立所有相依元件，最後進入阻塞監聽直到收到停止訊號。
 //
-// 回傳值：無。ListenAndServe 在伺服器正常運行期間不會返回，只有綁定失敗或
-// 執行期間發生錯誤才會返回，且該路徑一律以 logger.Fatalf 結束行程。
+// 回傳值：無。兩條離開路徑的差別是本函式唯一需要留意的地方：
+//   - 監聽期間發生錯誤（埠被占用等）→ logger.Fatalf，exit code 1。
+//   - 收到 SIGINT／SIGTERM → 走完優雅停止流程後正常返回，exit code 0。
+//     因此部署端看到 exit code 0 才知道「停止是走完流程的」，而不是被中途砍掉。
 func main() {
 	// 設定檔路徑相對於工作目錄（見檔案層說明），不是執行檔目錄。
 	cfg, err := config.Load(filepath.Join("config", "config.conf"))
@@ -168,6 +183,22 @@ func main() {
 	// 與靜態檔案掛載等中介層，因此建構 Server 後不需要再額外包一層 middleware。
 	srv := httpapi.NewServer(cfg, db, sessions, redisClient)
 
+	// 背景工作的唯一取消管道。五個背景 goroutine（限流清理、監控落盤、
+	// ES 索引重建、稽核清理、封鎖清理）共用它，因此「停止」是一個決定而不是
+	// 五個。
+	//
+	// 為什麼不用 context.Background()：那會讓每個 goroutine 各自為政，而
+	// context 正是它們唯一能響應停止的機制 —— 取消之後就會自己結束，不必等
+	// 行程被 OS 收掉。
+	//
+	// 取消時機刻意放在 http.Server.Shutdown **之後**（見檔案層的停止流程）：
+	// 在途請求還在服務中時，限流清理與監控落盤都還有用（尤其是落盤 ——
+	// 排空期間結束的分鐘桶要有人寫出去），先取消只會讓監控少一段資料。
+	//
+	// defer 只是保險：正常路徑會在停止流程裡明確呼叫 stopBackground。
+	backgroundCtx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
+
 	// 啟動限流器的背景清理。三個限流器各自在記憶體裡保存「最近視窗內各次
 	// 請求的時間戳」，而 Allow 只會把某個 key 的 slice 縮短、不會刪掉 key，
 	// 因此沒有這道定期掃描，map 會隨時間只增不減（見 ratelimit.go 檔頭）。
@@ -175,14 +206,12 @@ func main() {
 	// 清理頻率刻意等於視窗長度：視窗過了，最老那筆紀錄就會自然過期，
 	// 此刻掃一次就能把它連同 key 一起回收。再更頻繁只是徒增鎖競爭。
 	//
-	// 這裡用 context.Background 而非可取消的 context，是因為本程式目前
-	// 沒有 graceful shutdown（見檔案層說明），沒有任何地方會取消它。
-	// 未來接上 signal.Notify 時，只需把這個 ctx 換掉，限流清理就會
-	// 自動跟著停止，不必修改 httpapi 套件。
+	// 這裡傳入 backgroundCtx（而非 context.Background()）：優雅停止時它會被取消，
+	// 三條清理 goroutine 因此自動停止，不必修改 httpapi 套件。
 	//
 	// 延遲啟動而非在 NewServer 內啟動：NewServer 刻意不開背景 goroutine，
 	// 「何時開始有背景工作」應該是呼叫端明確的決定，而不是建構式的副作用。
-	srv.StartRateLimitCleanup(context.Background(), cfg.RateLimitWindow)
+	srv.StartRateLimitCleanup(backgroundCtx, cfg.RateLimitWindow)
 
 	/*
 	 * 啟動後在背景重建 Elasticsearch 的貼文索引。
@@ -198,11 +227,12 @@ func main() {
 	 * best-effort 的——ES 掛掉時這裡只會留下警告日誌，論壇照常服務，
 	 * 搜尋則降級為 MySQL LIKE（見 search.go）。
 
-	 * context.Background 而非可取消的 context：與上面的限流清理相同，
-	 * 本程式沒有 graceful shutdown，沒有任何地方會取消它。
+	 * 用可取消的 backgroundCtx：優雅停止時索引重建會被中斷。這是刻意的取捨 ——
+	 * 重建是 O(全部貼文) 的工作，讓它跑完可能還要數秒，而那一刻行程本來就要
+	 * 結束；下次啟動時會再重建一次，因此中斷它不會留下永久性的落後狀態。
 	 */
 	go func() {
-		indexed, err := srv.RebuildSearchIndex(context.Background())
+		indexed, err := srv.RebuildSearchIndex(backgroundCtx)
 		if err != nil {
 			// errors.Is 判定 ErrDisabled：那是「設定檔沒填 ES_URL」的預期情況，
 			// 用 Info 記錄即可（等同於這台站沒有啟用搜尋），不該報錯嚇到維運。
@@ -232,10 +262,10 @@ func main() {
 	 *     分鐘的桶多一點點內容，沒有實質差別，但「服務開始服務的時刻」因此
 	 *     仍然是一個明確的分界。
 	 *
-	 * ctx 用 context.Background()，理由與上面的限流清理相同：本程式沒有
-	 * graceful shutdown，沒有任何地方會取消它。未來接上 signal.Notify 時，
-	 * 只需把這個 ctx 換掉，flusher 就會自動跟著停止 —— StartFlusher 收到
-	 * ctx.Done() 會再做一次收尾寫入，因此不會留下未寫出的分鐘。
+	 * ctx 傳 backgroundCtx：優雅停止時它會被取消，StartFlusher 收到
+	 * ctx.Done() 會再做一次收尾寫入。停止流程仍會在 main 裡同步補一次
+	 * FlushPending（理由見該處），兩者不重複計數的保證來自 flushed 旗標
+	 * 是在鎖內先標記再送出。
 	 *
 	 * 寫入週期 20 秒刻意不等於一分鐘：它寫的是「已結束的分鐘」，所以週期
 	 * 只影響「資料落盤的延遲上限」與「最壞情況下重啟會遺失多久的資料」。
@@ -259,7 +289,7 @@ func main() {
 		} else if loaded > 0 {
 			logger.Infof("[MONITOR] 已讀回 %d 分鐘的歷史請求統計", loaded)
 		}
-		if err := registry.StartFlusher(context.Background(), metrics.FlusherOptions{
+		if err := registry.StartFlusher(backgroundCtx, metrics.FlusherOptions{
 			DB:             db,
 			Interval:       20 * time.Second,
 			RetentionHours: cfg.MonitorRetentionHours,
@@ -281,8 +311,12 @@ func main() {
 	 *
 	 * 清理週期一小時一次。稽核紀錄的用途是「有人來查」的時候還查得到，
 	 * 而多存幾小時完全沒有差別，因此小時級的粒度對這個用途綽綽有餘。
+	 *
+	 * ctx 傳 backgroundCtx：停止時清理迴圈會立刻結束。這裡沒有像監控落盤那樣
+	 * 另做收尾寫入 —— 稽核紀錄的寫入發生在請求裡（在途請求完成後資料就已在
+	 * 資料庫），清理本身沒有任何待收的東西。
 	 */
-	go audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(context.Background())
+	go audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
 
 	/*
 	 * 啟動 IP 封鎖名單的定期清理。
@@ -292,8 +326,8 @@ func main() {
 	 * **不清理不會造成功能錯誤** —— 它只會讓 ZSET 慢慢長大，而那個增長是
 	 * 單調的。一小時清理一次的寫入量可以忽略（見 ipban.NewPruner）。
 	 *
-	 * 與 session 的 StartCleanup 一樣用 context.Background()：本程式沒有
-	 * graceful shutdown，沒有任何地方會取消它。
+	 * 與 session 的 StartCleanup 一樣：都交給呼叫端決定何時停止，這裡傳
+	 * backgroundCtx。
 	 *
 	 * 這裡的 go 關鍵字不可省略：Pruner.Run 與 metrics flusher 一樣是「阻塞
 	 * 在 select 上直到 ctx 被取消」的迴圈，忘了 go 會讓主流程停在這裡，
@@ -302,7 +336,7 @@ func main() {
 	 * 而且接下來的啟動日誌一條都不會再出現。與上面的稽核清理同一個寫法。
 	 */
 	if srv.Blocks() != nil {
-		go ipban.NewPruner(srv.Blocks(), time.Hour).Run(context.Background(),
+		go ipban.NewPruner(srv.Blocks(), time.Hour).Run(backgroundCtx,
 			func(removed int, err error) {
 				if err != nil {
 					logger.Warnf("[BLOCKLIST] 無法清理過期封鎖: %v", err)
@@ -319,10 +353,79 @@ func main() {
 
 	logger.Infof("[AUDIT] 稽核紀錄保留 %d 天，過期紀錄每小時清理一次", cfg.AuditRetentionDays)
 
-	// 沒有 ReadHeaderTimeout 等逾時設定，也沒有 graceful shutdown（見檔案層說明）。
-	if err := http.ListenAndServe(cfg.ServerPort, srv.Handler()); err != nil {
-		// 綁定埠失敗（例如埠已被占用）同樣屬於不可降級的致命錯誤；
-		// ErrServerClosed 在本程式不會出現，因為沒有任何地方呼叫 srv.Shutdown。
+	// 逾時設定集中在 newHTTPServer 裡，這裡只負責組裝與啟動。
+	httpSrv := newHTTPServer(cfg, srv.Handler())
+	// 訊號處理必須在開始監聽**之前**就緒：容器環境的停止訊號可能在啟動的
+	// 瞬間就送達，若先 ListenAndServe 再註冊，那段空窗期內的訊號會依預設
+	// 行為直接終止行程（等於回到沒有優雅停止的狀態）。
+	sigCh := make(chan os.Signal, 1)
+	notifyOnSignal(sigCh)
+	defer signal.Stop(sigCh)
+
+	logger.Infof("[SERVER] Forum server started at %s", cfg.ServerPort)
+
+	/*
+	 * 進入監聽，收到停止訊號才返回。
+	 *
+	 * 這裡的順序是整個停止流程的起點：先讓 ListenAndServe 跑在 goroutine，
+	 * 再用 select 等「伺服器錯誤」或「停止訊號」兩者之一。
+	 *
+	 * 刻意讓 serveUntilSignal 自己開 goroutine（而不是在 main 裡 go 出去再
+	 * 開 channel 回傳）：錯誤與訊號誰先到是不確定的，而這個函式必須把
+	 * 「監聽期間就出錯」與「被要求停止」這兩件事分開回報 —— 前者是致命錯誤
+	 * （exit 1），後者要走完排空流程（exit 0）。
+	 */
+	if err := serveUntilSignal(httpSrv, sigCh); err != nil {
+		// 綁定埠失敗（例如埠已被占用）屬於不可降級的致命錯誤。
 		logger.Fatalf("[SERVER] Server stopped: %v", err)
 	}
+
+	/*
+	 * 優雅停止：先停止接受新連線，再等在途請求完成。
+	 *
+	 * 為什麼不能反過來（先取消背景 ctx 再 Shutdown）：在途請求還在服務中，
+	 * 限流與監控落盤都還有作用 —— 尤其監控，排空期間結束的分鐘桶要有人寫
+	 * 出去，先取消只會讓監控圖少一段。
+	 *
+	 * 逾時上限取自 SHUTDOWN_TIMEOUT_SECONDS：Shutdown 一旦逾時就會立即返回
+	 * error，而此時連線仍開著，因此必須補一次 Close 強制中斷，否則在途
+	 * 請求會一直吊住行程到部署端自己動手殺掉。
+	 */
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancelShutdown()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Warnf("[SERVER] 優雅停止未能在 %s 內完成（%v），仍有在途請求將被中斷", cfg.ShutdownTimeout, err)
+		if closeErr := httpSrv.Close(); closeErr != nil {
+			logger.Warnf("[SERVER] 強制關閉連線時發生錯誤: %v", closeErr)
+		}
+	} else {
+		logger.Infof("[SERVER] 在途請求已全部完成")
+	}
+
+	// 背景工作收尾。放在 Shutdown 之後：此時不會再有任何請求進來，清理
+	// goroutine 停止才不會漏掉東西。
+	stopBackground()
+
+	/*
+	 * 最後一次分鐘彙總寫入，由主流程**同步**執行。
+	 *
+	 * 為什麼不只靠 StartFlusher 收到 ctx.Done() 的那次寫入：那是背景
+	 * goroutine，而接下來 main 就會 return、行程隨即結束 —— 那次寫入很可能
+	 * 還沒跑完。同步寫入才能保證「停止前的最後一段流量」真的落到資料庫。
+	 *
+	 * 與背景那次寫入不會重複計數：FlushPending 在鎖內先把候選分鐘標記成
+	 * flushed 再送出，因此兩邊同時呼叫時各取各的、互不重疊。
+	 *
+	 * 用全新的 context 而非已逾時的 shutdownCtx：排空逾時不代表資料庫不可
+	 * 寫入，而這個 context 只服務一次寫入，不需要與請求共用期限。
+	 */
+	if registry != nil {
+		flushCtx, cancelFlush := context.WithTimeout(context.Background(), flushTimeout)
+		if written := registry.FlushPending(flushCtx, db); written > 0 {
+			logger.Infof("[MONITOR] 停止前已寫出最後 %d 分鐘的請求統計", written)
+		}
+		cancelFlush()
+	}
+
+	logger.Infof("[SERVER] Forum server stopped")
 }
