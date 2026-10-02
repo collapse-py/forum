@@ -44,6 +44,13 @@ const EXPIRY_OPTIONS = [
   { hours: 0, key: 'announce.expiryNever', params: {} },
 ] as const;
 
+/**
+ * 預設有效時間。抽成常數是因為它出現在三個彼此無關的地方（新表單預設、
+ * 編輯時取不到剩餘時間的退場值、從列表重新啟用已過期公告），三處必須一致，
+ * 否則「按重新啟用」會給出一個和管理員在表單裡看到的預設不同的時長。
+ */
+const DEFAULT_EXPIRY_HOURS = 24 * 7;
+
 export function AnnouncementsPage() {
   usePageTitle('title.adminAnnouncements');
 
@@ -85,7 +92,7 @@ export function AnnouncementsPage() {
     setEditing(null);
     setBody('');
     setActive(true);
-    setExpiryHours(24 * 7);
+    setExpiryHours(DEFAULT_EXPIRY_HOURS);
     setFormError(null);
   }, []);
 
@@ -97,8 +104,7 @@ export function AnnouncementsPage() {
     // 換算是用剩餘時間而不是原始小時數：一則三年前設定的 7 天期公告，
     // 原始值會是 168（小時），而那在編輯時已經毫無意義。取不到就回到預設的
     // 7 天，讓管理員重新設定一個合理的長度。
-    const hours = hoursUntil(item.expiresAt);
-    setExpiryHours(hours ?? 24 * 7);
+    setExpiryHours(hoursUntil(item.expiresAt) ?? DEFAULT_EXPIRY_HOURS);
     setFormError(null);
   }, []);
 
@@ -149,9 +155,23 @@ export function AnnouncementsPage() {
         if (!ok) return;
       }
       try {
+        // hoursUntilExpiry **必須**帶原本的到期語意，不能固定送 0。
+        //
+        // 後端把 hoursUntilExpiry=0 解讀成「expires_at 設為 NULL（永不過期）」，
+        // 因此固定送 0 會讓「重新啟用一則設定了 7 天有效期的公告」把它變成
+        // 永久顯示 —— 而那個語意在畫面上完全看不到，也沒有任何錯誤訊息。
+        //
+        // 三種情況因此要分開處理：
+        //   - 還沒到期 → 帶**剩餘**小時數，讓它維持原本被設定的那個時點
+        //     （後端是相對時間，每差一小時送出都會讓到期點位移一小時，
+        //     因此停用時送出、日後啟用時不送出，位移就只累積一次）
+        //   - 已經過期 → 重新啟用等於「重新給它一個時長」，用表單預設值；
+        //     這也正是管理員在表單裡自己按「重新啟用」時會得到的結果
+        //   - 本來就沒有到期時間 → 0 正是原本的語意
+        const hours = item.expiresAt ? hoursUntil(item.expiresAt) ?? DEFAULT_EXPIRY_HOURS : 0;
         await adminApi<{ ok: boolean }, { body: string; active: boolean; hoursUntilExpiry: number }>(
           `/api/admin/announcements/${item.id}`,
-          { method: 'PATCH', body: { body: item.body, active: next, hoursUntilExpiry: 0 } },
+          { method: 'PATCH', body: { body: item.body, active: next, hoursUntilExpiry: hours } },
         );
         toast(next ? t('announce.reactivated') : t('announce.deactivated'), 'ok');
         await load();

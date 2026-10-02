@@ -244,7 +244,14 @@ func main() {
 	 */
 	registry := srv.Metrics()
 	if registry != nil {
-		since := time.Now().Add(-time.Duration(cfg.MonitorRetentionHours) * time.Hour)
+		// since 對齊「時間軸實際會顯示的區間」，而不是 MONITOR_RETENTION_HOURS。
+		//
+		// 這個差別不是小數點：時間軸只有 TimelineMinutes 格（預設 120 分鐘），
+		// 因此讀回 24 小時的 1440 列會在 20 秒內被 pruneLocked 裁到 120 列 ——
+		// 其餘 1320 列純屬白讀（一次 DB 往返）、白佔記憶體，且沒有任何作用。
+		// 用保留期當 since 也會讓 log 裡「已讀回 N 分鐘」變成一個與畫面
+		// 完全無關的數字。
+		since := time.Now().Add(-time.Duration(registry.TimelineMinutes()) * time.Minute)
 		if loaded, err := registry.LoadHistory(context.Background(), db, since); err != nil {
 			// 表不存在（首次部署尚未跑遷移）或權限不足都會走到這裡。監控頁
 			// 仍會顯示「本次啟動以來」的即時曲線，因此這是警告而不是錯誤。

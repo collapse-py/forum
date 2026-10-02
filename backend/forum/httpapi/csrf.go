@@ -16,8 +16,22 @@ package httpapi
      狀態變更請求。
   2. 本檔案比對 Origin / Referer 是否屬於設定檔的 TRUSTED_ORIGINS，屬於
      縱深防禦的第二層，也補上 SameSite 支援不完整或 cookie 屬性被放寬時的缺口。
-  目前只有 /api/logout 掛上這層保護（見 server.go）；其餘寫入端點僅依賴
-  SameSite 與 requireLogin。
+
+第 2 層是**每個寫入 handler 自行呼叫** isTrustedOrigin，而不是一個中介層。
+
+  這不是疏漏，是刻意的：多數後臺路由是「同一條路徑、同時服務 GET 與寫入方法」
+  （/api/admin/users 是 GET 列表、POST 停權、PUT 改資料共用一個樣式），而
+  isTrustedOrigin 只該擋**狀態變更**的方法。若把它做成中介層，就只有兩條路可走
+  —— 要嘛把 GET 也擋掉（後臺整頁開不起來），要嘛在中介層裡內部做 method 判斷
+  （那其實就是把 handler 的分支搬到另一個檔案，換不到任何東西）。
+
+  依賴這個決定的是一條不變條件：**每一條會改變資料的路徑都必須呼叫它**。
+  稽核端點也要寫入（稽核紀錄本身是資料），因此同樣要求來源檢查。目前全站共
+  29 處 `!s.isTrustedOrigin(r)` 守衛（27 處獨立成行的 `if !s.isTrustedOrigin(r) {`，
+  另有 2 處與 method 檢查合併成同一個條件），涵蓋公告、置頂、IP 封鎖、session
+  撤銷、批次操作、關注與後臺 CRUD。
+  新增寫入端點時漏掉這一行的症狀是「CSRF 防護失效但沒有任何錯誤」—— 因此
+  這個清單靠程式碼審查維持，而不是靠型別。
 
 能擋住什麼
   - 跨站表單送出、fetch/XHR、img 與 iframe 觸發的狀態變更請求：瀏覽器會

@@ -127,13 +127,22 @@ const defaultMaxRoutes = 200
 // 記憶體成本則是每桶約 56 bytes，可以忽略。
 const defaultWindowMinutes = 120
 
-// defaultRetentionHours 是資料庫內分鐘彙總的保留小時數，也是時間軸的預設長度。
+// defaultRetentionHours 是資料庫內分鐘彙總的保留小時數。
+//
+// 它**只**決定資料庫保留，不決定時間軸長度 —— 後者由 windowMinutes 與
+// maxTimelinePoints 決定（見 TimelineMinutes）。兩者刻意分開：保留期是
+// 「寫多少進資料庫」的維運政策，時間軸長度是「畫幾格」的呈現選擇。
+// 混為一談的後果是設定 retention 的人以為圖會變長，而管理員讀到「24 小時前
+// 的資料在圖上」時會去一個永遠不存在的格子裡找。
 const defaultRetentionHours = 24
 
 // maxTimelinePoints 限制時間軸回傳的長度。
 //
 // 前端把它畫成固定寬度的長條圖，回傳比畫面能呈現更多只會讓回應變大。144
-// 個點正好是 24 小時的分鐘級，與預設保留期一致。
+// 個點正好是 24 小時的分鐘級。
+//
+// 它是**呈現上限**，不是時間軸長度：實際長度是 min(windowMinutes,
+// maxTimelinePoints)，見 TimelineMinutes。
 const maxTimelinePoints = 144
 
 // ErrNoDatabase 表示持久化功能沒有拿到可用的 *sql.DB，因此不會啟動。
@@ -727,17 +736,14 @@ func (r *Registry) limitsLocked() []LimitSnapshot {
 	return limits
 }
 
-// timelineLocked 合併歷史與即時桶，輸出最近 windowMinutes 個連續分鐘。必須持有 mu。
+// timelineLocked 合併歷史與即時桶，輸出最近 TimelineMinutes 個連續分鐘。必須持有 mu。
 //
 // 連續性刻意用「從當前分鐘往回走」來決定，而不是只列出有資料的分鐘：圖上
 // 出現空格才是「那三分鐘真的沒有請求」。若省略空格，讀者會把線段的空白
 // 誤解成「零」而不是「沒有資料」—— 這兩者在監控上是完全不同的意思。
 func (r *Registry) timelineLocked(now time.Time) []TimelinePoint {
 	currentMinute := minuteIndex(now)
-	length := r.windowMinutes
-	if length > maxTimelinePoints {
-		length = maxTimelinePoints
-	}
+	length := r.TimelineMinutes()
 
 	points := make([]TimelinePoint, 0, length)
 	for i := length - 1; i >= 0; i-- {
@@ -965,6 +971,32 @@ func (r *Registry) pruneLocked(now time.Time) {
 	// 呼叫而不是併進上面的迴圈。放在這裡是為了讓「不論有沒有資料庫，來源都會
 	// 被清理」這個不變條件只有一個實作點。
 	r.pruneClientsLocked(now)
+}
+
+// TimelineMinutes 回傳時間軸實際會畫幾格。
+//
+// 匯出的理由：時間軸長度不是呼叫端能自己算出來的（它同時取決於
+// windowMinutes 與 maxTimelinePoints 兩個值），而 main 需要它來決定
+// LoadHistory 要從資料庫讀回多久 —— 讀得比它多等於白讀、白佔記憶體：
+// pruneLocked 會在 20 秒內把超出視窗的桶丟掉，那些列永遠不會出現在任何
+// 一張圖上。
+//
+// 刻意**不**讓 MONITOR_RETENTION_HOURS 影響這個值：那個設定是資料庫保留政策，
+// 與「畫幾格」是兩個問題（見 defaultRetentionHours 的說明）。讓它兩邊都管
+// 會造成「設定 72 小時以為圖會變長」這種預期落空，而且回應會膨脹到前端
+// 畫不下的程度。
+func (r *Registry) TimelineMinutes() int {
+	if r == nil {
+		return 0
+	}
+	length := r.windowMinutes
+	if length <= 0 {
+		length = defaultWindowMinutes
+	}
+	if length > maxTimelinePoints {
+		length = maxTimelinePoints
+	}
+	return length
 }
 
 // LoadHistory 從資料庫讀回 since 之後的分鐘彙總，讓時間軸在重啟後仍有東西可畫。

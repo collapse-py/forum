@@ -18,8 +18,13 @@ package httpapi
 	打架的內容。表格保留多列是為了留下歷史（什麼時候、經誰發、之後被誰關），
 	而「只有一列 active」則由兩件事保證：
 
-	  - 發佈新公告時在同一個交易裡把舊的設為不啟用（publishAnnouncement）
+	  - 發佈**啟用中**的新公告時，在同一個交易裡把舊的設為不啟用
+	    （publishAnnouncement）
 	  - 改為啟用時同樣先把其他全部關掉（updateAnnouncement）
+
+	兩處都以「這一則真的會顯示」為前提：發佈一則 active=false 的公告
+	（先寫好、稍後才生效）不關任何東西 —— 關了的話，「先寫好」這個動作
+	反而會把線上正在顯示的公告弄不見，而那顯然不是任何人預期的事。
 
 	這兩處刻意都放在**交易內**。若先插新的再關舊的，中間任何一瞬間讀到資料的
 	請求都會看到兩則，而那個瞬間足以讓使用者截到一張有矛盾的畫面。
@@ -97,15 +102,33 @@ func (s *Server) handleForumAnnouncement(w http.ResponseWriter, r *http.Request)
 	// 只取「active 且（未設到期 或 到期時間還沒到）」。expires_at 為 NULL 的
 	// 比較結果在 SQL 三值邏輯下是 NULL（不是 true），因此必須用
 	// IS NULL 明確表達，否則永不过期的公告永遠查不到。
+	//
+	// **判斷用的時鐘由 Go 端提供，而不是 NOW()**：expires_at 是 DATETIME，
+	// 寫入端傳的是 time.Time 而 driver 依 DSN 的 loc 序列化成主機掛鐘字串；
+	// 而 NOW() 是 MySQL **session** 時區，兩者只有在 session 時區剛好等於
+	// 主機時區時才相同（站台 UTC+8 + 雲端 MySQL UTC 是常見組合）。後臺的
+	// Effective 用 time.Now() 比同一個欄位，因此把 ? 帶進來讓兩邊共用同一個
+	// clock，是唯一能保證「後臺說顯示中、公開頁就有橫幅」的做法。
+	//
+	// 放棄 SQL 端的常數比較不影響索引：條件是 (active, expires_at)，而
+	// idx_forum_announcements_active_expires 的前導欄是 active 的等值條件，
+	// 命中的本來就只有 active 的那一列（同一時間最多一則）。
+	//
+	// expires_at 同樣刻意**不**在 SQL 裡 DATE_FORMAT：DATETIME 沒有時區資訊，
+	// DATE_FORMAT 用的是 MySQL session 時區，把結果硬寫上一個 "Z" 等於
+	// 宣告它是 UTC，而實際上它是主機的掛鐘時間。掃成 time.Time 再自行 Format
+	// 就沒有這個問題 —— DSN 帶 loc=Local，掃出來的值帶真實偏移，轉 UTC 後
+	// 格式與 createdAt 完全一致。
 	row := s.db.QueryRowContext(r.Context(), `
-		SELECT body, created_at, COALESCE(DATE_FORMAT(expires_at, '%Y-%m-%dT%H:%i:%sZ'), '')
+		SELECT body, created_at, expires_at
 		FROM forum_announcements
-		WHERE active = 1 AND (expires_at IS NULL OR expires_at > NOW())
+		WHERE active = 1 AND (expires_at IS NULL OR expires_at > ?)
 		ORDER BY created_at DESC, id DESC
-		LIMIT 1`)
+		LIMIT 1`, time.Now())
 
 	var announcement forumAnnouncement
-	if err := row.Scan(&announcement.Body, &announcement.PublishedAt, &announcement.ExpiresAt); err != nil {
+	var expires sql.NullTime
+	if err := row.Scan(&announcement.Body, &announcement.PublishedAt, &expires); err != nil {
 		if err == sql.ErrNoRows {
 			// 沒有公告是常見且正常的情況，因此回 200 + null 而不是 404。
 			// 理由見檔頭。
@@ -116,6 +139,7 @@ func (s *Server) handleForumAnnouncement(w http.ResponseWriter, r *http.Request)
 		internalError(w, "unable to load announcement")
 		return
 	}
+	announcement.ExpiresAt = formatAnnouncementExpiry(expires)
 	writeOK(w, map[string]any{"ok": true, "announcement": announcement})
 }
 
@@ -140,8 +164,7 @@ func (s *Server) handleAdminAnnouncements(w http.ResponseWriter, r *http.Request
 
 func (s *Server) listAdminAnnouncements(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), `
-		SELECT id, body, active, created_by, created_at, updated_by, updated_at,
-		       COALESCE(DATE_FORMAT(expires_at, '%Y-%m-%dT%H:%i:%sZ'), '')
+		SELECT id, body, active, created_by, created_at, updated_by, updated_at, expires_at
 		FROM forum_announcements
 		ORDER BY created_at DESC, id DESC
 		LIMIT 100`)
@@ -180,13 +203,39 @@ type announcementRowScanner interface {
 func scanAdminAnnouncement(row announcementRowScanner) (adminAnnouncement, error) {
 	var item adminAnnouncement
 	var active int
+	var expires sql.NullTime
 	if err := row.Scan(&item.ID, &item.Body, &active, &item.CreatedBy, &item.CreatedAt,
-		&item.UpdatedBy, &item.UpdatedAt, &item.ExpiresAt); err != nil {
+		&item.UpdatedBy, &item.UpdatedAt, &expires); err != nil {
 		return adminAnnouncement{}, err
 	}
 	item.Active = active == 1
-	item.Effective = item.Active && (item.ExpiresAt == "" || item.ExpiresAt > time.Now().UTC().Format(time.RFC3339))
+	item.ExpiresAt = formatAnnouncementExpiry(expires)
+	// Effective 用**時間比較**而不是字串比較。字串比較在兩個時鐘不一致時
+	// （例如 expires_at 是主機掛鐘時間、now 是 UTC）會安靜地給出錯誤答案，
+	// 而這個欄位正是管理員用來判斷「橫幅到底還在不在」的唯一依據。
+	//
+	// 判斷條件與公開端點的 SQL（active = 1 AND (expires_at IS NULL OR
+	// expires_at > ?)）**共用同一個 clock**：那個 ? 傳的就是 time.Now()，
+	// 與這裡的比較同一個來源。兩邊因此不會出現「後臺說顯示中、公開頁沒有」。
+	// 這裡也刻意用 time.Now()（本機時區）而不是 UTC：掃回來的 expires.Time
+	// 帶 DSN 的 loc，與寫入端的序列化方式對稱，UTC 反而會差一個偏移。
+	item.Effective = item.Active && (!expires.Valid || expires.Time.After(time.Now()))
 	return item, nil
+}
+
+// formatAnnouncementExpiry 把可空的到期時間轉成對外的字串。
+//
+// 空字串代表「永不自動過期」（前端以 omitempty 省略這個欄位）。
+//
+// 一律轉成 UTC 的 RFC3339，因此格式與 createdAt / updatedAt 完全一致 ——
+// 這正是前端能把它當成一般時間戳處理（顯示相對時間、做到期比較）的原因。
+// 曾在 SQL 裡用 DATE_FORMAT 加上假的 "Z"，結果是站台不在 UTC 時這裡會與
+// Effective 判定用上兩個不同的時鐘。
+func formatAnnouncementExpiry(value sql.NullTime) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.Time.UTC().Format(time.RFC3339)
 }
 
 // announcementRequest 是發佈與修改共用的請求主體。
@@ -196,6 +245,12 @@ type announcementRequest struct {
 	// 生效的公告很常見，而為了這個用途去建一列再刪掉並沒有比較好。
 	Active bool `json:"active"`
 	// HoursUntilExpiry <= 0 代表永不自動過期。
+	//
+	// 這個欄位是「要設定的時長」而不是「剩餘時長」—— 後端收到什麼就覆蓋成什麼，
+	// 因此**沒有**「保持原值」的語意。這代表任何只想切換 active 的呼叫端都必須
+	// 自己帶上原本的到期語意：固定送 0 會把一則有期限的公告變成永久顯示，而畫面
+	// 上看不出這個差別。前端因此在切換狀態前把絕對時間換算成剩餘小時
+	// （見 AnnouncementsPage.tsx 的 setAnnouncementActive）。
 	HoursUntilExpiry int `json:"hoursUntilExpiry"`
 }
 
@@ -255,11 +310,18 @@ func (s *Server) publishAnnouncement(w http.ResponseWriter, r *http.Request) {
 	// 先停用舊的再插新的。順序在這個交易裡其實無關紧要（外鍵與唯一鍵都沒有
 	// 參與），但「先關再開」讓「如果這一步之後失敗」的狀態是「沒有公告」
 	// 而不是「兩則都開著」—— 前者只是橫幅消失，後者會顯示互相衝突的內容。
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE forum_announcements SET active = 0, updated_at = ?, updated_by = ? WHERE active = 1`,
-		now, actor); err != nil {
-		internalError(w, "unable to publish announcement")
-		return
+	//
+	// 關鍵是「只在真的要顯示時才關」：active=false 的語意是「發佈但不顯示」
+	// （一則先寫好、稍後才生效的公告）。若無條件關掉舊的，勾掉「顯示」再
+	// 發佈就會讓線上正在顯示的公告憑空消失 —— 那是欄位本身要支援的情境，
+	// 結果變成「順手把別人的公告關掉」。沒有任何錯誤訊息，因為每一步都成功。
+	if req.Active {
+		if _, err := tx.ExecContext(r.Context(),
+			`UPDATE forum_announcements SET active = 0, updated_at = ?, updated_by = ? WHERE active = 1`,
+			now, actor); err != nil {
+			internalError(w, "unable to publish announcement")
+			return
+		}
 	}
 
 	result, err := tx.ExecContext(r.Context(), `
@@ -342,11 +404,16 @@ func (s *Server) handleAdminAnnouncement(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 讀取改動前的內容與狀態，稽核紀錄需要它們。
-	var beforeBody, beforeExpires string
+	// expires_at 掃成可空時間再格式化（理由同 formatAnnouncementExpiry），
+	// 否則 Before 會是主機掛鐘時間的字串而 After 是 UTC 的字串，格式不同
+	// 會讓 onlyChanged 幾乎永遠判定 expiresAt「有變更」，
+	// 於是稽核紀錄裡出現大量假變更。
+	var beforeBody string
+	var beforeExpiresRaw sql.NullTime
 	var beforeActive int
 	if err := tx.QueryRowContext(r.Context(),
-		`SELECT body, active, COALESCE(DATE_FORMAT(expires_at, '%Y-%m-%dT%H:%i:%sZ'), '') FROM forum_announcements WHERE id = ?`, id).
-		Scan(&beforeBody, &beforeActive, &beforeExpires); err != nil {
+		`SELECT body, active, expires_at FROM forum_announcements WHERE id = ?`, id).
+		Scan(&beforeBody, &beforeActive, &beforeExpiresRaw); err != nil {
 		if err == sql.ErrNoRows {
 			http.NotFound(w, r)
 			return
@@ -354,6 +421,7 @@ func (s *Server) handleAdminAnnouncement(w http.ResponseWriter, r *http.Request)
 		internalError(w, "unable to update announcement")
 		return
 	}
+	beforeExpires := formatAnnouncementExpiry(beforeExpiresRaw)
 
 	result, err := tx.ExecContext(r.Context(), `
 		UPDATE forum_announcements

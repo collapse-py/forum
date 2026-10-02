@@ -81,11 +81,14 @@ const defaultMaxClients = 200
 // 員看到一個位址時無從判斷它是「連線對端」還是「自己剛才送的那個標頭」。
 // 把它標出來之後，「這個數字可以拿來封人嗎」變成一個看得出來的事實。
 //
-// 注意這**不是**在修 H4：那個問題的正確修法是依 TRUSTED_PROXY_CIDRS 決定要不要
-// 採信 XFF，而那需要先確認生產環境的代理拓撲。這個標記的誠實說法是「你知道
-// 這個值是怎麼來的」，不是「這個值可信」。
+// 標記不是 H4 的修法，但兩者是互補的：H4 修的是**判定**（依
+// TRUSTED_PROXY_CIDRS 決定要不要採信 XFF，見 httpapi/trustedproxy.go），
+// 而這個標記修的是**可觀察性** —— 即使設定正確，讀者仍然需要知道某個位址
+// 是「連線對端」還是「經過可信代理轉送來的」。設定未設而標記顯示 xff，
+// 正是「這台站目前用的是舊的標頭優先模式」的可見訊號。
 const (
-	// ClientSourceXFF 代表位址取自 X-Forwarded-For 最左一項。使用者可控。
+	// ClientSourceXFF 代表位址取自 X-Forwarded-For。使用者可控，除非呼叫端
+	// 已用 TRUSTED_PROXY_CIDRS 確認對端是可信任代理。
 	ClientSourceXFF = "xff"
 	// ClientSourceRealIP 代表位址取自 X-Real-IP。同樣使用者可控。
 	ClientSourceRealIP = "real-ip"

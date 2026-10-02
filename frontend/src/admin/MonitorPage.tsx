@@ -39,8 +39,16 @@ import { BusyButton, EmptyState, FormStatus } from './ui';
 /** 自動更新週期。10 秒是「足以看出流量變化」與「不把後端打成負載」之間的取捨。 */
 const REFRESH_INTERVAL_MS = 10_000;
 
-/** 時間軸的長度（分鐘）。144 = 24 小時，與後端的 maxTimelinePoints 一致。 */
-const TIMELINE_MINUTES = 144;
+/**
+ * 時間軸長度的**後備值**（分鐘）。實際長度以回應的 `stats.windowMinutes` 為準
+ * （後端取 min(視窗分鐘, maxTimelinePoints)），這個常數只在還沒拿到資料時用，
+ * 避免標題先顯示一個錯的數字再跳成對的。
+ *
+ * 刻意**不**把它寫成 144：那個數字是後端的呈現上限，不是目前的視窗長度
+ * （後端 `NewServer` 給的是 120 分鐘）。把上限當成長度會讓標題與畫面對不上，
+ * 而圖上實際有幾根柱子、標題寫幾分鐘必須是同一件事。
+ */
+const TIMELINE_MINUTES_FALLBACK = 120;
 
 /** 路由表格最多顯示幾列。更多列在 .table-wrap 內捲動，見 .monitor-table。 */
 const MAX_ROUTE_ROWS = 40;
@@ -226,6 +234,19 @@ export function MonitorPage() {
   const routes = useMemo(() => (stats?.requests.routes ?? []).slice(0, MAX_ROUTE_ROWS), [stats]);
   const clients = useMemo(() => (stats?.clients ?? []).slice(0, MAX_CLIENT_ROWS), [stats]);
   const limits = stats?.rateLimits ?? [];
+
+  // 標題的分鐘數必須等於圖上實際畫的格數。優先用回應的 timeline 長度（它就是
+  // 後端畫了幾格），再退到 windowMinutes，最後才是常數後備值 —— 三者依序遞減
+  // 的理由是「畫面有多少格」比「設定寫多少」更可信。
+  //
+  // 逐項判斷而不是用 `||`：`||` 把「0 格」與「欄位不存在」混為一談，於是圖上
+  // 0 格、標題寫 windowMinutes 的情況正好是這段註解要消滅的那一類。實務上
+  // 後端 timelineLocked 一定回傳 length 個點所以不會發生，但成本為零的明確
+  // 判斷值得留下。
+  const timelineLength = stats?.timeline?.length ?? 0;
+  const windowMinutes = stats?.windowMinutes ?? 0;
+  const timelineMinutes =
+    timelineLength > 0 ? timelineLength : windowMinutes > 0 ? windowMinutes : TIMELINE_MINUTES_FALLBACK;
 
   // 正在封鎖的位址。單一字串而不是計數：同一個位址連點兩次時，第二下必須被
   // 擋住（否則會送出兩次 POST、產生兩筆稽核紀錄），而不同的位址之間不需要互斥。
@@ -462,7 +483,7 @@ export function MonitorPage() {
           <div className="panel__head">
             <div className="panel__titles">
               <h2 className="panel__title" id="monitor-timeline-title">
-                {t('monitor.timelineTitle', { minutes: TIMELINE_MINUTES })}
+                {t('monitor.timelineTitle', { minutes: timelineMinutes })}
               </h2>
               <p className="panel__note">{t('monitor.timelineNote')}</p>
             </div>
@@ -597,6 +618,11 @@ export function MonitorPage() {
               })}
             </p>
           ) : null}
+          {/* 信任模型不是設定檔裡的一個細節，而是「限流／封鎖／稽核紀錄用的
+              是同一個值，而那個值可不可信」的直接答案。少了這一段，管理員只
+              能從「來源清單裡的 xff 標記」反推，而那個反推在多層代理下會
+              得出錯誤結論。 */}
+          <TrustModelNote trust={data?.clientIpTrust} />
         </section>
 
         {/* --- 依路由統計 ------------------------------------------------ */}
@@ -833,6 +859,54 @@ function DependencyCard({ name, status, lines }: DependencyCardProps) {
 interface TimelineProps {
   points: MonitorResponse['stats']['timeline'];
   loading: boolean;
+}
+
+/**
+ * 來源 IP 信任模型的說明。
+ *
+ * 放在「來源位址」面板裡、緊接著表格，而不是放在設定頁或頁首：管理員是在這裡
+ * 判斷「這個位址能不能拿來封」，而這個判斷的前提正是信任模型。離開這個脈絡
+ * 再說一次等於沒有說。
+ *
+ * 三種狀態：
+ *   - trusted-proxies：白名單已設定，這裡列出實際生效的位址段。
+ *   - legacy-headers：未設定，用的是「標頭優先」的舊行為 —— 必須說明後果，
+ *     否則管理員會以為這台站已經驗證過來源。
+ *   - 宣告了卻沒一筆能解析：那是設定寫錯，第三種文案專門說這件事，因為它在
+ *     舊行為下完全不可見（症狀是限流與封鎖可被偽造標頭繞過，卻沒有任何一行
+ *     log）。
+ *
+ * 「部分寫錯」是第四種狀態，也是最容易踩到的一種：白名單確實生效，但管理員
+ * 少打一個字的位址段永遠不會被採信，而畫面看起來完全正常。因此先說生效的
+ * 位址段、再補一句寫錯了哪幾項 —— 那句才是這一段存在的理由。
+ *
+ * 拿不到資料時整段不渲染：顯示「未設定」在載入失敗的情況下會是個假斷言。
+ */
+function TrustModelNote({ trust }: { trust: MonitorResponse['clientIpTrust'] }) {
+  if (!trust) return null;
+  const invalid = trust.invalid ?? [];
+  if (trust.mode === 'trusted-proxies') {
+    return (
+      <>
+        <p className="monitor-hint">
+          {t('monitor.trustConfigured', { cidrs: text(trust.trusted.join('、')) })}
+        </p>
+        {invalid.length > 0 && (
+          <p className="monitor-hint">
+            {t('monitor.trustPartial', { invalid: text(invalid.join('、')) })}
+          </p>
+        )}
+      </>
+    );
+  }
+  if (trust.declared) {
+    return (
+      <p className="monitor-hint">
+        {t('monitor.trustBroken', { declared: text(trust.declared) })}
+      </p>
+    );
+  }
+  return <p className="monitor-hint">{t('monitor.trustLegacy')}</p>;
 }
 
 /**

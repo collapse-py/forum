@@ -29,6 +29,7 @@ package httpapi
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,7 +41,10 @@ import (
 
 /*
 動作名稱。格式為 "<target_type>.<動作>"，前綴必須與 audit 的 TargetType
-常數一致。
+常數一致。唯一的例外是 adminActionSessionRevoke，理由寫在該常數的說明裡
+（它是這個清單裡唯一一個 target 是「人」而動作作用在他所有 session 上的操作，
+改成 user.sessions.revoke 會讓名稱長度超過一讀就懂的範圍，而前綴不一致的
+成本只有「依 target_type 前綴分組」這個尚未存在的功能）。
 
 命名規則：
   - 用動詞過去式（delete / update / resolve），不用命令式（deletePost）：
@@ -68,6 +72,19 @@ const (
 	adminActionCommentPut  = "comment.update"
 	adminActionCommentDel  = "comment.delete"
 
+	// adminActionPostIndexFailed 是「後臺的寫入成功了，但搜尋索引沒有同步」。
+	//
+	// 它與 session.revoke / ip.block 是同一類：動作發生在 MySQL 與 Elasticsearch
+	// 兩個系統而紀錄寫在 MySQL，因此沒有「與操作同生共死」的保證 —— 索引更新
+	// 刻意放在 Commit 之後（否則索引會指向被回滾的資料），而那意味著它失敗時
+	// 操作已經無法回滾。
+	//
+	// 為什麼值得單獨記一筆：稽核紀錄是這個專案用來回答「使用者看到的是什麼」
+	// 的依據。沒有這一筆時，刪文的稽核紀錄會完整地說「已刪除」，而搜尋結果裡
+	// 還留著一個點進去是 404 的幽靈貼文 —— 兩邊對不起來，而且沒有任何地方
+	// 留下差異。觸發手段不需要任何花招：讓 ES 暫時不可用即可。
+	adminActionPostIndexFailed = "post.index_failed"
+
 	adminActionReportResolve = "report.resolve"
 	adminActionReportReject  = "report.reject"
 	adminActionReportUpdate  = "report.update"
@@ -88,6 +105,12 @@ const (
 	// target 用 user（被登出的人）而不是 session —— 稽核紀錄的問題是
 	// 「誰被怎樣對待了」，而「這個人的 session 被全部撤銷」正是一個使用者
 	// 會追問的問題。用 session 的話，那一筆紀錄就沒有可辨識的對象。
+	//
+	// 名稱因此是這個清單裡唯一一個前綴不等於 TargetType 的（檔頭的約定有
+	// 記錄這個例外）。改成 user.sessions.revoke 會讓名稱多一個區段卻不增加
+	// 任何資訊：稽核紀錄是按整串比對的（idx_forum_admin_actions_action 與
+	// DISTINCT 篩選器都吃完整字串），前綴只在「依 target_type 分組查詢」
+	// 那個尚未存在的功能上才有意義。
 	adminActionSessionRevoke = "session.revoke"
 
 	// IP 封鎖與解封。target 是 audit.TargetIP（那不是一個資料表的資源，而是
@@ -121,7 +144,7 @@ func (s *Server) recordAdminAction(r *http.Request, tx *sql.Tx, action, targetTy
 		TargetID:    targetID,
 		TargetLabel: targetLabel,
 		Changes:     changes,
-		ClientIP:    clientIP(r),
+		ClientIP:    s.clientIP(r),
 		RequestID:   meta.RequestID,
 		// 以字串而非 time.Time 寫入：DATETIME 欄位不帶時區，掃描回來
 		// 也沒有時區。UTC 在寫入端就固定下來，顯示時再由前端轉換 ——
@@ -141,6 +164,47 @@ func adminStatusChange(before, after string) audit.Change {
 	return audit.Change{Field: "status", Before: before, After: after}
 }
 
+// recordPostIndexFailure 在「後臺寫入成功但搜尋索引沒同步」時補記一筆稽核。
+//
+// 為什麼需要一個專用的記錄點：這時操作早已 Commit，回應也已即將送出，因此
+// recordAdminAction 的「稽核與操作同生共死」前提在這裡**不成立**。而沒有紀錄
+// 的後果不是「少一筆」而是「稽核紀錄說謊」—— 它會宣稱一次完整的刪文，而搜尋
+// 結果裡留著幽靈貼文。
+//
+// 刻意寫成「開一個只為了寫這一行的交易」（理由與 session 強制登出、
+// recordBlockAction 完全相同）：傳 nil 會讓 recordAdminAction 整筆跳過，那個
+// nil 容忍是為了讓「稽核表還沒建好」時後臺仍可操作。
+//
+// beginAdminTx 拿不到 nil（它在 s.db 為 nil 時回錯誤），所以 recordAdminAction
+// 的 nil 分支在這條路徑上走不到 —— 那不是缺陷，而是 beginAdminTx 已把「沒有
+// 資料庫」變成一個明確的錯誤。這裡因此會記下「無法為索引失敗補記稽核」而
+// 不是靜默略過：索引失敗已經是資料不一致，再加一層看不見的稽核缺失會讓
+// 診斷難度加倍。
+//
+// 這個函式**只記錄、不改變回應**：索引失敗不該讓管理員看到「刪文失敗」而實際
+// 上文章確實被刪掉了（那才是真正的資料不一致）。它回傳 error 讓呼叫端決定
+// 記不記日誌，而這裡自己已經記了。
+func (s *Server) recordPostIndexFailure(r *http.Request, postID int64, cause error) {
+	logger.WarnfContext(r.Context(), "[SEARCH] 索引未同步，寫入稽核紀錄 post_id=%d: %v", postID, cause)
+
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[SEARCH] 無法為索引失敗補記稽核 post_id=%d: %v", postID, err)
+		return
+	}
+	defer tx.Rollback()
+	if err := s.recordAdminAction(r, tx, adminActionPostIndexFailed, audit.TargetPost,
+		strconv.FormatInt(postID, 10), "",
+		audit.Change{Field: "searchIndex", Before: "已同步", After: "同步失敗：" + cause.Error()},
+	); err != nil {
+		logger.ErrorfContext(r.Context(), "[SEARCH] 索引失敗的稽核寫入失敗 post_id=%d: %v", postID, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		logger.ErrorfContext(r.Context(), "[SEARCH] 索引失敗的稽核提交失敗 post_id=%d: %v", postID, err)
+	}
+}
+
 // beginAdminTx 開啟一個供「操作 + 稽核」共用的交易。
 //
 // 所有會改變資料的後臺 handler 都必須經過這個函式取得 *sql.Tx，而不能直接
@@ -150,9 +214,27 @@ func adminStatusChange(before, after string) audit.Change {
 // 這個函式存在的另一個理由是讓「哪些 handler 該用 tx」變成可搜尋的：搜尋
 // beginAdminTx 就會列出全部需要稽核的寫入點，而搜尋 s.db.ExecContext 會
 // 混進二十幾個純讀取與尚未稽核的寫入。
+//
+// s.db 為 nil 時回錯誤而不是 panic，理由與 probeDatabase 的 nil 防護相同：
+// beginAdminTx 可能被背景 goroutine 呼叫（recordPostIndexFailure），而
+// goroutine 裡的 panic **不會**被 net/http 的 per-connection recover 接住。
+// 以目前的 main.go 不可達（OpenMySQL 失敗會直接 Fatal），但那正是未來
+// 「稽核補記要能在資料庫沒接上時仍然不拖垮行程」會踩到的第一顆地雷。
+//
+// 回傳 error 而不是 (nil, nil)：呼叫端一律以 err != nil 判定失敗，因此
+// 假成功會讓它拿著 nil 的 *sql.Tx 繼續走下去。
 func (s *Server) beginAdminTx(r *http.Request) (*sql.Tx, error) {
+	if s.db == nil {
+		return nil, errNoDatabase
+	}
 	return s.db.BeginTx(r.Context(), nil)
 }
+
+// errNoDatabase 是 beginAdminTx 在沒有資料庫連線時的錯誤。
+//
+// 宣告成共用變數（而不是每次 new）是為了讓呼叫端可以用 == 比較，且錯誤訊息
+// 只有一份 —— 這條路徑的失敗訊息會進日誌，重複的字串串接起來會讓 log 難以 grep。
+var errNoDatabase = errors.New("httpapi: 需要資料庫連線才能開啟交易")
 
 // onlyChanged 濾掉新舊值相同的欄位變更。
 //

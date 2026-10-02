@@ -12,7 +12,13 @@
      去重、空白修剪、大小寫。少做去重不會報錯，只會讓「送出 5 個、實際改
      3 個」這種無法對帳的結果。
 
-  3. 授權
+  3. 標籤集的比較（sameTagSet / joinTagNames）
+     「標籤集沒變時什麼都不做，也不記稽核」這條守衛的失效症狀同樣是零錯誤：
+     資料庫狀態完全正確，只是稽核紀錄裡多了一批 Before == After 的假變更。
+     守衛曾經比對兩種不同排序的字串，因此幾乎永不成立 —— 這些測試把那個
+     不變條件釘住。
+
+  4. 授權
      這四支端點（兩支批次 POST、兩支匯出 GET）都會動到資料或送出具名單的
      檔案。匯出的 CSV 裡有全站使用者的 email 與自由文字內容 ——
      它對未登入者公開等同把後臺的使用者名單送出去。
@@ -27,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"forum/forum/audit"
 	"forum/forum/session"
 
 	"github.com/alicebob/miniredis/v2"
@@ -174,6 +181,110 @@ func TestNormalizeBatchEmails(t *testing.T) {
 			t.Errorf("錯誤訊息 = %q，應包含出問題的 email", got)
 		}
 	})
+}
+
+/* ==========================================================================
+   標籤集比較
+   ========================================================================== */
+
+// sameTagSet 是「標籤集沒有變化時不記稽核」那條守衛的全部邏輯，因此它的測試
+// 就是那條守衛的測試。
+//
+// 這個函式過去不存在：守衛直接比字串，而兩邊不同源 —— before 來自 SQL 的
+// ORDER BY t.name（名稱序）、after 是請求順序（管理員點核取方塊的順序）。
+// 字串比對因此對**同一組標籤**給出「不同」的答案，症狀不是報錯，而是
+// 稽核紀錄裡出現一批 `alpha, beta → beta, alpha` 的假變更，且批次守衛
+// 幾乎永不成立（每個使用者都被重寫一次並記一筆）。
+//
+// 這組測試只涵蓋純函式：handleAdminBatchTags 的端到端路徑需要一個真的
+// *sql.DB，而這個專案刻意不引入 MySQL 替身（見 monitoring_test.go 檔頭的
+// 「刻意沒有測的」），因此那條 handler 靠這個函式的測試加上程式碼審查把關。
+func TestSameTagSetIgnoresOrder(t *testing.T) {
+	cases := []struct {
+		name          string
+		before, after []string
+		want          bool
+	}{
+		{"順序不同即同一組（這是修掉的 bug）", []string{"alpha", "beta"}, []string{"beta", "alpha"}, true},
+		{"完全相同", []string{"alpha", "beta"}, []string{"alpha", "beta"}, true},
+		{"三個標籤輪轉", []string{"a", "b", "c"}, []string{"c", "a", "b"}, true},
+		{"兩者都空", []string{}, []string{}, true},
+		{"一個空一個有", []string{}, []string{"alpha"}, false},
+		{"多一個標籤", []string{"alpha"}, []string{"alpha", "beta"}, false},
+		{"少一個標籤", []string{"alpha", "beta"}, []string{"alpha"}, false},
+		{"同名不同筆", []string{"alpha", "beta"}, []string{"alpha", "gamma"}, false},
+		{"大小寫不同視為不同標籤", []string{"alpha"}, []string{"Alpha"}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameTagSet(tc.before, tc.after); got != tc.want {
+				t.Fatalf("sameTagSet(%v, %v) = %v, want %v", tc.before, tc.after, got, tc.want)
+			}
+		})
+	}
+}
+
+// sameTagSet 不可改動傳入的切片。
+//
+// 呼叫端把同一個切片（tagNames 或 beforeNames）同時拿來做比較與稽核字串；
+// 如果比較過程就地排序，稽核紀錄的 After 就會變成請求順序，而 onlyChanged
+// 的字串相等判斷又會失效 —— 那正是這個函式要修掉的同一個問題。
+func TestSameTagSetDoesNotMutateInput(t *testing.T) {
+	before := []string{"alpha", "beta"}
+	after := []string{"gamma", "delta"}
+
+	sameTagSet(before, after)
+	sameTagSet(before, after)
+
+	if before[0] != "alpha" || before[1] != "beta" {
+		t.Errorf("before 被就地排序: %v", before)
+	}
+	if after[0] != "gamma" || after[1] != "delta" {
+		t.Errorf("after 被就地排序: %v", after)
+	}
+}
+
+// joinTagNames 決定稽核紀錄的 Before / After 字串，因此它必須是「同一組標籤
+// 永遠同一個字串」的函式 —— 只有這樣 onlyChanged 的字串相等判斷才成立。
+//
+// 這條測試同時釘住「排序後逐項比較」而不是「以任一邊為準」：before 與 after
+// 兩個排列必須收斂到同一個字串，稽核紀錄才不會出現假變更。
+func TestJoinTagNamesIsOrderIndependent(t *testing.T) {
+	want := "alpha, beta, gamma"
+
+	if got := joinTagNames([]string{"beta", "alpha", "gamma"}); got != want {
+		t.Errorf("joinTagNames(請求順序) = %q, want %q", got, want)
+	}
+	if got := joinTagNames([]string{"gamma", "beta", "alpha"}); got != want {
+		t.Errorf("joinTagNames(SQL 名稱序) = %q, want %q", got, want)
+	}
+	if got := joinTagNames(nil); got != "" {
+		t.Errorf("joinTagNames(nil) = %q, want 空字串", got)
+	}
+	if got := joinTagNames([]string{"alpha"}); got != "alpha" {
+		t.Errorf("joinTagNames(單一標籤) = %q, want alpha", got)
+	}
+}
+
+// 端到端的不變條件：請求順序與資料庫名稱序不同時，joinTagNames 產生的字串
+// 仍然相同 —— 因此 audit_log.go 的 onlyChanged 會把它濾掉，而批次守衛
+// （sameTagSet）也會成立。兩者依賴的是同一個排序，這裡把它釘住。
+func TestUnchangedTagSetProducesIdenticalAuditStrings(t *testing.T) {
+	beforeNames := []string{"alpha", "beta"} // loadAdminUserTagNames：ORDER BY t.name
+	afterNames := []string{"beta", "alpha"}  // validateBatchTagIDs：請求順序（點擊順序）
+
+	before := joinTagNames(beforeNames)
+	after := joinTagNames(afterNames)
+	if before != after {
+		t.Fatalf("同一組標籤產出不同的稽核字串: %q vs %q", before, after)
+	}
+	if changes := onlyChanged(audit.Change{Field: "tags", Before: before, After: after}); len(changes) != 0 {
+		t.Errorf("onlyChanged 應濾掉未變更的 tags, got %d 筆", len(changes))
+	}
+	if !sameTagSet(beforeNames, afterNames) {
+		t.Error("sameTagSet 應判定為同一組標籤")
+	}
 }
 
 /* ==========================================================================

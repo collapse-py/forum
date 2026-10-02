@@ -401,7 +401,8 @@ func (s *Server) loadAdminForumPostsByIDs(ctx context.Context, ids []int64) ([]a
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, author_email, content, created_at, image_url,
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = forum_posts.id),
-		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id)
+		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id),
+		       pinned
 		FROM forum_posts WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -415,9 +416,15 @@ func (s *Server) loadAdminForumPostsByIDs(ctx context.Context, ids []int64) ([]a
 	indexOf := make(map[int64]int, len(ids))
 	for rows.Next() {
 		var item adminForumPost
-		if err := rows.Scan(&item.ID, &item.AuthorEmail, &item.Content, &item.CreatedAt, &item.ImageURL, &item.LikeCount, &item.CommentCount); err != nil {
+		// pinned 必須與 listAdminForumPosts 的查詢一起帶：後臺搜尋結果也是
+		// adminForumPost，兩邊的欄位若不一致，前端的 togglePin 在其中一條路徑
+		// 上就會拿到 undefined 而永遠送 {pinned: true}（見 adminForumPost 的說明）。
+		var pinned int
+		if err := rows.Scan(&item.ID, &item.AuthorEmail, &item.Content, &item.CreatedAt, &item.ImageURL,
+			&item.LikeCount, &item.CommentCount, &pinned); err != nil {
 			return nil, err
 		}
+		item.Pinned = pinned == 1
 		indexOf[item.ID] = len(ordered)
 		ordered = append(ordered, item)
 	}
@@ -470,15 +477,23 @@ func (s *Server) esEnabled() bool {
 // 才有這篇」，把它升級成請求失敗只會讓一個輔助功能反過來擋住使用者發文。
 // 補救手段是啟動時的全量重建（RebuildSearchIndex）。
 //
-// 呼叫端不需要處理錯誤，也不需要知道 ES 是否啟用。
-func (s *Server) indexForumPost(ctx context.Context, id int64, content, authorEmail string, createdAt time.Time) {
+// 刻意**回傳錯誤**而不是像多數輔助函式那樣吞掉：呼叫端（都是後臺寫入路徑）
+// 已經在 Commit 之後，無法再讓操作失敗，但它仍然可以記一筆稽核說「這次的索引
+// 同步失敗了」。吞掉錯誤的話，稽核紀錄會宣稱一次完整成功的刪文，而搜尋結果裡
+// 留著點進去是 404 的幽靈貼文 —— 而稽核紀錄正是這個專案用來回答「使用者看到
+// 的是什麼」的依據。回傳錯誤不影響呼叫端「不讓請求失敗」的決定。
+//
+// ES 未啟用時回 nil（不是錯誤）：沒有搜尋功能的情況下沒有東西需要同步。
+func (s *Server) indexForumPost(ctx context.Context, id int64, content, authorEmail string, createdAt time.Time) error {
 	if !s.esEnabled() {
-		return
+		return nil
 	}
 	doc := es.PostDocument{ID: id, Content: content, AuthorEmail: authorEmail, CreatedAt: createdAt}
 	if err := s.es.IndexPost(ctx, doc); err != nil {
 		logger.WarnfContext(ctx, "[SEARCH] 索引貼文失敗 post_id=%d: %v", id, err)
+		return err
 	}
+	return nil
 }
 
 // reindexForumPostByID 依 id 回讀貼文並重建其索引文件。
@@ -487,11 +502,12 @@ func (s *Server) indexForumPost(ctx context.Context, id int64, content, authorEm
 // 文件還有 authorEmail 與 createdAt（後臺以作者精確比對、同分時以時間排序）。
 // 只把改動的欄位送進索引會把未帶到的欄位清成零值，因此一律回讀整列。
 //
-// 貼文已不存在（sql.ErrNoRows）或 ES 未啟用時靜默返回：刪除路徑已經會呼叫
-// unindexForumPost，這裡再補一次刪除語意是合理的冪等行為。
-func (s *Server) reindexForumPostByID(ctx context.Context, id int64) {
+// 貼文已不存在（sql.ErrNoRows）時改為呼叫 unindexForumPost：刪除路徑已經會呼叫
+// unindexForumPost，這裡再補一次刪除語意是合理的冪等行為，而它失敗也要回報 ——
+// 否則呼叫端會以為「重新索引」成功了，實際上索引裡還留著幽靈貼文。
+func (s *Server) reindexForumPostByID(ctx context.Context, id int64) error {
 	if !s.esEnabled() {
-		return
+		return nil
 	}
 	var doc es.PostDocument
 	var authorEmail string
@@ -501,30 +517,34 @@ func (s *Server) reindexForumPostByID(ctx context.Context, id int64) {
 		`SELECT id, author_email, content, created_at FROM forum_posts WHERE id = ?`, id).
 		Scan(&doc.ID, &authorEmail, &doc.Content, &doc.CreatedAt)
 	if err == sql.ErrNoRows {
-		s.unindexForumPost(ctx, id)
-		return
+		return s.unindexForumPost(ctx, id)
 	}
 	if err != nil {
 		logger.WarnfContext(ctx, "[SEARCH] 讀取貼文以更新索引失敗 post_id=%d: %v", id, err)
-		return
+		return err
 	}
 	doc.AuthorEmail = authorEmail
 	if err := s.es.IndexPost(ctx, doc); err != nil {
 		logger.WarnfContext(ctx, "[SEARCH] 更新貼文索引失敗 post_id=%d: %v", id, err)
+		return err
 	}
+	return nil
 }
 
 // unindexForumPost 在貼文被刪除後移除其 ES 文件。
 //
 // 這一點對「通過（刪文）」的檢舉流程特別重要：該功能會留下檢舉紀錄，
 // 而刪文後如果索引沒清掉，搜尋結果就會出現一個點進去是 404 的幽靈貼文。
-func (s *Server) unindexForumPost(ctx context.Context, id int64) {
+// 正因如此它回傳錯誤，讓後臺的刪文路徑能把「索引沒清掉」記進稽核紀錄。
+func (s *Server) unindexForumPost(ctx context.Context, id int64) error {
 	if !s.esEnabled() {
-		return
+		return nil
 	}
 	if err := s.es.DeletePost(ctx, id); err != nil {
 		logger.WarnfContext(ctx, "[SEARCH] 移除貼文索引失敗 post_id=%d: %v", id, err)
+		return err
 	}
+	return nil
 }
 
 // RebuildSearchIndex 從 MySQL 全量重建貼文索引，回傳送出的文件筆數。

@@ -636,8 +636,11 @@ func MigrateMySQL(db *sql.DB) error {
 	//     但它被 WHERE created_at >= ? 限制在 30 天內，且論壇的文章總量本來
 	//     就遠小於使用者數的成長速度。為了一條有界的查詢在「最熱的表」上
 	//     加索引，是把成本放在每次發文而不是偶爾開一次後臺 —— 取捨不划算。
-	//     同一個理由也讓我沒有為 forum_post_likes.created_at 加索引（那條
-	//     查詢根本沒用到它）。
+	//     同一個理由也讓我沒有為 forum_post_likes.created_at 加索引 —— 但這條
+	//     結論後來被推翻了：/admin/stats 的「視窗內按讚合計」
+	//     （SELECT COUNT(*) FROM forum_post_likes WHERE created_at >= ?）確實
+	//     用到它，而它並不屬於「最近 30 天」的量，會隨**全站累積按讚數**成長。
+	//     該索引已在第 27 步補上，這裡保留原始推理作為「前提被推翻」的紀錄。
 	//
 	//     探測寫法照第 17、20、21 步：MySQL 沒有「ADD INDEX IF NOT EXISTS」，
 	//     重複執行同一句會得到 Error 1061（重複的 key 名稱），而整個
@@ -730,6 +733,71 @@ func MigrateMySQL(db *sql.DB) error {
 		`); err != nil {
 			return err
 		}
+	}
+
+	// 27) 補上被新查詢推翻的「刻意不加」判斷（修正第 24 步的結論）。
+	//
+	//     第 24 步當時的推理是對的，但前提被這批變更改變了 —— 索引的理由從
+	//     「現在沒有查詢會用到它」變成「有查詢會用到它」，所以必須補：
+	//
+	//     a) forum_post_comments.author_email 與 **forum_posts.author_email**
+	//        兩張表各有一條以 author_email 為條件的查詢退化成全表掃描：
+	//        使用者 CSV 匯出（httpapi/csv_export.go 的預先聚合衍生表）
+	//        與熱門作者排行（stats_handlers.go）都要對「每個作者算一次」，
+	//        因此前者是「每一列輸出一掃」、後者是「整張留言表掃一次」。
+	//        csvExportMaxRows 只限制回傳列數，**不限制衍生表讀取的列數**，
+	//        因此症狀是「留言數萬後按一次匯出就轉圈到逾時」。
+	//
+	//        刻意把兩個 author_email 索引寫在一起：只補留言那一半會讓
+	//        註解與呼叫端（csv_export.go、stats_handlers.go 的說明）
+	//        宣稱「已修好」，而實際上文章表仍然每次掃全表 —— 註解與
+	//        實作不符會讓後人不再往下追。
+	//
+	//     b) forum_post_likes.created_at
+	//        第 24 步的註解說「那條查詢根本沒用到它」，但
+	//        /admin/stats 的「視窗內按讚合計」（SELECT COUNT(*) ...
+	//        WHERE created_at >= ?）確實用到 —— 它是那支端點裡唯一一個
+	//        沒有可用索引的子查詢，成本隨**全站累積按讚數**（而非最近 N 天）
+	//        成長。
+	//
+	//     探測寫法照第 17、20、21、24、26 步：MySQL 沒有 ADD INDEX IF NOT EXISTS，
+	//     重複執行會得到 Error 1061 而讓整個 MigrateMySQL 失敗（主流程 Fatal）。
+	//
+	//     注意 b) 的索引成本：每新增一筆按讚多寫一個 B-tree 節點。按讚是
+	//     這個站最熱的寫入，但它的寫入量遠小於 forum_request_metrics 那類
+	//     分鐘彙總的寫入量，所以這個取捨仍然划算。
+	//
+	//     a) 的兩個索引成本同理但更低：forum_posts 的寫入量遠低於按讚，
+	//     而 author_email 是單欄索引（B-tree 節點數 = 該欄相異值數 × 深度），
+	//     不隨該作者的貼文數成長。
+	addIndexIfMissing := func(table, index, columns string) error {
+		var count int
+		if err := db.QueryRow(`
+			SELECT COUNT(*) FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+		`, table, index).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+		_, err := db.Exec("ALTER TABLE " + table + " ADD INDEX " + index + " (" + columns + ")")
+		return err
+	}
+	if err := addIndexIfMissing("forum_post_comments",
+		"idx_forum_post_comments_author_email", "author_email"); err != nil {
+		return err
+	}
+	// 保留既有的 idx_forum_posts_created_at（搜尋結果、profile 貼文列表與
+	// 管理端的多處查詢只按 created_at 排序），這一個是為了 author_email
+	// 等值查詢而存在 —— 兩者服務不同的存取樣式，不是同一件事的兩種寫法。
+	if err := addIndexIfMissing("forum_posts",
+		"idx_forum_posts_author_email", "author_email"); err != nil {
+		return err
+	}
+	if err := addIndexIfMissing("forum_post_likes",
+		"idx_forum_post_likes_created_at", "created_at"); err != nil {
+		return err
 	}
 
 	return nil

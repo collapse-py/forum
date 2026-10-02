@@ -39,6 +39,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -84,6 +85,13 @@ type Server struct {
 	// 允許為 nil（測試以 struct literal 構造 Server、或 Redis 未設定時）；
 	// 兩種情況下 withBlocklistHandler 都會直接放行。
 	blocks *ipban.Store
+	// trustedProxies 是可信任反向代理的位址段（TRUSTED_PROXY_CIDRS），
+	// 決定要不要採信 X-Forwarded-For / X-Real-IP。信任模型與取捨見
+	// httpapi/trustedproxy.go 的檔頭。
+	//
+	// 允許為 nil：nil 與「未設定」語意相同（退回標頭優先的舊行為），因此
+	// 測試以 struct literal 構造 Server 時不需要填它。
+	trustedProxies *trustedProxySet
 }
 
 // NewServer 以依賴注入的方式組裝 Server。cfg、db、sessions、redisClient 都由
@@ -92,6 +100,10 @@ type Server struct {
 // StartRateLimitCleanup 啟動，刻意不藏在建構子裡，讓「何時開始有背景工作」
 // 是一個明確的決定。Handler() 每次呼叫都會重新建立一份 ServeMux，因此可
 // 安全地重複呼叫，但實務上只在 main 呼叫一次。
+//
+// 唯一的副作用是一次性日誌：信任模型的安全後果必須在**啟動時**就看得到，而不
+// 是等管理員恰好打開監控頁（見 logTrustedProxyMode）。它沒有啟動 goroutine，
+// 因此與上面的分工並不衝突。
 //
 // es.Client 刻意不當成參數：它只是 cfg.ESURL 與 cfg.ESIndex 兩個字串的
 // 組裝結果，沒有連線要在這裡建立（es.Client 內部是 http.Client，沒有
@@ -114,6 +126,10 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 		// 封鎖名單與 session 與媒體 token 共用同一個 Redis 實例（同一條連線
 		// 池），因此這裡不另外建構連線。
 		blocks: ipban.New(redisClient),
+		// 信任模型在這裡一次解析完（之後不可變，因此讀取無需鎖）：所有需要
+		// 「這次請求來自哪裡」的地方共用同一份判斷，讓限流、封鎖與稽核紀錄
+		// 不可能對同一個請求得出不同的答案。
+		trustedProxies: parseTrustedProxyCIDRs(cfg.TrustedProxyCIDRs),
 		metrics: metrics.New(metrics.Options{
 			// 記憶體視窗刻意比資料庫保留期長：頁面重整時看到的是「自上次
 			// 重新整理以來」的完整曲線，而不是只有最後 24 分鐘。時間軸的實際
@@ -122,10 +138,55 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 			MaxRoutes:     200,
 		}),
 	}
+	// 限流器的分攤鍵來源接到 Server 的信任模型上。刻意在這裡接而不是讓
+	// RateLimiter 自己去讀設定：限流器不該知道設定檔的存在。
+	for _, limiter := range []*RateLimiter{srv.writeRateLimiter, srv.uploadRateLimiter, srv.authRateLimiter} {
+		if limiter != nil {
+			limiter.SetIPResolver(srv.clientIP)
+		}
+	}
 	if cfg.ESURL != "" {
 		srv.es = es.New(cfg.ESURL, cfg.ESIndex)
 	}
+	srv.logTrustedProxyMode()
 	return srv
+}
+
+// logTrustedProxyMode 在啟動時把「來源 IP 的信任模型」寫進日誌。
+//
+// 為什麼不能只靠監控頁：未設定 TRUSTED_PROXY_CIDRS 時程式採信使用者可控的
+// X-Forwarded-For，因此限流、IP 封鎖與稽核紀錄的來源位址三者同時可被單一
+// 標頭繞過。這個狀態若只在管理員恰好打開監控頁時才看得見，就等於把它留在
+// 「管理員剛好知道要去看」的位置 —— 而啟動日誌是每個部署都一定會看的東西。
+//
+// 兩種「設定寫錯」分開報，嚴重程度不同：
+//
+//   - 宣告了卻一筆都用不了 → Error。那是設定寫錯，不是部署選擇。
+//   - 部分項目寫錯 → Warn，並逐項列出寫錯的值。「部分寫錯」比較容易被忽略：
+//     畫面看起來完全正常，只有那幾條位址段永遠不會被採信。
+//
+// 完全沒宣告 → Warn。這是相容性模式的刻意選擇，但後果仍然必須讓維運知道。
+//
+// 訊息裡一律寫出**後果**而不只是 key 名：讀日誌的維運不該還要去查設定檔才
+// 知道這個警告代表什麼。
+//
+// 這是啟動時的一次性診斷，因此刻意放在 NewServer 而不是 Handler()：後者每次
+// 呼叫都會重新註冊路由，放在那裡會讓同一段警告寫出無數次。
+func (s *Server) logTrustedProxyMode() {
+	report := s.trustReport()
+	if report.Mode == "trusted-proxies" {
+		if len(report.Invalid) > 0 {
+			logger.Warnf("[TRUSTED-PROXY] TRUSTED_PROXY_CIDRS 有 %d 項無法解析（%s）；這些位址段的轉送標頭永遠不會被採信，來自它們的請求會以連線對端分桶，也就是共用同一組限流額度與封鎖查詢。",
+				len(report.Invalid), strings.Join(report.Invalid, "、"))
+		}
+		return
+	}
+	if report.Declared != "" {
+		logger.Errorf("[TRUSTED-PROXY] 宣告了 TRUSTED_PROXY_CIDRS（%s）但沒有任何一項能解析成位址段，因此限流與 IP 封鎖仍可被使用者自送的 X-Forwarded-For 繞過，稽核紀錄的來源位址也不可當成證據。",
+			report.Declared)
+		return
+	}
+	logger.Warnf("[TRUSTED-PROXY] 未設定 TRUSTED_PROXY_CIDRS：程式採信 X-Forwarded-For 最左項。若本站前面沒有會覆寫該標頭且使用者無法繞過的代理，限流與 IP 封鎖都可被單一偽造標頭繞過，稽核紀錄的來源位址也不可當成證據。")
 }
 
 // Metrics 回傳監控統計容器，供 main 啟動持久化 goroutine 與讀回歷史。
@@ -222,12 +283,12 @@ func (s *Server) applyRateLimit(limiter *RateLimiter, next http.HandlerFunc, ski
 		return next
 	}
 	if !skipGet {
-		return withBlocklistHandler(limiter, s.blocks, next)
+		return s.withBlocklistHandler(limiter, s.blocks, next)
 	}
 	// 走 limiter.Middleware 的完整流程（含 Retry-After 與 429），
 	// 因此包一層只做方法判斷，而不是自己呼叫 Allow —— 那樣會漏掉
 	// Retry-After 的計算與取整。
-	limited := withBlocklistHandler(limiter, s.blocks, next)
+	limited := s.withBlocklistHandler(limiter, s.blocks, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			next(w, r)
@@ -573,8 +634,6 @@ func (s *Server) Handler() http.Handler {
 	// 強制登出」的那一刻把後臺打不開。
 	mux.HandleFunc("/api/admin/sessions", s.handleAdminSessions)
 	mux.HandleFunc("/api/admin/sessions/revoke", s.handleAdminRevokeSessions)
-	// IP 封鎖名單。刻意**不**掛在 rateLimitAllMethods 下：那會讓管理員在
-	// 處理一個正在發生的濫用時被自己正在用的功能擋住。
 	// 站內公告。公開的那一支刻意放在 /api/forum/ 下（與其他公開讀取同一個
 	// 命名空間），而且**不掛限流**：它是每個頁面載入都會打一次的低成本查詢，
 	// 限流它的唯一效果是「公告機制壞掉時連診斷都做不了」。

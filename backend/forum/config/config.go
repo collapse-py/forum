@@ -152,12 +152,19 @@ import (
 // forum_posts；它必須與 ES 上既有的其他索引（例如舊功能的 history_posts）
 // 不同名，否則兩種資料會混在同一个索引裡互相覆蓋。
 type Config struct {
-	CookieName               string        // COOKIE_NAME
-	SessionExpire            time.Duration // SESSION_EXPIRE_HOURS（設定檔單位：小時）
-	CookieSecure             bool          // COOKIE_SECURE
-	ServerPort               string        // SERVER_PORT（net/http 的 "host:port" 形式）
-	PublicBaseURL            string        // PUBLIC_BASE_URL
-	TrustedOrigins           []string      // TRUSTED_ORIGINS（逗號分隔）
+	CookieName     string        // COOKIE_NAME
+	SessionExpire  time.Duration // SESSION_EXPIRE_HOURS（設定檔單位：小時）
+	CookieSecure   bool          // COOKIE_SECURE
+	ServerPort     string        // SERVER_PORT（net/http 的 "host:port" 形式）
+	PublicBaseURL  string        // PUBLIC_BASE_URL
+	TrustedOrigins []string      // TRUSTED_ORIGINS（逗號分隔）
+	// TrustedProxyCIDRs 是可信任反向代理的位址段（TRUSTED_PROXY_CIDRS，逗號分隔，
+	// 每一項可以是 "IP/遮罩" 或裸 IP）。只有 TCP 對端落在這個白名單裡時，
+	// 程式才會採信 X-Forwarded-For / X-Real-IP；否則一律以 RemoteAddr 為準。
+	// 留空（預設）等於維持舊的「標頭優先」行為 —— 那在本站確實被一道會覆寫
+	// 這些標頭的代理擋在後面時是正確的，否則限流與 IP 封鎖都可被單一偽造標頭
+	// 繞過。完整的取捨見 httpapi/trustedproxy.go 的檔頭。
+	TrustedProxyCIDRs        string
 	RateLimitRequests        int           // RATE_LIMIT_REQUESTS
 	RateLimitWindow          time.Duration // RATE_LIMIT_WINDOW_SECONDS（設定檔單位：秒）
 	RateLimitUploadRequests  int           // RATE_LIMIT_UPLOAD_REQUESTS
@@ -271,6 +278,12 @@ func Load(path string) (Config, error) {
 			cfg.PublicBaseURL = strings.TrimRight(val, "/")
 		case "TRUSTED_ORIGINS":
 			cfg.TrustedOrigins = parseList(val)
+		case "TRUSTED_PROXY_CIDRS":
+			// 原樣保留逗號分隔字串：解析成位址段是 httpapi 的責任（它才是
+			// 決定「這個值該不該被採信」的地方），而在此處解析會讓 config
+			// 依賴 net 套件並且無法區分「寫錯了」與「沒設定」——
+			// 那兩者對管理員的意義完全不同。
+			cfg.TrustedProxyCIDRs = val
 		case "RATE_LIMIT_REQUESTS":
 			// 只接受正數；其他一律保留開頭預先寫入的預設值。
 			if limit, ok := parsePositiveInt(val); ok {

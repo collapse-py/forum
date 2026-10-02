@@ -435,6 +435,14 @@ export const zhTW = {
   'monitor.sourcePeer': '連線對端',
   'monitor.sourceXff': 'X-Forwarded-For',
   'monitor.sourceRealIp': 'X-Real-IP',
+  'monitor.trustLegacy':
+    '未設定 TRUSTED_PROXY_CIDRS：程式沿用「X-Forwarded-For 最左項優先」的舊行為。在確認前面確實有一道會覆寫這些標頭的代理、且使用者無法繞過它直連之前，限流與 IP 封鎖都可以被單一偽造標頭繞過，稽核紀錄的來源位址也不宜當成證據。',
+  'monitor.trustConfigured':
+    '已設定可信代理：只有連線對端落在下列位址段時才採信 X-Forwarded-For／X-Real-IP，其餘一律以連線對端為準。目前生效：{cidrs}。',
+  'monitor.trustBroken':
+    '宣告了 TRUSTED_PROXY_CIDRS，但沒有任何一項能被解析成位址段（{declared}），因此實際上仍在使用未設定時的舊行為。',
+  'monitor.trustPartial':
+    'TRUSTED_PROXY_CIDRS 有下列項目無法解析成位址段（{invalid}），因此它們的轉送標頭永遠不會被採信。來自這些位址段的請求會以連線對端的位址分桶，也就是共用同一組限流額度與封鎖查詢。',
   'monitor.blockTitle': '封鎖 {ip}',
   'monitor.blockMessage':
     '這個位址的寫入型請求（發文、留言、按讚、檢舉、上傳圖片、登入跳轉）會被拒絕 {duration}，閱讀不受影響。確定要封嗎？',

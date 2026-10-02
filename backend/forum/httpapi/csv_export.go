@@ -44,6 +44,7 @@ CSV 注入是什麼，以及這個專案面對的具體風險
 */
 
 import (
+	"database/sql"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -105,7 +106,8 @@ func sanitizeCSVField(value string) string {
 // 為什麼在這裡（而不是在呼叫端）呼叫 Flush：flush 會送出 HTTP 標頭。一旦
 // 標頭送出，這支 handler 就不能把失敗改寫成 500 —— 而查詢已經在寫第一列
 // 之前就跑完了。這個「提交點」因此必須在確認查詢成功之後，由同一個函式
-// 統一處理，避免某個呼叫端忘了它。
+// 統一處理，避免某個呼叫端忘了它。收尾（Flush + 檢查寫出錯誤）由
+// finishCSV 同樣統一，三份匯出都不必自己記得。
 func writeCSVHeader(w http.ResponseWriter, filename string) *csv.Writer {
 	// Content-Disposition 的 filename 用引號包住，否則瀏覽器會把檔名截斷
 	// 在第一個空白或分號。檔名本身是程式寫死的常數（不是使用者輸入），
@@ -140,7 +142,32 @@ func writeCSVRow(writer *csv.Writer, cells []string) {
 	for i, cell := range cells {
 		sanitized[i] = sanitizeCSVField(cell)
 	}
+	// 寫入錯誤**不能**在這裡回報：csv.Writer 會把它存起來，等 Flush 之後由
+	// writer.Error() 交出（見 finishCSV）。在這裡 log 會記到一個還沒被
+	// 提交到 socket 的錯誤 —— 例如某列格式錯誤 —— 而真正讓下載中斷的是
+	// Flush 時的 I/O 錯誤，那才是管理員會遇到的那一個。
 	_ = writer.Write(sanitized)
+}
+
+// finishCSV 收尾：Flush 之後檢查 writer.Error()。
+//
+// 為什麼一定要檢查：客戶端中途斷線（或磁碟寫滿）會讓 Flush 回錯，而
+// csv.Writer 把錯誤存起來、不讓呼叫端從 Flush 的回傳值看到。沒有這一段，
+// 管理員會拿到一份**被截斷的 CSV**、HTTP 200、而且沒有任何一行日誌 —— 而這個
+// 端點存在的理由就是「對帳」（見 csvExportMaxRows 的說明：到上限時不報錯，
+// 但頁面必須寫出上限讓管理者知道匯出檔不是完整的資料集）。靜默的 I/O 截斷
+// 讓對帳同樣無法進行。
+//
+// 回應已經在 writeCSVHeader 送出，這裡只能記錄 —— 改寫成 500 是不可能的
+// （見 writeCSVHeader 的「提交點」說明）。因此 log 是這裡唯一能做的，而它
+// 必須寫清楚「檔案可能不完整」，因為讀到 log 的維運需要知道該提醒誰。
+func finishCSV(r *http.Request, writer *csv.Writer) {
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		// 不寫 IP：它來自使用者可控的來源（見 httpapi/trustedproxy.go），
+		// 而 log 的讀取範圍通常比資料庫寬。錯誤本身也不含它。
+		logger.WarnfContext(r.Context(), "[EXPORT] 寫出失敗（檔案可能不完整，請重試）: %v", err)
+	}
 }
 
 // itoa 是 strconv.Itoa 的本地別名。
@@ -153,6 +180,25 @@ func writeCSVRow(writer *csv.Writer, cells []string) {
 // 負數。匯出的數值欄位都是計數（非負），所以這個情況實際上不會出現。
 func itoa(n int) string {
 	return strconv.Itoa(n)
+}
+
+// csvTimeLayout 是匯出檔裡時間欄位的格式。
+//
+// 與另外兩份匯出刻意一致：那兩份的時間欄位是靠 database/sql 的
+// time.Time → *string 路徑拿到 RFC3339，而三份匯出同一語意的欄位格式不同
+// 本身就是對帳時的混淆來源（管理員會以為某一欄「格式壞了」）。
+const csvTimeLayout = time.RFC3339
+
+// formatCSVTime 把可空時間轉成匯出用的字串；NULL → 空字串。
+//
+// 存在的理由是讓「NULL 處理」永遠在 Go 端完成，而不是散落在各支查詢的
+// COALESCE 裡（見 handleAdminExportReports 的說明：在 SQL 裡把 DATETIME
+// 與字串常值 COALESCE 起來是型別混合，parseTime=True 之下會讓整份匯出回 500）。
+func formatCSVTime(value sql.NullTime) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.Time.Format(csvTimeLayout)
 }
 
 /* ==========================================================================
@@ -176,11 +222,28 @@ func (s *Server) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) 
 
 	// 匯出需要跑在標頭送出之前：一旦 writeCSVHeader 提交了標頭，後續的
 	// 查詢錯誤就無法改寫成 500。因此先取資料、再開頭。
+	//
+	// 為什麼是「預先聚合的衍生表」而不是相關子查詢：
+	// 相關子查詢 (SELECT COUNT(*) FROM forum_post_comments WHERE
+	// author_email = u.email) 會對**每一列輸出的使用者**重掃一次留言表。
+	// csvExportMaxRows 只限制回傳列數，不限制子查詢讀取的列數，因此留言累積
+	// 到數萬筆時，按一次匯出就是數萬次全表掃描 —— 症狀是「轉圈很久然後逾時」，
+	// 而且這條路由刻意不掛限流。
+	// 衍生表讓留言表只被掃一次（走 idx_forum_post_comments_author_email）、
+	// 文章表也只被掃一次（走 idx_forum_posts_author_email），兩者都是遷移
+	// 第 27 步補的索引，再與使用者列表做 hash join。
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT u.email, u.status, u.created_at, u.updated_at,
-		       (SELECT COUNT(*) FROM forum_posts WHERE author_email = u.email),
-		       (SELECT COUNT(*) FROM forum_post_comments WHERE author_email = u.email)
+		       COALESCE(pc.posts, 0), COALESCE(cc.comments, 0)
 		FROM forum_users u
+		LEFT JOIN (
+			SELECT author_email, COUNT(*) AS posts
+			FROM forum_posts GROUP BY author_email
+		) pc ON pc.author_email = u.email
+		LEFT JOIN (
+			SELECT author_email, COUNT(*) AS comments
+			FROM forum_post_comments GROUP BY author_email
+		) cc ON cc.author_email = u.email
 		ORDER BY u.email ASC
 		LIMIT `+strconv.Itoa(csvExportMaxRows))
 	if err != nil {
@@ -214,7 +277,7 @@ func (s *Server) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) 
 		writeCSVRow(writer, []string{item.email, item.status, item.created, item.updated,
 			itoa(item.posts), itoa(item.comments)})
 	}
-	writer.Flush()
+	finishCSV(r, writer)
 }
 
 // handleAdminExportPosts 匯出文章清單。
@@ -275,7 +338,7 @@ func (s *Server) handleAdminExportPosts(w http.ResponseWriter, r *http.Request) 
 		writeCSVRow(writer, []string{strconv.FormatInt(item.id, 10), item.author, item.content,
 			item.created, itoa(item.comments), itoa(item.likes)})
 	}
-	writer.Flush()
+	finishCSV(r, writer)
 }
 
 // handleAdminExportReports 匯出檢舉工單。
@@ -294,9 +357,20 @@ func (s *Server) handleAdminExportReports(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// reviewed_at 掃成可空時間，NULL 處理放在 Go 端，而不是寫成
+	// COALESCE(reviewed_at, '')。
+	//
+	// 為什麼：reviewed_at 是 DATETIME NULL，而 '' 是字串常值，COALESCE 必須
+	// 對兩個型別做聚合。DSN 帶 parseTime=True，若 MySQL 把結果解析成
+	// MYSQL_TYPE_DATETIME，driver 會走日期解析分支並對空字串呼叫
+	// parseDateTime 而失敗。因為 database/sql 只 prepare 一次、欄位型別對
+	// 整個 result set 固定下來，**只要有一列 PENDING 檢舉就會讓整份
+	// reports.csv 回 500** —— 而每一筆新檢舉都是從 PENDING 開始的。
+	//
+	// 這不是邊緣情況，也不該靠「MySQL 8.0 剛好會選哪一邊」賭。
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, target_type, target_id, reporter_email, reason, status,
-		       created_at, COALESCE(reviewed_at, ''), reviewed_by
+		       created_at, reviewed_at, reviewed_by
 		FROM forum_reports
 		ORDER BY id DESC
 		LIMIT `+strconv.Itoa(csvExportMaxRows))
@@ -314,11 +388,20 @@ func (s *Server) handleAdminExportReports(w http.ResponseWriter, r *http.Request
 	data := make([]row, 0, 128)
 	for rows.Next() {
 		var item row
+		var reviewedAt sql.NullTime
 		if err := rows.Scan(&item.id, &item.targetType, &item.targetID, &item.reporter,
-			&item.reason, &item.status, &item.created, &item.reviewedAt, &item.reviewedBy); err != nil {
+			&item.reason, &item.status, &item.created, &reviewedAt, &item.reviewedBy); err != nil {
 			internalError(w, "unable to export reports")
 			return
 		}
+		// 尚未覆核 → 空字串。這與 reviewed_by 的「未覆核是空字串」一致，
+		// 讓匯出檔可以用「這個欄位是空的」判斷「還沒有人處理」。
+		//
+		// 順帶解決原本的格式不一致：另外兩份匯出的時間欄位是靠
+		// database/sql 的 time.Time → *string 路徑拿到 RFC3339，而這裡若是
+		// COALESCE 會是 SQL 字串格式 —— 三份匯出同一語意的欄位格式不同，
+		// 本身就是對帳時的混淆來源。
+		item.reviewedAt = formatCSVTime(reviewedAt)
 		data = append(data, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -333,7 +416,7 @@ func (s *Server) handleAdminExportReports(w http.ResponseWriter, r *http.Request
 		writeCSVRow(writer, []string{item.id, item.targetType, item.targetID, item.reporter,
 			item.reason, item.status, item.created, item.reviewedAt, item.reviewedBy})
 	}
-	writer.Flush()
+	finishCSV(r, writer)
 }
 
 // csvExportMaxRows 限制單次匯出的列數。
@@ -341,10 +424,14 @@ func (s *Server) handleAdminExportReports(w http.ResponseWriter, r *http.Request
 // 上限存在的理由是三個測試，都不愉快：
 //   - 記憶體：匯出的查詢結果在寫出前會全部收在切片裡（串流只省掉 CSV 本身，
 //     不省掉查詢結果），因此上限同時限制了記憶體。
-//   - 時間：沒有 ORDER BY + LIMIT 的全表掃描在資料量大時會讓這個請求
-//     掛很久，而它是一個 GET —— 使用者會以為伺服器死了。
+//   - 時間：聚合衍生表必須把整張留言／文章表各掃一次（這是「全部列」而不是
+//     「最近 N 天」，見 handleAdminExportUsers 的說明），加上回傳列數沒有上限
+//     時會讓這個 GET 掛很久而使用者以為伺服器死了。
 //   - 對帳：超過十萬列的匯出沒有人會在試算表裡逐列比對；那種需求應該是
 //     「篩選後匯出」，而不是「全部匯出」。
+//
+// 這個上限**不是**效能的保證：它只限制回傳與記憶體，聚合的成本與資料表總量
+// 成正比。那部分由索引（遷移第 27 步的 author_email）負責。
 //
 // 到達上限時**不報錯也不警告**：這個端點是串流的，寫到一半就插入一行
 // 「已達上限」會讓 CSV 的欄位數不一致，那比靜默截斷更糟。但頁面上必須寫出

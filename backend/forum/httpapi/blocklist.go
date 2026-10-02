@@ -86,8 +86,11 @@ func logBlocklistRecovered() {
 // 兩者的順序不可交換：先查封鎖（一次 Redis 往返，且被封鎖時直接回 403）再查
 // 限流（記憶體）。反過來的話，被封鎖的 IP 會先累積限流計數，而那個計數會
 // 在解除封鎖之後仍然生效 —— 一個沒有管理員動作卻持續存在的隱藏狀態。
-func withBlocklistHandler(rl *RateLimiter, store *ipban.Store, next http.HandlerFunc) http.HandlerFunc {
+//
+// 是 Server 的方法而非自由函式，因為封鎖查詢需要信任模型（TRUSTED_PROXY_CIDRS）。
+func (s *Server) withBlocklistHandler(rl *RateLimiter, store *ipban.Store, next http.HandlerFunc) http.HandlerFunc {
 	limited := rl.Middleware(next)
+	proxies := s.trustedProxies
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			// 沒有封鎖名單（測試以 struct literal 構造 Server，或 Redis 未設定）。
@@ -95,8 +98,18 @@ func withBlocklistHandler(rl *RateLimiter, store *ipban.Store, next http.Handler
 			limited(w, r)
 			return
 		}
-		ip := clientIP(r)
-		banned, until, err := store.IsBanned(r.Context(), ip)
+		// 查**所有**候選位址，命中任何一個就算被封鎖。
+		//
+		// 為什麼不是只查一個：只查一個時，被封鎖者只要加上
+		// X-Forwarded-For: 1.2.3.4 就會拿到一份「乾淨」的查詢結果，封鎖
+		// 形同不存在 —— 那直接抵消了「封鎖在部署之後仍然有效」這個賣點。
+		// 候選清單同時包含解析出的用戶端位址與 TCP 對端（見
+		// clientIPCandidates），因此**不需要**管理員先設定
+		// TRUSTED_PROXY_CIDRS 就已經無法用偽造標頭解除封鎖。
+		//
+		// 候選通常只有一個（直接連線、或 XFF 與對端相同），那時仍然只是一次
+		// Redis 往返 —— 多層代理才會讓它變成兩次，而那正是它換來的可信度。
+		banned, until, err := s.isAnyCandidateBanned(r, store, proxies)
 		if err != nil {
 			logBlocklistFailure(err)
 			limited(w, r)
@@ -109,6 +122,23 @@ func withBlocklistHandler(rl *RateLimiter, store *ipban.Store, next http.Handler
 		}
 		limited(w, r)
 	}
+}
+
+// isAnyCandidateBanned 依序檢查每個候選位址是否在封鎖名單上。
+//
+// 遇到 Redis 錯誤立刻回傳（不繼續檢查剩餘的候選）：fail open 的政策由呼叫端
+// 依這個錯誤決定，而「查到一半失敗」與「第一次查就失敗」的處理方式應該一致。
+func (s *Server) isAnyCandidateBanned(r *http.Request, store *ipban.Store, proxies *trustedProxySet) (bool, time.Time, error) {
+	for _, ip := range clientIPCandidates(r, proxies) {
+		banned, until, err := store.IsBanned(r.Context(), ip)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if banned {
+			return true, until, nil
+		}
+	}
+	return false, time.Time{}, nil
 }
 
 // bannedRequestKey 是 metricsMiddleware 放進 context 的「本次請求擋下狀態」容器。

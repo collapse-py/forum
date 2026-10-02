@@ -71,7 +71,7 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 			d := time.Since(start)
 			status := rw.StatusCode()
 			s.metrics.Observe(r.Method, r.URL.Path, status, d)
-			ip, source := clientIPDetail(r)
+			ip, source := s.clientIPDetail(r)
 			marker, _ := r.Context().Value(bannedRequestKey{}).(*bannedMarker)
 			s.metrics.ObserveClient(ip, source, r.URL.Path, status, marker != nil && marker.blocked)
 		}()
@@ -158,6 +158,35 @@ type monitorPayload struct {
 	// 有辦法被解釋：管理員看到數字不更新時，可以先看這個值判斷是依賴卡住
 	// 還是頁面本身有問題。
 	ProbesMS float64 `json:"probesMs"`
+	// ClientIPTrust 說明「這次請求的來源 IP 是怎麼被判定出來的」。
+	//
+	// 它存在的理由不是好看：限流與 IP 封鎖都建立在那個判定上，而在未設定
+	// TRUSTED_PROXY_CIDRS 的部署裡，那個判定是「使用者自己送的標頭優先」。
+	// 把它放在儀表板上，管理員才看得出自己處在哪一種信任模型裡 —— 否則
+	// 「我的 IP 位置在監控頁上怎麼變來變去」與「我的封鎖怎麼失效了」是兩個
+	// 沒有任何提示的症狀。
+	ClientIPTrust clientIPTrust `json:"clientIpTrust"`
+}
+
+// clientIPTrust 是目前生效的可信任代理設定。
+type clientIPTrust struct {
+	// Mode 是 "trusted-proxies" 或 "legacy-headers"，對應介面上的兩種狀態。
+	Mode string `json:"mode"`
+	// Trusted 列出實際生效的位址段。宣告了但一筆都解析不出來時它會是空陣列，
+	// 而 Mode 會退回 legacy-headers —— 那個組合本身就是「設定寫錯了」的訊號。
+	Trusted []string `json:"trusted"`
+	// Declared 是設定檔原文。讓管理員看得到「我寫了什麼」與「程式認得什麼」
+	// 的落差，而不只是在結果上乾瞪眼。
+	Declared string `json:"declared"`
+	// Invalid 列出宣告了卻無法解析成位址段的項目。
+	//
+	// 它補的是「部分寫錯」這個盲點：只回 Mode 與 Trusted 時，一條打錯的
+	// 位址段（例如 172.17.0.0/16 少打一個字）會靜默地永遠不生效，而畫面
+	// 顯示的是一份看起來正常的白名單。症狀不是報錯，而是「那台代理的
+	// 轉送標頭從未被採信」——限流與封鎖的分桶鍵因此變成代理的位址。
+	// 宣告了但**全部**寫錯時它會列出全部項目，與 Declared 一起構成
+	// 「設定完全無效」這個狀態。
+	Invalid []string `json:"invalid"`
 }
 
 // handleAdminMonitor 回傳整份監控資料。
@@ -198,8 +227,36 @@ func (s *Server) handleAdminMonitor(w http.ResponseWriter, r *http.Request) {
 	// 把它排在最後可以讓它量到的是「含依賴探測」的較真實狀態，而不是量到
 	// 探測進行到一半的時間點。
 	payload.Stats = s.metrics.Snapshot(s.cfg.MonitorRetentionHours)
+	payload.ClientIPTrust = s.trustReport()
 
 	writeOK(w, payload)
+}
+
+// trustReport 把目前的信任模型整理成給監控頁顯示的樣子。
+//
+// 兩種「設定寫錯」要分開回報，因為它們的症狀不同：
+//
+//   - 宣告了但一筆都解析不出來：Mode 是 legacy-headers 而 Declared 非空。
+//     這個組合在舊的行為下完全不可見（症狀是限流與封鎖可被偽造標頭繞過，
+//     卻沒有任何一行 log）。
+//   - 部分解析失敗：Mode 是 trusted-proxies，而 Invalid 非空。若只回
+//     Mode 與 Trusted，那條寫錯的位址段會靜默地永遠不生效，而畫面看起來
+//     完全正常 —— 這是這一欄存在的理由（見 clientIPTrust.Invalid）。
+func (s *Server) trustReport() clientIPTrust {
+	report := clientIPTrust{Mode: "legacy-headers", Trusted: []string{}, Invalid: []string{}}
+	if s.trustedProxies == nil {
+		return report
+	}
+	report.Declared = s.trustedProxies.declared
+	report.Invalid = append(report.Invalid, s.trustedProxies.invalid...)
+	if !s.trustedProxies.configured {
+		return report
+	}
+	report.Mode = "trusted-proxies"
+	for _, network := range s.trustedProxies.nets {
+		report.Trusted = append(report.Trusted, network.String())
+	}
+	return report
 }
 
 // probeDependencies 並行探測三個外部依賴。
@@ -246,6 +303,17 @@ func (s *Server) probeDependencies(parent context.Context) map[string]dependency
 // 更有診斷價值：池滿時應用層不會看到錯誤，只會看到延遲上升，而 waitCount
 // 與 waitDuration 正是那個延遲的來源。
 func (s *Server) probeDatabase(parent context.Context) dependencyStatus {
+	// nil 防護與這個 handler 裡其他三個依賴一致（s.metrics、s.mediaRedis、
+	// s.es）。差異在於崩潰的後果：probeDependencies 是用 go func() 啟動這三個
+	// 探測，而 goroutine 裡的 panic **不會**被 net/http 的 per-connection
+	// recover 接住（那個只涵蓋 handler 本身的 goroutine）。因此少了這一段，
+	// 「資料庫沒接上」會讓整個行程崩潰，而不是回一個 dependencyStatus。
+	// 以目前的 main.go 不可達（OpenMySQL 失敗會直接 Fatal），但那正是未來
+	// 「監控要能在資料庫沒接上時仍然開得起來」會踩到的第一顆地雷。
+	if s.db == nil {
+		return dependencyStatus{State: "disabled", Detail: map[string]any{"engine": "none"}}
+	}
+
 	ctx, cancel := context.WithTimeout(parent, dependencyProbeTimeout)
 	defer cancel()
 

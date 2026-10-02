@@ -79,6 +79,15 @@ adminForumPost 是管理介面使用的文章視圖模型，JSON 欄位為 camel
 			同時被當成 Comments 的預估容量
 	Comments	該文章的所有留言（含完整內容），讓後台能在列表頁就地展開編輯／刪除。
 			為了這個需求不做留言分頁，代價是每頁每篇文章各多一次查詢
+	Pinned		是否置頂（forum_posts.pinned，遷移第 26 步新增）。
+
+			這個欄位**必須**由列表與後臺搜尋兩條查詢都回傳：前端
+			ForumAdminPage 的 togglePin 靠 item.pinned 決定「下一次按下去要做
+			什麼」，後端則用同樣的語意判定「狀態沒變就什麼都不做」。少了這個
+			欄位，前端會永遠送出 {pinned: true}，於是對一篇已置頂的文章按
+			「取消置頂」會得到 200 + 「置頂成功」而狀態完全沒變（後端判定
+			「已經是目標狀態」而直接回成功），稽核紀錄裡也不會有 post.unpin。
+			症狀是「以為改了但沒改」，比直接報錯更難察覺。
 */
 type adminForumPost struct {
 	ID           int64               `json:"id"`
@@ -89,6 +98,7 @@ type adminForumPost struct {
 	LikeCount    int                 `json:"likeCount"`
 	CommentCount int                 `json:"commentCount"`
 	Comments     []adminForumComment `json:"comments"`
+	Pinned       bool                `json:"pinned"`
 }
 
 /*
@@ -1018,7 +1028,8 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, author_email, content, created_at, image_url,
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = forum_posts.id),
-		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id)
+		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id),
+		       pinned
 		FROM forum_posts ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, pageSize, offset)
 	if err != nil {
 		internalError(w, "unable to load forum posts")
@@ -1035,11 +1046,14 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 	mediaToken := ""
 	for rows.Next() {
 		var item adminForumPost
-		// Scan 順序對應 SELECT 的六個欄位加上兩個子查詢結果。
-		if err := rows.Scan(&item.ID, &item.AuthorEmail, &item.Content, &item.CreatedAt, &item.ImageURL, &item.LikeCount, &item.CommentCount); err != nil {
+		// Scan 順序對應 SELECT 的六個欄位、兩個子查詢結果，最後是 pinned。
+		var pinned int
+		if err := rows.Scan(&item.ID, &item.AuthorEmail, &item.Content, &item.CreatedAt, &item.ImageURL,
+			&item.LikeCount, &item.CommentCount, &pinned); err != nil {
 			internalError(w, "unable to read forum posts")
 			return
 		}
+		item.Pinned = pinned == 1
 		// 先取出庫值（純檔名）：以它的正規化結果判斷要不要簽發 token，
 		// 舊資料若存的是無法辨識的值，就不會為了它白白打一次 Redis。
 		imageName := s.forumImageFileName(item.ImageURL)
@@ -1194,7 +1208,11 @@ func (s *Server) createAdminForumPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// 與一般使用者的發文路徑一樣，MySQL 寫入成功後才更新搜尋索引（best-effort）。
 	// 刻意放在 Commit 之後：索引是外部系統，這個交易只涵蓋 MySQL。
-	s.indexForumPost(r.Context(), id, req.Content, author, createdAt)
+	// 失敗時補記一筆稽核（此時交易已提交，不能也不該讓請求失敗 —— 見
+	// recordPostIndexFailure）。
+	if err := s.indexForumPost(r.Context(), id, req.Content, author, createdAt); err != nil {
+		s.recordPostIndexFailure(r, id, err)
+	}
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"ok": true, "id": id})
 }
 
@@ -1307,7 +1325,10 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		// 若在 Commit 之前呼叫而它失敗，索引會指向一筆被回滾的文章；反過來
 		// （先提交再索引）最壞是索引暫時過期，而 reindexForumPostByID 會在
 		// 下次讀取時以 id 為準修正。
-		s.reindexForumPostByID(r.Context(), id)
+		// 失敗時補記稽核的理由見 recordPostIndexFailure。
+		if err := s.reindexForumPostByID(r.Context(), id); err != nil {
+			s.recordPostIndexFailure(r, id, err)
+		}
 		writeOK(w, map[string]bool{"ok": true})
 	case http.MethodDelete:
 		// 單一 DELETE 即完成：留言與按讚沒有外鍵約束，不需要先刪子表（理由見上方說明）。
@@ -1356,7 +1377,13 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		}
 		// 一定要同步移除索引文件。檢舉的「通過（刪文）」走的正是這條路徑，
 		// 留下殘留文件的話，搜尋結果會出現點進去是 404 的幽靈貼文。
-		s.unindexForumPost(r.Context(), id)
+		//
+		// 失敗時補記稽核是這一條路徑特別重要的地方：稽核紀錄剛剛才完整地記下
+		// 「文章已刪除」，若索引沒清掉而沒有任何紀錄，兩邊就再也對不起來了
+		// （理由見 recordPostIndexFailure）。
+		if err := s.unindexForumPost(r.Context(), id); err != nil {
+			s.recordPostIndexFailure(r, id, err)
+		}
 		writeOK(w, map[string]bool{"ok": true})
 	default:
 		// 不可信來源已在前面被 403 擋下；走到這裡代表對方確實是管理員，

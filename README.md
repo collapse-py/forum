@@ -109,10 +109,17 @@ URL 裡都不會出現 email。管理員的身分不看資料庫角色表，只�
 | --- | --- | --- |
 | Go | 1.25+（files_server 需 1.26） | 必要 |
 | Node.js | 20+ | 建置前端時必要 |
-| MySQL | 8.x，建一個 `utf8mb4` 資料庫 | 必要（schema 自動建立） |
+| MySQL | **8.0.29+**，建一個 `utf8mb4` 資料庫 | 必要（schema 自動建立） |
 | Redis | 5+ | 必要（session 與 media token） |
 | Elasticsearch | 7.x / 8.x | 選用，留空則用 MySQL `LIKE` 搜尋 |
 | Google OAuth2 用戶端 | — | 登入與管理功能需要 |
+
+MySQL 的下限是 8.0.29 而不是籠統的「8.x」，因為 `MigrateMySQL` 用到
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` —— 這個語法在 8.0.29 之前不存在
+（8.0.29 之前只有 `CREATE TABLE IF NOT EXISTS` 與 `DROP COLUMN IF EXISTS`），
+而 `forum_posts.pinned` 正是這樣加上去的。在較舊的 8.0 上啟動會直接拿到
+`ERROR 1064 (42000): You have an error in your SQL syntax`，遷移回錯、
+`main` 呼叫 `Fatalf`，行程在啟動時就死。遞減索引（置頂那條）本身只要 8.0+。
 
 ---
 
@@ -144,6 +151,8 @@ FORUM_SHORT_NAME=SB
 SERVER_PORT=:8088
 PUBLIC_BASE_URL=http://localhost:8088
 TRUSTED_ORIGINS=http://localhost:8088
+# 只有在確實擋在一道反向代理後面時才填；見「來源 IP 的信任模型」
+TRUSTED_PROXY_CIDRS=
 
 DB_DSN=forum:forum_password@tcp(127.0.0.1:3306)/forum?charset=utf8mb4&parseTime=True&loc=Local
 REDIS_ADDR=127.0.0.1:6379
@@ -252,6 +261,7 @@ go build .
 | `SERVER_PORT` | `:8088` | `net/http` 的 `host:port` |
 | `PUBLIC_BASE_URL` | `http://localhost` + `SERVER_PORT` | 尾斜線會被自動去掉 |
 | `TRUSTED_ORIGINS` | `[PUBLIC_BASE_URL]` | CSRF 來源白名單。**留空等於關閉 CSRF 防護** |
+| `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。留空 = 舊的「標頭優先」行為（限流與封鎖可被偽造標頭繞過） |
 | `DB_DSN` | — | 內含帳密 |
 | `DB_MAX_OPEN_CONNS` | — | 連線池上限 |
 | `DB_MAX_IDLE_CONNS` | — | 連線池閒置數 |
@@ -279,19 +289,24 @@ go build .
 | `LOG_LEVEL` | `INFO` | |
 | `LOG_FILE` | `server.log` | |
 | `LOG_FORMAT` | `text` | 或 `json` |
-| `MONITOR_RETENTION_HOURS` | `24` | 監控分鐘彙總在資料庫保留幾小時；非正值會退回 24 |
+| `MONITOR_RETENTION_HOURS` | `24` | 監控分鐘彙總在資料庫保留幾小時；非正值會退回 24。**不影響時間軸長度**（見下方） |
 | `AUDIT_RETENTION_DAYS` | `90` | 稽核紀錄保留幾天；非正值會退回 90 |
 
 三組限流預設值刻意不同，反映各端點的真實成本；`applyDefaults` 對「空值或非正數」
 補值，因此無法用設定檔把某個視窗設成 0 秒（那會讓限流失效）。布林值接受
 `1` / `true` / `yes` / `on`（不分大小寫）。
 
-`MONITOR_RETENTION_HOURS` 決定 `forum_request_metrics` 留多久（過期列由
-`metrics` 套件的背景 goroutine 每 20 秒清一次）以及監控頁時間軸的長度。給一個
-有限的值是刻意的：這張表每分鐘都會長出一列，只增不減的監控資料在幾個月後
-就會變成資料庫裡最大的一張表，而它的價值隨時間急遽下降 —— 維運看的是
-「最近幾小時」。不設這個值時，記憶體裡仍然有 120 分鐘的即時資料，時間軸只是
-不會有重啟前的歷史。
+`MONITOR_RETENTION_HOURS` 決定 `forum_request_metrics` 在資料庫留多久（過期列由
+`metrics` 套件的背景 goroutine 每 20 秒清一次）。給一個有限的值是刻意的：這張表
+每分鐘都會長出一列，只增不減的監控資料在幾個月後就會變成資料庫裡最大的一張表，
+而它的價值隨時間急遽下降 —— 維運看的是「最近幾小時」。
+
+**它不決定監控頁時間軸的長度。** 時間軸固定是 `metrics.Options.WindowMinutes`
+分鐘（`NewServer` 目前設 120，也就是兩小時），再被 `maxTimelinePoints = 144`
+收斂；啟動時讀回歷史的範圍也對齊這個長度，因此不會有多讀進來又被丟掉的資料。
+兩個設定刻意分開：保留期是「寫多少進資料庫」的維運政策，時間軸長度是「畫幾格」
+的呈現選擇 —— 混為一談的後果是設定 retention 的人以為圖會變長。不設這個值時，
+記憶體裡仍然有 120 分鐘的即時資料，時間軸只是不會有重啟前的歷史。
 
 `AUDIT_RETENTION_DAYS` 決定 `forum_admin_actions` 留多久。給 90 天是因為稽核
 紀錄的用途是「上季有人動過什麼」，跨月保留才有稽核意義；但不能無限保留 ——
@@ -466,23 +481,25 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 | `stats.clients` | 依請求量排序的來源位址清單：位址、`source`（位址怎麼來的）、4xx／5xx、429 次數、被封鎖名單擋下的次數、最近打到哪條路由 |
 | `stats.rateLimits` | 三組限流器的額度、放行／阻擋累計、目前追蹤中的來源數 |
 | `dependencies` | MySQL 連線池水位與 ping 延遲、Redis 鍵數／記憶體／連線池、搜尋引擎狀態 |
+| `clientIpTrust` | 目前生效的來源 IP 信任模型：`mode`、`trusted`（實際生效的位址段）、`declared`（設定檔原文） |
 
 三件讀這個端點時要知道的事：
 
 - **延遲分位數是直方圖的桶上界，不是精確值。** 邊界固定為
   1/2/5/10/25/50/100/250/500ms 與 1/2/5/10s，因此 P95 只會落在這些刻度上。
   這是刻意的取捨：精確分位數要保存每次請求的耗時，記憶體會隨流量線性成長。
-- **總量只算本次啟動。** 記憶體裡沒有跨行程的累計，時間軸上一格 24 小時前的
-  資料是從資料庫讀回來的（`source: "history"`），與重啟後的資料（`source: "live"`）
-  在圖上以虛線框區分。
+- **總量只算本次啟動。** 記憶體裡沒有跨行程的累計，時間軸上「重啟前」的資料是從
+  資料庫讀回來的（`source: "history"`），與重啟後的資料（`source: "live"`）在圖上以
+  虛線框區分。時間軸固定 `stats.windowMinutes` 分鐘（目前 120），與
+  `MONITOR_RETENTION_HOURS` 無關 —— 讀回歷史的範圍也對齊這個長度。
 - **`stats.clients` 的位址不一定可信，而且它只活在記憶體裡。** 兩件事要分開看：
 
   1. **位址的來源**由 `source` 標明：`peer` 取自 `RemoteAddr`（TCP 連線對端），
-     `xff` 與 `real-ip` 取自 `X-Forwarded-For`／`X-Real-IP`。後兩者是**使用者可以
-     自己設定的標頭**，只有在「前面確實有一道會覆寫它們的代理，且使用者無法繞過
-     代理直連」時才代表真人。監控頁把這個差異標出來，但**沒有**替你判定哪個部署
-     是安全的 —— 在沒有可信代理白名單的情況下，被標成 `xff` 的位址不該直接拿去
-     封鎖（限制、封鎖與稽核紀錄用的都是同一個值，因此偽造標頭等於同時繞過三者）。
+     `xff` 與 `real-ip` 取自 `X-Forwarded-For`／`X-Real-IP`。後兩者**只有在
+     `TRUSTED_PROXY_CIDRS` 已設定且對端確實在白名單裡時**才代表真人；留空時它們
+     可被使用者偽造，而限流、封鎖與稽核紀錄用的是同一個值，也就是偽造一個標頭
+     等於同時繞過三者。同時被標成 `xff` 且 `clientIpTrust.mode` 是
+     `legacy-headers`，就是「這台站還沒設定白名單」的訊號。
   2. **這份資料不寫進資料庫。** 分鐘彙總會落盤（`forum_request_metrics`），每 IP
      統計不會 —— 「某個位址在什麼時候打了本站」是一筆個人資料，落盤等於多一份永久
      訪客紀錄，而這一頁需要的只是「現在正在怎樣」。重啟後歸零是刻意的。
@@ -690,6 +707,35 @@ token 就是憑證本身。介面上只給前 8 個字元（`tokenPrefix`），�
 計數，而那個計數會在解除封鎖之後仍然生效 —— 一個沒有管理員動作卻持續存在的
 隱藏狀態。
 
+#### 來源 IP 的信任模型
+
+限流、封鎖與稽核紀錄的 `ip` 欄位都用同一個判定：「這次請求來自哪個 IP」。
+`X-Forwarded-For` 與 `X-Real-IP` 是**任何用戶端都能自己設定的標頭**，因此怎麼
+對待它們決定了這三件事的可信度：
+
+| `TRUSTED_PROXY_CIDRS` | 對端在白名單裡 | 對端不在白名單裡 |
+| --- | --- | --- |
+| 留空（預設） | 採信 XFF 最左項 → X-Real-IP → 對端 | 同左（**不檢查白名單**） |
+| 已設定 | 從 XFF **右**往左掃過所有可信代理，取第一個不在白名單的位址 | 完全忽略轉送標頭，一律用對端位址 |
+
+三件事要分開看：
+
+1. **封鎖查所有候選位址，命中任何一個就算被封鎖。** 候選包含解析出的用戶端位址
+   與 TCP 對端，因此被封鎖者加多少個 `X-Forwarded-For` 都還是會被查到 —— 這條
+   不需要先設定白名單就成立。常見情況（直連、或 XFF 與對端相同）候選只有一個，
+   Redis 往返數不變。
+2. **白名單已設定時偽造標頭完全無效。** 對端不可信就整個忽略轉送標頭；對端可信
+   時是從右往左掃，因此攻擊者在 XFF 左邊多塞幾項也不會改變判定（最左項恰恰是
+   舊寫法裡最容易被控制的位置）。
+3. **稽核紀錄的 `ip` 欄位寫的是同一個判定結果**，所以它與限流、封鎖看到的
+   一定是同一個值 —— 不會出現「日誌說是 A、封鎖說是 B」。
+
+留空時維持舊的標頭優先行為是刻意的相容性選擇：不採信 XFF 會讓限流與封鎖的分桶
+鍵變成**代理的位址**，一個濫用者就會讓整站共用同一個代理的人一起被擋。兩種模式
+的差別會顯示在監控頁的 `clientIpTrust`（`mode: "trusted-proxies"` 或
+`"legacy-headers"`）；宣告了白名單卻一筆都解析不出來時，會看到 `mode` 是
+`legacy-headers` 而 `declared` 非空 —— 那就是「設定寫錯了」的可見訊號。
+
 #### 失敗時 fail open
 
 Redis 故障時封鎖檢查會失敗，而呼叫端**放行**。理由：讓封鎖檢查失敗就擋掉所有
@@ -745,7 +791,7 @@ Redis 探測會變紅，那是這個狀態唯一的提示。因此記錄是**節
 會把**所有**欄位一起反向，因此一個 `(pinned, created_at)` 的遞增索引無法服務這個
 排序 —— 查詢最佳化器會判定它不能用而退回 filesort（正確但慢，那正是加索引要避免
 的）。所以 `idx_forum_posts_feed` 宣告成 `(pinned DESC, created_at DESC, id DESC)`
-（MySQL 8.0+ 支援，README 的環境需求正是 MySQL 8.x）。既有的
+（MySQL 8.0+ 支援，README 的環境需求正是 MySQL 8.0.29+）。既有的
 `idx_forum_posts_created_at` 保留：搜尋結果、profile 的貼文列表與管理端的多處
 查詢都只按 `created_at` 排序，那些地方不該為了支援置頂而多付一個用不上的索引。
 

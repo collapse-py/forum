@@ -72,8 +72,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"forum/forum/metrics"
 )
 
 // RateLimiter 是以滑動視窗日誌為基礎的行程內限流器，欄位語意如下：
@@ -103,6 +101,16 @@ type RateLimiter struct {
 	limit   int
 	window  time.Duration
 	now     func() time.Time
+	// resolveIP 決定額度的分攤鍵（見 Middleware）。預設是 legacyClientIP 的
+	// 「標頭優先」行為，NewServer 會把它換成 Server.clientIP —— 那才是會讀
+	// TRUSTED_PROXY_CIDRS 的那一份。
+	//
+	// 為什麼是欄位而不是 Middleware 的參數：Middleware 是在 Handler 建構路由
+	// 時呼叫一次並回傳一個長久存在的閉包，把信任模型放進參數等於讓它「在
+	// 建構時被記住」—— 而建構期正是唯一能安全讀取設定的時候。
+	// 設值只在建構期發生（NewRateLimiter 之後、服務開始之前），之後不再變更，
+	// 因此讀取不需要鎖。
+	resolveIP func(r *http.Request) string
 }
 
 // LimiterStats 是限流器可供觀察的累計計數。
@@ -167,7 +175,24 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 		// 明確指定 time.Now 而非留 nil：Allow 與 Cleanup 會無條件呼叫 rl.now()，
 		// 留 nil 會在第一個請求就 panic。
 		now: time.Now,
+		// 預設值刻意保留舊的「標頭優先」行為，讓單獨使用 NewRateLimiter 的
+		// 呼叫端（例如測試）不需要知道信任模型的存在。
+		resolveIP: func(r *http.Request) string {
+			ip, _ := legacyClientIP(r, peerIP(r))
+			return ip
+		},
 	}
+}
+
+// SetIPResolver 設定額度的分攤鍵來源。
+//
+// 只應在 NewRateLimiter 之後、開始服務之前呼叫一次：它是建構期的一次性接線，
+// 之後讀取不再需要鎖。傳 nil 會退回預設的「標頭優先」行為。
+func (rl *RateLimiter) SetIPResolver(resolve func(r *http.Request) string) {
+	if resolve == nil {
+		return
+	}
+	rl.resolveIP = resolve
 }
 
 // setClock 替換取時間的函式，只為讓測試能確定性地推進視窗邊界。
@@ -313,13 +338,14 @@ func pruneExpired(times []time.Time, cutoff time.Time) []time.Time {
 
 // Middleware 是限流用的中介層：來源超出額度時以 429 拒絕且不呼叫 next。
 //
-// key 目前固定採 clientIP(r)。若日後要改成以登入身分為 key（例如放寬 NAT
-// 共用出口的額度），把這裡換成一個接受 *http.Request 的函式即可，Allow 本身
-// 對 key 的語意完全不敏感。
+// key 採 resolveIP（見 RateLimiter 的說明）：它是「一個 IP 一份額度」的分攤單位，
+// 而「哪裡才是這個 IP」是一個信任模型問題，不是一個字串問題。
+// 若日後要改成以登入身分為 key（例如放寬 NAT 共用出口的額度），把 resolveIP
+// 換成一個接受 *http.Request 的函式即可，Allow 本身對 key 的語意完全不敏感。
 func (rl *RateLimiter) Middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 以用戶端 IP 作為額度的分攤單位，理由見檔頭的 per-client 說明。
-		key := clientIP(r)
+		key := rl.resolveIP(r)
 		allowed, retryAfter := rl.Allow(key)
 		if !allowed {
 			// Retry-After（RFC 9110 §10.2.3）告知用戶端多久後可以再試，
@@ -346,49 +372,24 @@ func (rl *RateLimiter) Middleware(next http.HandlerFunc) http.HandlerFunc {
 
 // clientIPDetail 決定限流計數用的用戶端識別值，並一併回報它是從哪裡來的。
 //
-// 信任順序為 X-Forwarded-For 最左一項 → X-Real-IP → RemoteAddr（去掉埠號）。
-// 這是純函式，不做 I/O。
-//
-// 安全假設與限制：X-Forwarded-For 與 X-Real-IP 都是可由用戶端設定的表頭，
-// 只有在「本站前面確實有一道會覆寫這些表頭的代理，且使用者無法繞過它直連」
-// 時，裡面的值才可信。當服務可被直連、或代理採用附加而非覆寫的寫法時，
-// 攻擊者可以偽造來源來取得新的額度（限流被繞過），甚至用隨機值把 hits 撐大
-// （見檔頭的記憶體成長說明）。因此本檔案的安全性依賴部署方式的假設，而非
-// 程式本身的保證。回傳的 source 讓呼叫端（每 IP 監控）能把這個假設暴露出來。
+// 信任模型與為什麼要一份設定檔，見 trustedproxy.go。回傳的 source 讓呼叫端
+// （每 IP 監控）能把這個假設暴露出來。
 //
 // 回傳的 source 給「每 IP 監控」使用，讓介面能標示這個位址的可信度（xff /
 // real-ip / peer）。刻意不讓 clientIP 回傳兩個值：那個函式被三個地方當成單值
 // 純函式使用（Middleware、withBlocklistHandler、限流統計），為了它們多寫一次
 // `_, _ :=` 會讓「取得來源」變成一個比實際需要更麻煩的呼叫。
-func clientIPDetail(r *http.Request) (string, string) {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// 取最左一項：XFF 是由左往右「代理逐層附加」，最左邊才是原始的發起者；
-		// 越靠右越接近本站、可信度越高。
-		parts := splitComma(xff)
-		// 若 XFF 全是逗號或空白，splitComma 會回傳長度 0 的切片，這時
-		// 不應回傳空字串當作 key，否則所有這類請求會共用同一個額度。
-		if len(parts) > 0 {
-			return parts[0], metrics.ClientSourceXFF
-		}
-	}
-	// 部分反向代理（Nginx 預設）會設定 X-Real-IP，作為第二順位來源。
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri, metrics.ClientSourceRealIP
-	}
-	// 最後退回 RemoteAddr（net/http 保證是 "host:port"），去掉埠號只留主機。
-	ip := r.RemoteAddr
-	// 從「最後一個冒號」切斷，因此 [::1]:8080 這種含冒號的 IPv6 也能正確
-	// 去掉埠號。限制：若 RemoteAddr 是不含埠號的裸 IPv6（例如 "::1"），
-	// 會被截成 ":"。此值只作為 map 的鍵使用，只要一致即可，不影響正確性。
-	if idx := lastIndexByte(ip, ':'); idx != -1 {
-		ip = ip[:idx]
-	}
-	return ip, metrics.ClientSourcePeer
+//
+// 這裡刻意是方法而不是自由函式：信任模型是 Server 的設定（TRUSTED_PROXY_CIDRS），
+// 而把它做成參數會讓每個呼叫端都要記得傳，且漏傳時默默退回不安全模式 ——
+// 那正是要消除的失敗模式。
+func (s *Server) clientIPDetail(r *http.Request) (string, string) {
+	return resolveClientIP(r, s.trustedProxies)
 }
 
 // clientIP 只取用戶端識別值，等同 clientIPDetail 的第一個回傳值。
-func clientIP(r *http.Request) string {
-	ip, _ := clientIPDetail(r)
+func (s *Server) clientIP(r *http.Request) string {
+	ip, _ := s.clientIPDetail(r)
 	return ip
 }
 

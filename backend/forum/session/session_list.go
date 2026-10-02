@@ -43,6 +43,7 @@ Session 列舉與批次撤銷（session/session_list.go）。
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -363,8 +364,23 @@ func (m *Manager) fetchRecords(ctx context.Context, keys []string) ([]Record, er
 			Token:       strings.TrimPrefix(key, sessionKeyPrefix),
 			Email:       values["email"],
 			IsAdmin:     values["is_admin"] == "true",
-			TTL:         ttls[i].Val(),
 			TokenPrefix: "",
+		}
+		// TTL 單獨處理，不直接用 ttls[i].Val()。
+		//
+		// 為什麼：pipe.Exec 在**指令層**失敗時（例如該指令的型別錯誤）仍會
+		// 回 err，那時 !isMissingValueError 擋不住、程式會繼續往下走，而
+		// 失敗的那一個 ttls[i] 會回傳零值 DurationCmd —— Val() 因此得到 0，
+		// 於是 ExpiresAt = now，介面上顯示成「馬上要到期」。
+		//
+		// 顯示一個**錯誤的**到期時間比顯示「不知道」糟：前者會讓管理員以為
+		// 這是異常狀態而去處理它。TTL = -1 是這個型別裡「不知道」的既有
+		// 表示（ExpiresAt 保持零值，見 Record 的說明），因此沿用它而不是
+		// 新造一個哨兵值。
+		if err := ttls[i].Err(); err != nil {
+			record.TTL = -1
+		} else {
+			record.TTL = ttls[i].Val()
 		}
 		record.TokenPrefix = tokenPrefix(record.Token)
 		// created_at 是後來才加入的欄位，既有 session 沒有它。缺欄位時保持零值，
@@ -388,9 +404,15 @@ func (m *Manager) fetchRecords(ctx context.Context, keys []string) ([]Record, er
 // 以及 TTL 對不存在的 key 所回傳的 -2 之外的讀取失敗。它屬於「這支 session
 // 剛好過期」的自然結果，應該跳過而不是中止整個掃描。
 //
+// 用 errors.Is 而不是 == ：同檔案其他地方的慣例是 errors.Is（見 ipban.go），
+// 而兩者的差別只在錯誤「被包裝」時才顯現。目前 go-redis 直接回傳 redis.Nil
+// 哨兵值所以不會出錯，但一旦上游改為包裝回傳，pipe.Exec 的處理就會從
+// 「略過過期 session」變成「中止整批掃描」—— 症狀是 session 列表整頁空白，
+// 而錯誤訊息裡看不出真正的原因。
+//
 // 其餘（例如連線錯誤）回 false —— 那是真的做不下去，繼續只會重複同樣的失敗。
 func isMissingValueError(err error) bool {
-	return err == redis.Nil
+	return errors.Is(err, redis.Nil)
 }
 
 // tokenPrefix 截出可安全顯示的 token 前綴。

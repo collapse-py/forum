@@ -996,7 +996,13 @@ func (s *Server) handleForumPostDelete(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.unindexForumPost(r.Context(), postID)
+	// 索引同步刻意不記稽核：這是使用者刪**自己**的貼文，不是後臺操作，而稽核紀錄
+	// 的 actor 欄位記的是管理員。寫一筆 actor 是使用者的「post.index_failed」
+	// 只會讓稽核紀錄多一個讀不出意義的動作；使用者路徑的索引失敗只留日誌，
+	// 後臺路徑才補稽核（見 recordPostIndexFailure）。
+	if err := s.unindexForumPost(r.Context(), postID); err != nil {
+		logger.WarnfContext(r.Context(), "[FORUM] 移除本人貼文的搜尋索引失敗 post_id=%d: %v", postID, err)
+	}
 	writeOK(w, map[string]bool{"ok": true})
 }
 
@@ -1535,7 +1541,12 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 	// 寫入 ES 索引（best-effort，失敗只記日誌；理由見 indexForumPost）。
 	// 刻意放在 MySQL 寫入成功之後：順序反過來會讓索引裡出現一篇
 	// 資料庫裡不存在的貼文，那種幽靈結果比「搜尋慢一步才出現」更難察覺。
-	s.indexForumPost(r.Context(), id, req.Content, author, createdAt)
+	//
+	// 失敗在這裡只記日誌而不記稽核：這是使用者自己的發文路徑，稽核紀錄的 actor
+	// 記的是管理員（見 forum_handlers 刪除本人貼文的同一處說明）。
+	if err := s.indexForumPost(r.Context(), id, req.Content, author, createdAt); err != nil {
+		logger.WarnfContext(r.Context(), "[FORUM] 索引新貼文失敗 post_id=%d: %v", id, err)
+	}
 	// 回讀自己的標籤：作者欄位要與列表中的其他貼文保持一致的呈現方式。
 	// 這一次額外查詢取代了「發文後重新載入整頁列表」的往返。
 	authorTags, err := s.forumAuthorTags(r.Context(), author)

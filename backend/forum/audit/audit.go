@@ -199,7 +199,19 @@ func Record(ctx context.Context, db Execer, entry Entry) error {
 		entry.ActorEmail,
 		entry.Action,
 		entry.TargetType,
-		entry.TargetID,
+		// TargetID 與 TargetLabel 對稱地截斷。
+		//
+		// 只截 TargetLabel 而不截 TargetID 是一個不對稱，而且會造成實際故障：
+		// target_id 是 VARCHAR(320) NOT NULL，因此一個 400 字元的 target
+		// （例如批次端點只擋格式、不擋長度的 email）會讓 MySQL 回 error 1406
+		// → 整筆紀錄寫不進去 → **整個操作回滾**。症狀是「輸入不合法卻回 500」，
+		// 而正確答案應該是 400。
+		//
+		// 呼叫端仍然應該在邊界擋掉超長輸入（見 normalizeBatchEmails）：截斷是
+		// 最後一道防線，讓一個形狀異常的值不會讓整個交易失敗；邊界檢查才是
+		// 讓使用者收到可讀訊息的地方。兩者缺一，症狀會是「要嘛整批失敗、
+		// 要嘛稽核紀錄裡躺著一個被砍半的 id」。
+		truncate(entry.TargetID, maxValueLength),
 		truncate(entry.TargetLabel, maxValueLength),
 		changes,
 		entry.ClientIP,
@@ -282,8 +294,8 @@ func truncateValue(value string, limit int) (string, bool) {
 
 // truncate 把字串截到上限並補上省略號，不回傳是否截斷。
 //
-// 給「不需要知道是否截斷」的呼叫端用（目前只有 target_label）；會關心
-// 截斷與否的地方請用 truncateValue，因為那個旗標是 Change.Truncated 的
+// 給「不需要知道是否截斷」的呼叫端用（target_id 與 target_label）。
+// 會關心截斷與否的地方請用 truncateValue，因為那個旗標是 Change.Truncated 的
 // 來源，而它是讀者判斷「這是不是全文」的唯一依據。
 func truncate(value string, limit int) string {
 	cut, _ := truncateValue(value, limit)

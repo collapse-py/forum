@@ -47,14 +47,24 @@ type Filter struct {
 	Limit  int
 }
 
-// DefaultLimit 與 MaxLimit 是分頁的預設與上限。
+// DefaultLimit、MaxLimit 與 MaxOffset 是分頁的預設與上限。
 //
-// 上限存在的理由是「稽核表可能被撐到很大」（一筆標籤全組替換就是 21 列的
+// MaxLimit 存在的理由是「稽核表可能被撐到很大」（一筆標籤全組替換就是 21 列的
 // changes JSON），而 /admin/log 是一次 GET：沒有上限的話，一個手滑的
 // limit=1000000 就能把整張表讀進記憶體再序列化。
+//
+// MaxOffset 是給深分頁用的：OFFSET N 會讓 MySQL 丟棄前 N 列再回傳，因此
+// 「翻到第 5,000 頁」的成本是 O(N) 而 O(limit)。稽核紀錄是「從最新往回翻」
+// 的讀取方式，90 天 × 每天數百筆就會到幾萬列 —— 沒有上限時一個手滑的
+// offset=999999 是一次可被重複發動的全表掃描。
+//
+// 夾到上限而不是回 400，理由與 limit 一致：超過上限的後果僅僅是「翻不到那麼
+// 舊的頁」，而介面上寫得出來（回 400 會讓整個稽核頁載不出來，那個連帶損失
+// 遠大於深分頁的效能問題）。
 const (
 	DefaultLimit = 50
 	MaxLimit     = 200
+	MaxOffset    = 10000
 )
 
 // where 把 Filter 轉成 SQL 的 WHERE 子句與參數清單。
@@ -114,10 +124,13 @@ func splitList(value string) []string {
 }
 
 // normalize 把分頁參數收斂到合法範圍。負數 offset 視為 0（沒有「從最後一筆
-// 往回數」的需求，那個語意在網址列裡難以表達）。
+// 往回數」的需求，那個語意在網址列裡難以表達），超過 MaxOffset 則夾到上限。
 func (f Filter) normalize() Filter {
 	if f.Offset < 0 {
 		f.Offset = 0
+	}
+	if f.Offset > MaxOffset {
+		f.Offset = MaxOffset
 	}
 	if f.Limit <= 0 {
 		f.Limit = DefaultLimit
@@ -212,6 +225,20 @@ func scanEntry(row scanner) (Entry, error) {
 	return entry, nil
 }
 
+// maxFacets 限制篩選器選項清單的長度。
+//
+// 200 的依據是「這個站實際會出現多少個不同值」：動作名稱是程式裡宣告的有限
+// 集合（httpapi/audit_log.go，約 25 個），操作者則是管理員帳號數。兩者都遠
+// 遠低於 200，因此這個上限在實務上不會被碰到 —— 它存在是為了讓「表格長大之後
+// 這兩個查詢的成本隨資料量線性上升」這件事有界限的保險，而不是承認它可以長。
+//
+// 之所以是上限而不是快取或對照表：稽核紀錄**不提供刪除 API**（一個能刪除
+// 自己紀錄的稽核日誌等於沒有稽核日誌），所以清單只增不減、要失效時機也只有
+// 寫入 —— 一個 5 分鐘 TTL 的記憶體快取能解決的問題有限，而對照表會讓
+// 「稽核紀錄寫入失敗 → 操作回滾」這個不變條件多出一個必須一起回滾的寫入，
+// 代價遠大於收益。
+const maxFacets = 200
+
 // DistinctActions 回傳資料庫中實際出現過的動作名稱，依名稱排序。
 //
 // 為什麼要從資料庫取而不是把名稱寫死在前端：寫死會讓新版本加入的動作在
@@ -220,11 +247,16 @@ func scanEntry(row scanner) (Entry, error) {
 //
 // 這支查詢走 idx_forum_admin_actions_action，隨資料量成長仍是一個索引掃描；
 // 它是每頁載入一次的成本，與頁面本身的查詢同級。
+//
+// 被 maxFacets 截斷時會記一行警告 —— 這是刻意的：沒有那行，截斷的症狀是
+// 「篩選器突然少了幾個選項」，看起來像那些操作從來沒發生過。
 func DistinctActions(ctx context.Context, db *sql.DB) ([]string, error) {
 	if db == nil {
 		return []string{}, nil
 	}
-	rows, err := db.QueryContext(ctx, "SELECT DISTINCT "+columnAction+" FROM forum_admin_actions ORDER BY "+columnAction)
+	// 多取一個作為「是否被截斷」的判斷依據，而不必再跑一次 COUNT(*)。
+	rows, err := db.QueryContext(ctx,
+		"SELECT DISTINCT "+columnAction+" FROM forum_admin_actions ORDER BY "+columnAction+" LIMIT ?", maxFacets+1)
 	if err != nil {
 		return nil, fmt.Errorf("distinct admin actions: %w", err)
 	}
@@ -238,19 +270,30 @@ func DistinctActions(ctx context.Context, db *sql.DB) ([]string, error) {
 		}
 		actions = append(actions, action)
 	}
-	return actions, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(actions) > maxFacets {
+		actions = actions[:maxFacets]
+		logPrintf("audit: 動作清單超過上限 %d，篩選器只列出前 %d 個", maxFacets, maxFacets)
+	}
+	return actions, nil
 }
 
 // DistinctActors 回傳資料庫中實際出現過的操作者 email，依字母排序。
 //
 // 同樣是為了讓「這條路徑上有誰動過手」能從篩選器直接點，而不是要求管理員
 // 逐字輸入 email（打錯一個字元的結果是「查無紀錄」，那看起來像清白的證明）。
+//
+// 走 idx_forum_admin_actions_actor (actor_email, created_at)，DISTINCT 打在
+// 索引最左前綴上，MySQL 可以用 loose index scan，因此這支查詢不會像全表掃描
+// 那樣隨資料量線性惡化 —— 但結果**數量**仍然沒有上界，所以還是套上 maxFacets。
 func DistinctActors(ctx context.Context, db *sql.DB) ([]string, error) {
 	if db == nil {
 		return []string{}, nil
 	}
 	rows, err := db.QueryContext(ctx,
-		"SELECT DISTINCT "+columnActorEmail+" FROM forum_admin_actions ORDER BY "+columnActorEmail)
+		"SELECT DISTINCT "+columnActorEmail+" FROM forum_admin_actions ORDER BY "+columnActorEmail+" LIMIT ?", maxFacets+1)
 	if err != nil {
 		return nil, fmt.Errorf("distinct admin actors: %w", err)
 	}
@@ -264,7 +307,14 @@ func DistinctActors(ctx context.Context, db *sql.DB) ([]string, error) {
 		}
 		actors = append(actors, actor)
 	}
-	return actors, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(actors) > maxFacets {
+		actors = actors[:maxFacets]
+		logPrintf("audit: 操作者清單超過上限 %d，篩選器只列出前 %d 個", maxFacets, maxFacets)
+	}
+	return actors, nil
 }
 
 // Pruner 定期刪除過期的稽核紀錄。

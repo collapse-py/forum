@@ -16,10 +16,11 @@ package httpapi
 
 	2. 不預先彙總，也不新增統計表
 		與監控頁的分鐘彙總（forum_request_metrics）相反，這裡每次讀取都
-		即時算。理由是規模：三張表的 created_at 都有索引（forum_users 的
-		在遷移第 24 步補上），而查詢被 WHERE created_at >= ? 限制在 30 天內，
-		掃描量是「最近 30 天的文章數」而不是「全部文章數」。為此維護一張
-		每日彙總表，等於用一份會過期（隔天就沒人補）的資料換掉一個有界查詢。
+		即時算。理由是規模：這個端點觸及的每一張表的 created_at 都有索引
+		（forum_users 的是遷移第 24 步補的，forum_post_likes 的是第 27 步），
+		而查詢被 WHERE created_at >= ? 限制在 30 天內，掃描量是「最近 30 天
+		的資料量」而不是「全部資料量」。為此維護一張每日彙總表，等於用一份
+		會過期（隔天就沒人補）的資料換掉一個有界查詢。
 
 		什麼時候該改：文章總量成長到讓「最近 30 天」也不再有界的時候。那時
 		正確做法是加一張每日彙總表，並在寫入路徑上順帶更新（就像
@@ -353,13 +354,40 @@ func (s *Server) loadStatsTopTags(ctx context.Context) ([]statsTag, error) {
 // （例如需要進一步處理的高活躍帳號），而 email 正是後臺其他頁面用來指稱
 // 一個人的鍵。若改成顯示暱稱，同一個人在不同頁面就會有兩種指稱方式。
 func (s *Server) loadStatsTopAuthors(ctx context.Context, start time.Time) ([]statsAuthor, error) {
+	// 為什麼不合成一個 UNION 或 JOIN：這兩個計數的主鍵不同（文章是
+	// author_email × 一列，留言也是 author_email × 一列，但數量級差一個
+	// 數量級），合成會讓「沒有發過文但留了很多言」的人完全不出現在榜上 ——
+	// 而那正是這個排行榜應該讓人看到的帳號。
+	//
+	// 但「先取文章前 10 名，再對這 10 個 email 各查一次留言數」的 N+1 也不對：
+	// 那 10 次往返每次都是「掃視窗區間再逐列過濾 email」，同一段區間被重掃
+	// 10 次，且成本隨排行長度線性成長。改成「文章前 10 名作為衍生表 +
+	// 留言數衍生表一次聚合後 left join」，兩個子表各掃一次（各走
+	// author_email 索引，遷移第 27 步補的），整條查詢只有一趟往返。
+	//
+	// 取捨要寫清楚（這是取捨而不是缺陷）：改動前是 10 次「單一作者的等值
+	// 查詢」，每次只碰該作者的留言；現在是「掃過視窗內所有留言後依作者
+	// 分組」各一次。往返數從 11 降到 1，但讀到的列數從「前 10 名的留言量」
+	// 變成「視窗內的留言總量」。當留言總量遠大於前 10 名的留言量時，
+	// 新寫法讀的列更多。兩者都走索引、都不退化到全表掃描，因此判斷標準
+	// 是「排行榜的 10 個 id 對上全視窗聚合」這個數量級通常小得多。
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT author_email, COUNT(*), 0
-		FROM forum_posts
-		WHERE created_at >= ?
-		GROUP BY author_email
-		ORDER BY 2 DESC, author_email ASC
-		LIMIT `+strconv.Itoa(statsTopLimit), start)
+		SELECT p.author_email, p.posts, COALESCE(c.comments, 0)
+		FROM (
+			SELECT author_email, COUNT(*) AS posts
+			FROM forum_posts
+			WHERE created_at >= ?
+			GROUP BY author_email
+			ORDER BY posts DESC, author_email ASC
+			LIMIT `+strconv.Itoa(statsTopLimit)+`
+		) p
+		LEFT JOIN (
+			SELECT author_email, COUNT(*) AS comments
+			FROM forum_post_comments
+			WHERE created_at >= ?
+			GROUP BY author_email
+		) c ON c.author_email = p.author_email
+		ORDER BY p.posts DESC, p.author_email ASC`, start, start)
 	if err != nil {
 		return nil, err
 	}
@@ -373,28 +401,7 @@ func (s *Server) loadStatsTopAuthors(ctx context.Context, start time.Time) ([]st
 		}
 		items = append(items, item)
 	}
-	// rows 必須在第二次查詢之前關閉：database/sql 的連線池預設上限不高，
-	// 同一個處理程序同時持有兩組結果集會多佔一條連線，而且在
-	// MaxOpenConns=1 的設定下會直接死鎖。
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows.Close()
-
-	// 留言數另外一次查詢後合併。
-	//
-	// 為什麼不合成一個 UNION 或 JOIN：這兩個計數的主鍵不同（文章是
-	// author_email × 一列，留言也是 author_email × 一列，但數量級差一個
-	// 數量級），合成會讓「沒有發過文但留了很多言」的人完全不出現在榜上 ——
-	// 而那正是這個排行榜應該讓人看到的帳號。
-	for i := range items {
-		if err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM forum_post_comments WHERE author_email = ? AND created_at >= ?`,
-			items[i].Email, start).Scan(&items[i].Comments); err != nil {
-			return nil, err
-		}
-	}
-	return items, nil
+	return items, rows.Err()
 }
 
 // excerptRunes 把字串截到 n 個字元。

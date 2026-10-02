@@ -29,6 +29,10 @@ package httpapi
 		的。整批回 400 會讓使用者不知道是哪一個錯；整批忽略則會讓他以為都成功
 		了。因此回應帶 skipped 清單，逐項列出並附原因。
 
+	4. 兩支端點都要有防禦性上限，而且是**兩個**：emails 有 batchMaxEmails、
+		tagIds 有 batchMaxTags。批次標籤的寫入迴圈是巢狀的
+		（email × tag），只擋其中一維等於沒擋 —— 詳見兩個常數的說明。
+
 刻意不做的事
 
 	- 沒有一個「把這個標籤加給所有人」之類的語意。批次標籤採「覆寫」語意
@@ -47,6 +51,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"forum/forum/audit"
 	"forum/forum/logger"
@@ -59,6 +64,19 @@ import (
 // 常數，是為了讓前後端對「太大」的判斷一致 —— 兩份數字各自設定的話，會出現
 // 「前端以為送得完、後端回 400」而前端不知道該怎麼解釋。
 const batchMaxEmails = 200
+
+// batchMaxTags 是單次批次可套用的標籤數。
+//
+// 這個上限與 batchMaxEmails 同屬**防禦性上限**，而理由完全一樣：寫入迴圈是
+// 巢狀的（每個 email × 每個 tag 一列 INSERT），所以只限制 emails 是不夠的 ——
+// `[1,2,3,…]` 每個 id 兩個位元組，16 KiB 的 body 上限剛好塞得下約 8,000 個
+// id，而那會讓單一交易產生 200 × 8000 = 160 萬次單列 INSERT，所有 row lock
+// 持有到 Commit。這條路由又刻意不掛限流，因此那是一次可被重複發動的資源耗盡。
+//
+// 20 的取捨與 audit.maxChangesPerEntry 同量級：後臺的標籤字典是給人維護的
+// 有限清單，「一次給 200 個人套 20 個標籤」已經涵蓋任何合理的清理作業。
+// 超過時回 400 而不是靜默截斷 —— 理由與 batchMaxEmails 相同。
+const batchMaxTags = 20
 
 // batchSkipped 記錄一個被跳過的 email 與原因。
 //
@@ -115,6 +133,22 @@ func normalizeBatchEmails(raw []string) ([]string, error) {
 		// 非標準的帳號。
 		if !strings.Contains(email, "@") || strings.ContainsAny(email, " \t\r\n") {
 			return nil, &requestError{message: "email 格式不正確：" + email}
+		}
+		// 長度上限與欄位寬度對齊（forum_users.email 是 VARCHAR(255)）。
+		//
+		// 沒有這一段時，一個 400 字元的「email」會一路走到稽核寫入，而那裡
+		// target_id 是 VARCHAR(320) NOT NULL —— MySQL 回 error 1406，整批
+		// 200 人的交易回滾並回 500。正確的答案是 400（輸入不合法），不是 500。
+		//
+		// 這裡必須自行擋住而不能只依賴 audit.Record 截斷 TargetLabel：同一個
+		// 值在一欄被截斷、在另一欄不截的不對稱，本身就是這個 bug 的成因。
+		//
+		// 以**字元**計數而非位元組：VARCHAR(255) 的上限是字元（MySQL 對
+		// utf8mb4 以字元計），而 len() 算的是位元組 —— 用它會讓一個 200 字的
+		// CJK 字串（600 bytes）在欄位裡明明放得下，卻被這裡擋下並回一則寫著
+		//「字元」的訊息。擋得比較嚴謹不是問題，單位不符才會浪費診斷時間。
+		if utf8.RuneCountInString(email) > 255 {
+			return nil, &requestError{message: "email 長度超過 255 字元：" + email}
 		}
 		if seen[email] {
 			continue
@@ -178,23 +212,6 @@ func (s *Server) handleAdminBatchTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 標籤 id 的驗證與單一使用者路徑相同（handleAdminUserTags）：正數、
-	// 不重複、且必須都存在。validateBatchTagIDs 同時取回名稱，因為稽核紀錄
-	// 要存「這個人的標籤從什麼變成什麼」，而名稱比 id 有意義得多。
-	tagIDs, tagNameByID, err := validateBatchTagIDs(r, s.db, req.TagIDs)
-	if err != nil {
-		badRequest(w, err.Error())
-		return
-	}
-	// 依請求的 id 順序組成名稱清單，而不是 map 的迭代順序（隨機）。
-	// 稽核紀錄的 diff 必須是穩定的 —— 同一個操作在兩次稽核裡應該看起來
-	// 一樣，否則「比對兩筆紀錄」這件事就沒有意義了。
-	tagNames := make([]string, 0, len(tagIDs))
-	for _, id := range tagIDs {
-		tagNames = append(tagNames, tagNameByID[id])
-	}
-	after := strings.Join(tagNames, ", ")
-
 	tx, err := s.beginAdminTx(r)
 	if err != nil {
 		internalError(w, "unable to update user tags")
@@ -202,11 +219,45 @@ func (s *Server) handleAdminBatchTags(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	result := batchResult{OK: true, Requested: len(emails), Counts: map[string]int{"updated": 0}, Skipped: []batchSkipped{}}
+	// 標籤 id 的驗證**在交易內**做（傳 tx 而不是 s.db）。
+	//
+	// 在交易外驗證會留下 TOCTOU：驗證通過、交易開啟之間，handleAdminTag 的
+	// DELETE 可以把該標籤連同綁定一起刪掉；而 forum_user_tag_assignments
+	// 沒有外鍵，因此後續的 INSERT 仍會成功，留下指向不存在標籤的孤兒綁定 ——
+	// 那正是這個驗證存在的理由（見 handleAdminUserTags 的說明）。
+	// 驗證與寫入在同一個交易裡，「標籤存在」就是寫入當下的事實。
+	//
+	// 驗證同時取回名稱，因為稽核紀錄要存「這個人的標籤從什麼變成什麼」，
+	// 而名稱比 id 有意義得多。
+	tagIDs, tagNameByID, err := validateBatchTagIDs(r, tx, req.TagIDs)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	// 依請求的 id 順序取回名稱（而不是 map 的迭代順序，那隨機）。
+	//
+	// 這個切片是「請求送來的順序」，也就是管理員在後臺點核取方塊的順序
+	// （frontend/src/admin/provider.tsx 的 onToggleTag 是 append）。它只作為
+	// 集合比對的輸入，不直接拿來組成稽核字串 —— 理由見 sameTagSet。
+	tagNames := make([]string, 0, len(tagIDs))
+	for _, id := range tagIDs {
+		tagNames = append(tagNames, tagNameByID[id])
+	}
+	// 稽核紀錄的 diff 必須是穩定的 —— 同一個操作在兩次稽核裡應該看起來
+	// 一樣，否則「比對兩筆紀錄」這件事就沒有意義了。這裡刻意用
+	// joinTagNames（名稱排序）而不是請求順序：只有兩邊排序一致，
+	// 下方的 sameTagSet 守衛與 audit_log.go 的 onlyChanged 才會對
+	// 「同一組標籤」給出一致的答案。
+	after := joinTagNames(tagNames)
+
+	result := batchResult{OK: true, Requested: len(emails),
+		Counts: map[string]int{"updated": 0, "unchanged": 0}, Skipped: []batchSkipped{}}
 
 	for _, email := range emails {
-		var before string
-		if err := tx.QueryRowContext(r.Context(), `SELECT status FROM forum_users WHERE email = ?`, email).Scan(&before); err != nil {
+		// 只問「帳號存不存在」，不取 status。批次標籤不修改 status，
+		// 取回來只會讓讀者誤以為它和稽核的 Before 有關。
+		var exists int
+		if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM forum_users WHERE email = ?`, email).Scan(&exists); err != nil {
 			if err == sql.ErrNoRows {
 				result.Skipped = append(result.Skipped, batchSkipped{Email: email, Reason: "帳號不存在"})
 				continue
@@ -221,21 +272,45 @@ func (s *Server) handleAdminBatchTags(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 標籤集沒有變化時**什麼都不做**，也不記稽核 —— 與 handleAdminBatchStatus
+		// 的 before == status 守衛同一個理由：稽核紀錄記的是「發生了什麼改變」。
+		//
+		// 這不是邊緣情況。MySQL 預設的 utf8mb4 排序規則大小寫不敏感，所以
+		// A@B.com 與 a@b.com 在資料庫裡是同一列，卻是去重後 emails 切片裡的
+		// 兩筆 —— 因此「對同一批使用者重複套用相同標籤」不需要任何花招就會觸發
+		// 大量 Before == After 的紀錄，而那正好污染稽核紀錄存在的理由
+		// （「這個帳號的標籤被動過幾次」）。audit_log.go 的 onlyChanged 是為此
+		// 而存在的，這裡的守衛是同一件事在寫入端的版本。
+		//
+		// 比的是**集合**而不是字串：beforeNames 是名稱序（loadAdminUserTagNames
+		// 的 ORDER BY t.name），tagNames 是請求順序。字串比對在兩者不同源時
+		// 幾乎永遠不成立，症狀不是報錯，而是每個使用者都被重寫一次並留下一筆
+		// `alpha, beta → beta, alpha` 的假變更紀錄 —— 正是這段註解要消除的東西。
+		if sameTagSet(beforeNames, tagNames) {
+			result.Counts["unchanged"]++
+			continue
+		}
+
 		if _, err := tx.ExecContext(r.Context(),
 			`DELETE FROM forum_user_tag_assignments WHERE user_email = ?`, email); err != nil {
 			internalError(w, "unable to update user tags")
 			return
 		}
-		for _, id := range tagIDs {
-			if _, err := tx.ExecContext(r.Context(),
-				`INSERT INTO forum_user_tag_assignments (user_email, tag_id) VALUES (?, ?)`, email, id); err != nil {
-				internalError(w, "unable to update user tags")
-				return
-			}
+		// 單一多列 INSERT，而不是每個 (email, tag) 一列。
+		//
+		// 往返數因此從 O(emails × tags) 降到 O(1)：原本最壞情況是 200 × 8000
+		// = 160 萬次 Exec（在同一個交易裡，全部鎖持有到 Commit），現在是每個
+		// 使用者 1 次。佔位符數量由 len() 決定，不是使用者可控的結構字串，
+		// 因此沒有注入面。
+		if err := insertBatchTagAssignments(r, tx, email, tagIDs); err != nil {
+			internalError(w, "unable to update user tags")
+			return
 		}
-		// 每一個受影響的使用者各自一筆稽核（見檔頭第一點）。
+		// 每一個受影響的使用者各自一筆稽核（見檔頭第一點）。兩邊的名字都走
+		// joinTagNames，因此 Before 與 After 都是名稱序 —— 字串相同就真的代表
+		// 標籤集沒變。
 		if err := s.recordAdminAction(r, tx, adminActionUserTags, audit.TargetUser, email, email,
-			audit.Change{Field: "tags", Before: strings.Join(beforeNames, ", "), After: after}); err != nil {
+			audit.Change{Field: "tags", Before: joinTagNames(beforeNames), After: after}); err != nil {
 			internalError(w, "unable to update user tags")
 			return
 		}
@@ -249,12 +324,46 @@ func (s *Server) handleAdminBatchTags(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, result)
 }
 
+// insertBatchTagAssignments 用單一多列 INSERT 寫入一位使用者的全部標籤綁定。
+//
+// tagIDs 為空時不發任何陳述句：清空標籤是由呼叫端的前一個 DELETE 達成的，
+// 而「INSERT ... VALUES ()」在 MySQL 上是語法錯誤 —— 因此這個空集合分支
+// 不是最佳化，是必要條件。
+func insertBatchTagAssignments(r *http.Request, tx *sql.Tx, email string, tagIDs []int64) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	// 每列 2 個佔位符。數量由 len(tagIDs) 決定（上限 batchMaxTags = 20，
+	// 也就是最多 40 個佔位符），因此不是使用者可控的結構字串，沒有注入面。
+	var query strings.Builder
+	query.WriteString(`INSERT INTO forum_user_tag_assignments (user_email, tag_id) VALUES `)
+	args := make([]any, 0, len(tagIDs)*2)
+	for i, id := range tagIDs {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteString("(?,?)")
+		args = append(args, email, id)
+	}
+	_, err := tx.ExecContext(r.Context(), query.String(), args...)
+	return err
+}
+
 // validateBatchTagIDs 驗證一組標籤 id，回傳去重後的清單與 id→名稱對照。
 //
 // 存在的理由是把「驗證 + 取名」綁在一起：稽核紀錄需要名稱，而名稱只能在
 // 驗證通過之後安全地取（未驗證的 id 可能不存在，Scan 會失敗）。把它們分成
 // 兩支函式的話，其中一支會被迫容忍「查不到」的情形，而那正是我們要擋的。
-func validateBatchTagIDs(r *http.Request, db *sql.DB, raw []int64) ([]int64, map[int64]string, error) {
+//
+// q 接受 queryer 而非固定 *sql.DB：呼叫端必須傳交易（見 handleAdminBatchTags
+// 對 TOCTOU 的說明），而這個檔案另外兩處呼叫需要非交易版本 —— 用介面讓
+// 「在交易內讀」成為型別上的事實，而不是靠呼叫端記得傳對。
+func validateBatchTagIDs(r *http.Request, q queryer, raw []int64) ([]int64, map[int64]string, error) {
+	// 長度檢查放在重複檢查之前：重複去重後可能遠小於原長度，而防禦性上限要
+	// 對「請求送了多少東西」生效，不是對「去重後剩多少」。
+	if len(raw) > batchMaxTags {
+		return nil, nil, &requestError{message: "一次最多套用 " + strconv.Itoa(batchMaxTags) + " 個標籤"}
+	}
 	tagNameByID := make(map[int64]string, len(raw))
 	tagIDs := make([]int64, 0, len(raw))
 	for _, id := range raw {
@@ -273,13 +382,13 @@ func validateBatchTagIDs(r *http.Request, db *sql.DB, raw []int64) ([]int64, map
 		// 空的 tagIds 是合法的（清除所有標籤），因此不報錯。
 		return tagIDs, tagNameByID, nil
 	}
-	// 一次查出所有名稱。逐個查的話是 N 次往返，而 N ≤ 200。
+	// 一次查出所有名稱。逐個查的話是 N 次往返，而 N ≤ batchMaxTags。
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(tagIDs)), ",")
 	args := make([]any, len(tagIDs))
 	for i, id := range tagIDs {
 		args[i] = id
 	}
-	rows, err := db.QueryContext(r.Context(),
+	rows, err := q.QueryContext(r.Context(),
 		`SELECT id, name FROM forum_user_tags WHERE id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil, nil, err

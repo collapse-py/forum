@@ -124,8 +124,15 @@ export interface AdminPost {
   commentCount?: number;
   authorEmail?: string;
   createdAt?: string;
-  /** 是否為管理員置頂。用它決定那一列的按鈕是「取消置頂」還是「置頂」。 */
-  pinned?: boolean;
+  /**
+   * 是否為管理員置頂。用它決定那一列的按鈕是「取消置頂」還是「置頂」。
+   *
+   * 後端**一定**會回這個欄位（adminForumPost.Pinned 沒有 omitempty），
+   * 因此這裡是必填而非選填 —— 它一旦變成選填，`item.pinned !== true` 就會
+   * 在欄位缺席時永遠算出 true，症狀是「取消置頂送成置頂、後端判定狀態沒變
+   * 而回 200 但什麼都沒做」。讓型別強制它必須存在。
+   */
+  pinned: boolean;
   comments?: AdminComment[];
   [key: string]: unknown;
 }
@@ -179,6 +186,37 @@ export interface MonitorResponse {
   probesMs?: number;
   stats: MonitorSnapshot;
   dependencies: Record<'mysql' | 'redis' | 'search', MonitorDependency>;
+  /**
+   * 目前生效的來源 IP 信任模型。
+   *
+   * 限流、IP 封鎖與稽核紀錄的 `ip` 欄位都用同一個判定，而那個判定建立在一個
+   * 使用者可控的標頭上 —— 因此「現在是哪一種模式」是監控頁必須回答的問題，
+   * 而不是設定檔裡的一個只有讀程式碼才知道的細節。
+   */
+  clientIpTrust?: MonitorClientIPTrust;
+}
+
+/**
+ * 來源 IP 的信任模型（後端 httpapi/trustedproxy.go）。
+ *
+ * `legacy-headers` 代表 `TRUSTED_PROXY_CIDRS` 未設定：程式沿用「X-Forwarded-For
+ * 最左項優先」的舊行為，這在本站確實被一道會覆寫該標頭的代理擋在後面時是正確的，
+ * 否則限流與封鎖都可被單一偽造標頭繞過。
+ */
+export interface MonitorClientIPTrust {
+  mode: 'trusted-proxies' | 'legacy-headers' | (string & {});
+  /** 實際生效的位址段。宣告了卻一筆都解析不出來時會是空陣列。 */
+  trusted: string[];
+  /** 設定檔原文。讓管理員看得到「我宣告了什麼」與「程式認得什麼」的落差。 */
+  declared?: string;
+  /**
+   * 宣告了卻無法解析成位址段的項目。
+   *
+   * 它補的是「部分寫錯」這個盲點：只回 `trusted` 時，一條打錯的位址段
+   * （例如 `172.17.0.0/16` 少打一個字）會靜默地永遠不生效，而畫面顯示的是
+   * 一份看起來正常的白名單。宣告了但**全部**寫錯時會列出全部項目。
+   */
+  invalid?: string[];
 }
 
 export type MonitorDependencyState = 'ok' | 'down' | 'disabled' | (string & {});

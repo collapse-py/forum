@@ -33,6 +33,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -653,6 +654,10 @@ func (s *Server) handleAdminUserTags(w http.ResponseWriter, r *http.Request, raw
 	// 逐項比對。理由是這個操作的本質是「整組被換掉」：逐項 diff 會產生
 	// 2N 列重複內容（舊的 N 個 + 新的 N 個），而稽核要回答的問題是
 	// 「這個人現在被標成什麼、原本被標成什麼」—— 那正是兩個整組清單。
+	//
+	// 兩邊都走 joinTagNames（統一在 Go 端排序）：before 來自 SQL 的
+	// ORDER BY t.name，after 是請求順序，而 onlyChanged 比的是字串 ——
+	// 不統一排序的話，同一組標籤換個勾選順序就會被寫成一筆假變更。
 	beforeTagNames, err := loadAdminUserTagNames(r.Context(), tx, email)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[AUDIT] 讀取改動前標籤失敗 email=%s: %v", email, err)
@@ -693,7 +698,7 @@ func (s *Server) handleAdminUserTags(w http.ResponseWriter, r *http.Request, raw
 	}
 	// 提交後重新讀取一次，讓回應內容即為資料庫的權威狀態（依名稱排序）。
 	if err := s.recordAdminAction(r, tx, adminActionUserTags, audit.TargetUser, email, email,
-		audit.Change{Field: "tags", Before: strings.Join(beforeTagNames, ", "), After: strings.Join(afterTagNames, ", ")}); err != nil {
+		onlyChanged(audit.Change{Field: "tags", Before: joinTagNames(beforeTagNames), After: joinTagNames(afterTagNames)})...); err != nil {
 		logger.ErrorfContext(r.Context(), "[AUDIT] 寫入標籤變更紀錄失敗 email=%s: %v", email, err)
 		internalError(w, "unable to update user tags")
 		return
@@ -770,6 +775,59 @@ func loadAdminUserTagNames(ctx context.Context, q queryer, email string) ([]stri
 		names = append(names, name)
 	}
 	return names, rows.Err()
+}
+
+// sortedTagNames 複製一份名稱清單並依字典序排序，回傳新切片（不改動入參）。
+//
+// 「依名稱排序」而不是「依 id」是因為稽核紀錄的讀者是人，而人的比對順序是
+// 名稱，不是後端的 surrogate key。
+func sortedTagNames(names []string) []string {
+	out := make([]string, len(names))
+	copy(out, names)
+	sort.Strings(out)
+	return out
+}
+
+// joinTagNames 把標籤名稱清單組成稽核 diff 用的單一字串。
+//
+// 排序是刻意的，而且不只是為了好看：這個字串會成為 audit.Change 的 Before
+// 與 After，而稽核紀錄的 Before / After 必須「同一組標籤永遠長得一樣」——
+// 否則只Changed 的字串相等判斷（audit_log.go 的 onlyChanged）就會對同一組
+// 標籤給出「有變更」的結論，而那正是稽核紀錄被假變更污染的來源。
+//
+// 兩邊都必須走這個函式：既有清單來自 SQL 的 ORDER BY t.name（MySQL 排序規則
+// 與 Go 的 sort.Strings 對大小寫與 Unicode 的順序未必一致），送來的清單則是
+// 管理員的勾選順序。統一在 Go 端排序才讓兩邊可比。
+func joinTagNames(names []string) string {
+	return strings.Join(sortedTagNames(names), ", ")
+}
+
+// sameTagSet 判斷兩份標籤名稱清單是否代表**同一組**標籤（順序不影響結果）。
+//
+// 為什麼不能比字串：既有清單是名稱序（loadAdminUserTagNames 的 ORDER BY），
+// 而送進來的是請求順序 —— 後端不做任何排序，因為後端沒有理由猜管理員的
+// 勾選順序。而後臺的勾選順序就是點擊順序（frontend/src/admin/provider.tsx 的
+// onToggleTag 是 append），所以「同一組標籤」會產生兩種不同排列的字串。
+//
+// 症狀不是報錯，而是稽核紀錄裡出現一批 `alpha, beta → beta, alpha` 的假變更，
+// 而且批次守衛（handleAdminBatchTags）會因此幾乎永不成立 —— 它省下的寫入與
+// 它宣稱要消除的污染，兩者都沒發生。
+//
+// 比較的是集合語意：長度相同且排序後逐項相同。兩邊的清單都不該有重複
+// （forum_user_tag_assignments 的複合主鍵擋掉重複綁定，請求端也擋掉重複 id），
+// 因此「排序後逐項相同」等價於集合相等。
+func sameTagSet(before, after []string) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	left := sortedTagNames(before)
+	right := sortedTagNames(after)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // queryer 是 *sql.DB 與 *sql.Tx 都滿足的查詢介面。
@@ -959,7 +1017,14 @@ func (s *Server) createAdminUserPost(w http.ResponseWriter, r *http.Request, raw
 	// 搜尋索引（best-effort，失敗只記日誌）。這條路徑寫入的作者是目標使用者本人，
 	// 因此索引裡的 authorEmail 必須跟著是對方 —— 後臺的「以信箱找出所有貼文」
 	// 才不會漏掉代發的那些。刻意放在 Commit 之後（索引是外部系統）。
-	s.indexForumPost(r.Context(), id, req.Content, email, createdAt)
+	//
+	// 失敗時也補記稽核：這是**後臺**的操作（代發文），因此 actor 是管理員而
+	// target 是使用者 —— 這與 adminActionPostCreate 那筆是同一個操作，只是從
+	// 使用者的角度寫。少了這一筆，「代發文成功但搜尋搜不到」在稽核紀錄裡與
+	// 「代發文成功且搜尋得到」完全無法區分（理由見 recordPostIndexFailure）。
+	if err := s.indexForumPost(r.Context(), id, req.Content, email, createdAt); err != nil {
+		s.recordPostIndexFailure(r, id, err)
+	}
 	// 回傳新文章 id，讓前端可立即在畫面中插入該筆資料。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"ok": true, "id": id})
 }
