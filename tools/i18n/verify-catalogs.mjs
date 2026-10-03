@@ -1,4 +1,4 @@
-// 驗證所有翻譯目錄：鍵集、順序、佔位符、未翻譯殘留，以及 README 的語系宣稱。
+// 驗證所有翻譯目錄：鍵集、順序、佔位符、字元損毀、未翻譯殘留，以及 README 的語系宣稱。
 //
 // 目錄有兩種排版 —— 早期那批是一行一筆
 //   'common.cancel': '取消',
@@ -40,6 +40,23 @@ const ph = (s) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(','
  */
 const HAN_IS_FOREIGN = (file) => !/^(zh-|ja)/.test(file);
 
+/*
+ * U+FFFD（REPLACEMENT CHARACTER）＝ 字元損毀，與語言無關。
+ *
+ * 為什麼這條要獨立於「未翻譯殘留」：U+FFFD 不是任何一種語言的字，它出現在
+ * 檔案裡只代表某個字元在**某一次編碼往返**中被解碼失敗並換成替代符號 ——
+ * 原始位元組當場就丟了，因此它既不能被翻譯修好，也不會因為換語系而消失。
+ *
+ * 這是唯一一條「看起來像翻譯問題、實際上是資料損毀」的情況，而且現有檢查
+ * 完全抓不到：佔位符仍對得上（損毀發生在純文字裡）、鍵集完整、順序正確。
+ * 實際抓到過兩處：th.ts 的 export.batchNote 與 block.reasonHint，兩者都
+ * 因為「整句還看得出大致意思」而被當成可接受的翻譯擱置了。
+ *
+ * 因此這一條**不放行**：命中就是 BAD，並在訊息裡指出是哪個鍵 —— 那個鍵的
+ * 值已經永久失去，必須照 messages.ts 的原文重寫，不能靠修字元救回。
+ */
+const REPLACEMENT = /\uFFFD/;
+
 const src = readFileSync(messagesPath, 'utf8');
 const body = src.slice(src.indexOf('export const zhTW = {'));
 const order = [...body.matchAll(/^ {2}'([a-zA-Z0-9_.]+)':/gm)].map((m) => m[1]);
@@ -60,13 +77,21 @@ for (const file of files) {
   const extra = keys.filter((k) => !order.includes(k));
   const badPh = [];
   const untranslated = [];
+  const damaged = [];
   for (const k of keys) {
+    if (REPLACEMENT.test(vals.get(k))) damaged.push(k);
     if (PIN.includes(k)) continue;
     if (ph(srcVals.get(k) ?? '') !== ph(vals.get(k))) badPh.push(k);
     if (HAN_IS_FOREIGN(file) && HAN.test(vals.get(k))) untranslated.push(k);
   }
   const orderOk = JSON.stringify(keys) === JSON.stringify(order);
-  const ok = !missing.length && !extra.length && !badPh.length && !untranslated.length && orderOk;
+  const ok =
+    !missing.length &&
+    !extra.length &&
+    !badPh.length &&
+    !untranslated.length &&
+    !damaged.length &&
+    orderOk;
   if (!ok) bad += 1;
   console.log(
     `${ok ? 'OK  ' : 'BAD '}${file.padEnd(12)}${String(keys.length).padStart(4)}` +
@@ -74,7 +99,10 @@ for (const file of files) {
       (extra.length ? ` extra:${extra.length}` : '') +
       (orderOk ? '' : ' order:differs') +
       (badPh.length ? ` placeholder:${badPh.join(',')}` : '') +
-      (untranslated.length ? ` untranslated:${untranslated.join(',')}` : ''),
+      (untranslated.length ? ` untranslated:${untranslated.join(',')}` : '') +
+      (damaged.length
+        ? ` damaged:${damaged.join(',')}（含 U+FFFD，原始字元已丟失，須照 messages.ts 重寫）`
+        : ''),
   );
 }
 

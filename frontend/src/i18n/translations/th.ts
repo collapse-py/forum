@@ -12,7 +12,7 @@ import type { MessageKey } from '../messages';
 
 export const th: Record<MessageKey, string> = {
   'common.cancel':
-    'yกเลิก',
+    'ยกเลิก',
   'common.save':
     'บันทึกลง',
   'common.submitting':
@@ -647,7 +647,7 @@ export const th: Record<MessageKey, string> = {
   'export.safety': 'ไฟล์ขึ้นต้นด้วย BOM ของ UTF-8 จึงเปิดใน Excel แล้วไม่เพี้ยน',
   'export.safetyPrefix': 'ค่าที่ขึ้นต้นด้วย = + - @ หรือช่องว่างที่มองไม่เห็น จะถูกเติมเครื่องหมายคำพูดนำหน้า นั่นคือสิ่งที่ทำให้โปรแกรมตารางถือเป็นข้อความแทนที่จะรันเป็นสูตร การเติมนี้ตั้งใจไว้ ไม่ควรขอให้เอาออก',
   'export.batchTitle': 'ทำหลายรายการพร้อมกัน',
-  'export.batchNote': 'ปุ่มจะทำงานหลังคุณเลือกบัญชีในหน้าผู้ใช้ การทำหลายรายการจะมีผลครบทั้งชุดหรือไม่มีผลเลย ไม่มีผลล��พอ',
+  'export.batchNote': 'ปุ่มจะทำงานหลังคุณเลือกบัญชีในหน้าผู้ใช้ การทำหลายรายการจะมีผลครบทั้งชุดหรือไม่มีผลเลย ไม่มีผลบางส่วน',
   'export.batchSuspend': 'ระงับที่เลือก',
   'export.batchReinstate': 'คืนสถานะที่เลือก',
   'export.batchTags': 'ตั้งแท็กเป็นชุด',
@@ -716,7 +716,7 @@ export const th: Record<MessageKey, string> = {
   'block.durationLabel': 'ระยะเวลา',
   'block.reasonLabel': 'เหตุผล',
   'block.reasonPlaceholder': 'เหตุใดจึงบล็อกที่อยู่นี้ (จะบันทึกไว้ในบันทึกการตรวจสอบ)',
-  'block.reasonHint': 'เหตุผลจะบันทึกลงบันทึกการตรวจสอบเท่านั้น ไม่แสดงแก่ผู้ถูกบล็อก และไม่ปรากฏในข้อความแ��้วของสาธารณะ',
+  'block.reasonHint': 'เหตุผลจะบันทึกลงบันทึกการตรวจสอบเท่านั้น ไม่แสดงแก่ผู้ถูกบล็อก และไม่ปรากฏในข้อความแสดงข้อผิดพลาดของสาธารณะ',
   'block.blocking': 'กำลังบล็อก…',
   'block.done': 'บล็อก {ip} แล้ว',
   'block.removed': 'ปลดบล็อก {ip} แล้ว',
