@@ -20,8 +20,34 @@ frontend/dist/
 # 檔案伺服器的本機存儲，執行時會自動建立，放的是使用者上傳的檔案。
 files_server/storage/
 
+# 覆蓋率檔（go test -coverprofile 的輸出）。它是每次測試都會變動的報表，
+# 而且從 CI 的 artifact 就能拿到 —— 進版控只會製造無意義的 diff。
+coverage.out
+cov.out
+*.cover
+
 # 產生式的檔案統計表（語言 / 檔數 / 行數）。它是一次性產出的報表，每次
 # 內容都會隨著任何一行程式碼而改變 —— 進版控只會製造無意義的 diff 與
 # 合併衝突。檔名以底線開頭是為了讓它在檔案總管裡排最後、也讓人一眼看出
 # 它不是專案的一部分。
 _code_statistics.csv
+
+# CI 相關產物。
+#
+# 不變條件分析器的建置輸出（tools/invariants/ 是獨立的 Go 模組，CI 會自己
+# build 一份）。它落在 .gitignore 裡是為了讓本機跑過 `go build -o invariants .`
+# 之後不會把一個平台相關的執行檔帶進版控。
+tools/invariants/invariants
+tools/invariants/invariants.exe
+
+# docker compose 的環境變數（MYSQL_ROOT_PASSWORD、REDIS_PASSWORD）。
+# 範本在 deploy/settings.conf.example，而實際的那份**不該**進版控。
+#
+# 為什麼連它都需要明確寫在這裡，而 .gitignore 開頭那條無路徑的 config.conf
+# 擋不住它：那一條只擋檔名為 config.conf 的檔案，而這個檔叫 settings.conf。
+# 兩份設定檔含憑證，而「被 .gitignore 擋掉」是它們唯一的防線 —— 因此這個名字
+# 必須明確列出來。
+deploy/settings.conf
+
+# docker compose 產生的備份檔（部署者自己做的匯出）。
+*.sql.gz

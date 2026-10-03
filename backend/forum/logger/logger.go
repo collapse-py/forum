@@ -187,15 +187,27 @@ func parseLevel(s string) Level {
 // sanitizeLogValue 為要寫入日誌的欄位值做正規化，避免使用者可控輸入破壞日誌結構。
 //
 // 處理規則：
-//  1. 去掉頭尾空白；全空白的值回傳 "-"，讓欄位在輸出中仍然可見而不留空缺。
+//  1. 去掉頭尾空白；清洗後為空的值回傳 "-"，讓欄位在輸出中仍然可見而不留空缺。
 //  2. 把 \n、\r、\t 換成一般空白 —— 這是對抗「注入換行偽造出一行假的日誌」的主要防線。
 //  3. 丟棄其餘 C0 控制字元與 DEL（127），它們會讓終端機或日誌檢視器產生怪異顯示。
-//  4. 長度超過 256 bytes 時截斷成 253 bytes 加 "..."，避免單一欄位（通常是 msg）
-//     灌爆檔案或讓一條記錄佔掉整行。
+//  4. 長度超過 256 bytes 時截斷，且**截在 rune 邊界上**。
 //
 // 逐 rune 處理而非逐 byte，是為了不切斷 UTF-8 多位元組字元，避免產生亂碼。
+// 這一點在規則 3 與規則 4 都成立 —— 規則 4 特別容易漏掉：直接寫
+// value[:253] + "..." 會把一個中文字切成三個位元組加上那個字的頭，
+// 而欄位裡因此出現一個 U+FFFD。那正是這條規則要防的亂碼。
 //
-// 注意：本函式不遮蔽敏感資訊。email 與 IP 會以原樣輸出。
+// 規則 1 的「清洗後再判斷」不可省：只檢查原值是否為空白的話，一個只由控制
+// 字元組成的值（例如某個標頭剛好是 "\x01"）會變成空字串，而欄位在輸出裡就變成
+// 一個沒有值的 key=—— 那正是規則 1 要避免的「不留空缺」。
+//
+// 已知殘餘限制（本函式刻意不做的事）：
+//   - **不做敏感資訊遮蔽**。email 與 IP 會以明文輸出。
+//   - **不跳脫空白與等號**。因此一個值若含有 " fake_ip=9.9.9.9" 這樣的內容，
+//     在 text 輸出裡會與真正的欄位難以區分（JSON 輸出沒有這個問題，因為值被
+//     包在引號內）。這是刻意的取捨：要擋掉它就得改變整個 text 輸出的形狀，
+//     而那會讓所有既有的 grep 規則失效。規則 2 擋掉的是「新的一行」——
+//     那才是能偽造出一條記錄的層級，也是稽核日誌真正需要守住的那一層。
 func sanitizeLogValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -217,13 +229,52 @@ func sanitizeLogValue(value string) string {
 		}
 	}
 	value = strings.TrimSpace(b.String())
-	if len(value) > 256 {
-		// 保留前 253 bytes 再補 "..."，讓總長度上限（256）可預測；
-		// 由於上面的過濾已移除控制字元，切割點落在合法位元組的機率極高。
-		value = value[:253] + "..."
+	if value == "" {
+		// 規則 1 的後半段：原始值非空但清洗後空了（全是控制字元）。
+		// 沒有這個分支的話，一個只含 \x01 的標頭會讓輸出出現 "ip=" 這種
+		// 語意不明的空欄位。
+		return "-"
+	}
+	if len(value) > maxLogValueBytes {
+		// 截斷點必須落在 rune 邊界上，否則會在欄位裡留下一個 U+FFFD。
+		//
+		// 邊界的找法是從 253 往前退到最近的一個「不是延續位元組」的位置：
+		// UTF-8 的延續位元組形狀是 10xxxxxx，而一個字元的**第一個**位元組不是。
+		// 因此往前退到第一個非延續位元組就是字元邊界。
+		//
+		// 這裡刻意用位元組層級的檢查而不是 strings.ToValidUTF8：後者會把壞掉的
+		// 位元組換成 U+FFFD（增加 3 bytes），那會讓上限變成「不確定的 256+」，
+		// 而這個函式的整個長度規則就是為了讓上限可預測。
+		cut := maxLogValueBytes - truncationEllipsisLen
+		for cut > 0 && isUTF8Continuation(value[cut]) {
+			cut--
+		}
+		value = value[:cut] + truncationEllipsis
 	}
 	return value
 }
+
+const (
+	// maxLogValueBytes 是單一欄位值的長度上限。
+	//
+	// 256 這個數字是「在 text 輸出裡一眼看不出被截斷、但足以容納一個貼文片段或
+	// 一個完整 email + 上下文」之間的折衷。刻意不是更小（那會讓診斷資訊被切掉）
+	// 也不是更大（那會讓單一欄位灌爆檔案）。
+	maxLogValueBytes = 256
+	// truncationEllipsis 是超長時附加的標記。
+	//
+	// 刻意寫出「有被截斷」這件事：一句沒有標記的半句話，會讓讀者以為那就是
+	// 完整的內容，而那正是最容易被誤判成「使用者送了這個字串」的情況。
+	truncationEllipsis = "..."
+	// truncationEllipsisLen 是上面那個標記的長度。
+	//
+	// 抽出成常數是為了讓「總長度 ≤ maxLogValueBytes」這個不變條件寫在一處：
+	// 標記若被改長，不會有人記得回來調 cut。
+	truncationEllipsisLen = len(truncationEllipsis)
+)
+
+// isUTF8Continuation 判斷一個位元組是否為 UTF-8 的延續位元組（10xxxxxx）。
+func isUTF8Continuation(b byte) bool { return b&0xC0 == 0x80 }
 
 // logf 是不帶 context 的內部寫入路徑。
 // callerSkip 固定為 3：呼叫堆疊為 logWithContext → logf → Debugf/Infof/... → 業務程式碼，

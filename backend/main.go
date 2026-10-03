@@ -95,7 +95,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"flag"
+	"fmt"
 	"forum/forum/audit"
 	"forum/forum/auth"
 	"forum/forum/config"
@@ -108,21 +111,66 @@ import (
 	"forum/forum/session"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"sort"
+	"strings"
 	"time"
+
+	// 空白匯入：驅動透過 init() 向 database/sql 註冊，因此 main 只需要
+	// sql.Open 就能連線。這個空白匯入**必須**存在，否則 sql.Open("mysql", …)
+	// 會回 "unknown driver"，而那個錯誤訊息完全不會指向「忘了匯入驅動」。
+	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/redis/go-redis/v9"
 )
 
+// configPath 是設定檔相對於工作目錄的路徑。
+//
+// 抽成常量的理由：main 與 checkConfig 兩處都要用它，而它錯了之後的症狀是
+// 「設定檔載入失敗」—— 那個訊息不會告訴人「你的工作目錄不對」。讓兩處共用
+// 同一個常量的話，改路徑時不會漏掉其中一處。
+const configPath = "config/config.conf"
+
 // main 依固定順序建立所有相依元件，最後進入阻塞監聽直到收到停止訊號。
 //
-// 回傳值：無。兩條離開路徑的差別是本函式唯一需要留意的地方：
+// 回傳值：無。三條離開路徑的差別是本函式唯一需要留意的地方：
+//   - -check：輸出設定報告後正常返回，exit code 0 或 1（見 checkConfig）。
 //   - 監聽期間發生錯誤（埠被占用等）→ logger.Fatalf，exit code 1。
 //   - 收到 SIGINT／SIGTERM → 走完優雅停止流程後正常返回，exit code 0。
 //     因此部署端看到 exit code 0 才知道「停止是走完流程的」，而不是被中途砍掉。
 func main() {
+	// -check 在最前面處理：它的整個目的就是「不解開任何相依元件就檢查設定」，
+	// 因此它必須在連 MySQL / Redis 之前就結束掉流程。
+	//
+	// 刻意用自訂的 -config 旗標而不是接受位置參數：位置參數會讓
+	// 「-check config/config.conf」與「config/config.conf -check」兩種順序都被
+	// 接受，而 flag 只認得前者 —— 這是刻意的，因為 flag 遇到未知的位置參數會
+	// 直接報錯，而不是被忽略。
+	checkOnly := flag.Bool("check", false, "只讀設定檔並輸出報告，不啟動服務（診斷「設定寫錯了但服務不報錯」用）")
+	healthOnly := flag.Bool("healthz", false, "探測相依服務並回報健康狀態後結束（供容器 healthcheck 使用）")
+	configFlag := flag.String("config", configPath, "設定檔路徑（相對於工作目錄）")
+	flag.Parse()
+
+	if *checkOnly {
+		// 刻意不在這裡印錯誤：checkConfig 已經把結論與原因寫在報告的最後一段，
+		// 由它再印一次只會產生「設定檢查失敗：設定檢查失敗（1 項）」這種
+		// 重複輸出，而且它會出現在報告的中間（stdout 與 stderr 交錯），
+		// 讓人讀不到結論。
+		if err := checkConfig(*configFlag); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *healthOnly {
+		if err := reportHealth(*configFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "[HEALTH] unhealthy: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// 設定檔路徑相對於工作目錄（見檔案層說明），不是執行檔目錄。
-	cfg, err := config.Load(filepath.Join("config", "config.conf"))
+	cfg, err := config.Load(*configFlag)
 	if err != nil {
 		// 設定檔讀不到就無法推導出任何組態，連「先跑起來再說」都不可行，直接終止。
 		logger.Fatalf("[CONFIG] Failed to load config.conf: %v", err)
@@ -135,6 +183,23 @@ func main() {
 	}
 	// 正常結束時關閉日誌檔句柄；Fatalf 走 os.Exit(1)，不會觸發這個 defer。
 	defer logger.Close()
+
+	/*
+	 * 設定檔的「會靜默失效」檢查。
+	 *
+	 * 排在 logger 就緒之後、任何其他相依元件之前：這一項的失敗是「設定寫錯了」，
+	 * 與 Redis / MySQL 連不連得上無關，因此沒有理由讓它排在後面 —— 若設定本身
+	 * 有問題，先連資料庫只會多花幾秒去確認一件與本錯誤無關的事。
+	 *
+	 * 為什麼要視為致命（Fatalf 而非 Warnf）：這個專案既有的立場是「不啟動比錯誤
+	 * 啟動好」。目前 Validate 檢查的項目（媒體 token TTL 沿用 30 天兜底值）在啟動
+	 * 之後完全不會產生任何症狀 —— 服務正常回應、日誌乾淨、HTTP 狀態碼全對 ——
+	 * 唯一的表現是「圖片的存取權杖一個月不失效」，而且要等有人回報才會知道。
+	 * 降級成警告等於把一個部署時就能攔下的問題，換成一個沒有人會去看的訊息。
+	 */
+	if err := cfg.Validate(); err != nil {
+		logger.Fatalf("[CONFIG] %v", err)
+	}
 
 	// 同一個 Redis 實例被兩處共用，肩負兩種職責：
 	//   1. session 儲存（交給 session.Manager，key 前綴 "forum:session:"）
@@ -429,3 +494,353 @@ func main() {
 
 	logger.Infof("[SERVER] Forum server stopped")
 }
+
+// ---------------------------------------------------------------------------
+// -check：設定檔報告
+// ---------------------------------------------------------------------------
+
+/*
+checkConfig 讀設定檔、套用兜底值、跑一次 Validate，並把結果寫成一份人可讀的報告。
+
+【為什麼需要它】
+這個專案最大的失敗模式不是「服務掛掉」，而是「服務看起來正常，行為卻是錯的」。
+ROADMAP.md 的 Phase 0.5 是一個具體例子：媒體 token TTL 沿用 30 天兜底值時，
+啟動之後完全沒有症狀 —— 服務正常回應、日誌乾淨、HTTP 狀態碼全對 —— 唯一的
+表現是「圖片的存取權杖一個月不失效」，而且要等有人回報才知道。
+
+而「部署當下就跑一次檢查」與「有人日後回報圖片壞掉、但查不出原因」之間的差距，
+就是這個旗標存在的理由。
+
+【刻意不做的事】
+  - **不連 MySQL、不連 Redis、不探測檔案伺服器。** 那會讓這個旗標變成一個
+    「健康檢查」，而健康檢查有它自己的位置（容器的 healthcheck）。這裡只回答
+    「這個行程會以什麼組態啟動」。
+  - **不印任何憑證。** 報告裡的 DSN、client secret、Redis 密碼、token 一律
+    只印「有設定 / 沒設定」。理由不是謹慎而已：-check 的輸出會出現在 CI 日誌、
+    issue 回報與截圖裡，而這些地方經常沒有存取控制。
+
+【退出碼】
+
+	0	報告完成，沒有發現問題
+	1	報告完成，但 Validate 找到了問題（部署者必須先修）
+	1	設定檔讀不到或解析失敗（訊息會說明是哪一個）
+*/
+func checkConfig(path string) error {
+	out := os.Stdout
+
+	fmt.Fprintf(out, "設定檔檢查：%s\n", path)
+	fmt.Fprintf(out, "（本檢查不連線任何外部服務；它回答的是「這個行程會以什麼組態啟動」）\n\n")
+
+	// 檔案層級的問題先處理：解析失敗時沒有任何設定值可報，而那個錯誤
+	// （檔案不存在、key=value 語法錯誤）本身就是要回報的結論。
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(out, "結論：不通過\n  無法讀取或解析設定檔：%v\n", err)
+		fmt.Fprintf(out, "\n  請確認：檔案存在、工作目錄正確（設定檔路徑是 %q，相對於工作目錄）、格式是 key=value。\n", path)
+		return err
+	}
+
+	// 1. 環境判斷 —— 它決定了後面哪些預設值是「可接受的開發便利」、
+	//    哪些是「正式環境不該出現的東西」。
+	fmt.Fprintf(out, "環境\n")
+	fmt.Fprintf(out, "  判定為正式環境     : %v\n", cfg.IsProduction())
+	fmt.Fprintf(out, "  依據              : COOKIE_SECURE=%v, PUBLIC_BASE_URL 的協定\n", cfg.CookieSecure)
+	if !cfg.IsProduction() {
+		fmt.Fprintf(out, "  注意              : 非正式環境下會採用開發用的兜底值；正式部署必須啟用 HTTPS\n")
+	}
+	fmt.Fprintln(out)
+
+	// 2. 網路與路由。這一組錯了的症狀最明顯，但也是最常見的打錯字來源。
+	fmt.Fprintf(out, "網路\n")
+	fmt.Fprintf(out, "  監聽位址           : %s\n", cfg.ServerPort)
+	fmt.Fprintf(out, "  對外根網址         : %s\n", cfg.PublicBaseURL)
+	fmt.Fprintf(out, "  允許的來源         : %s\n", strings.Join(cfg.TrustedOrigins, ", "))
+	if cfg.TrustedOrigins == nil || len(cfg.TrustedOrigins) == 0 {
+		fmt.Fprintf(out, "  警告              : 來源白名單為空 = 所有來源視為可信 = CSRF 防護形同關閉\n")
+	}
+	// 代理信任的預設值（空）代表「標頭優先」，而那在真的有一道代理擋在後面時
+	// 會讓限流與 IP 封鎖都可被單一偽造標頭繞過。因此值得單獨一行。
+	if cfg.TrustedProxyCIDRs == "" {
+		fmt.Fprintf(out, "  可信任代理位址段   : （未設定 = 採信 X-Forwarded-For）\n")
+		if cfg.IsProduction() {
+			fmt.Fprintf(out, "  警告              : 正式環境建議設定 TRUSTED_PROXY_CIDRS，"+
+				"否則限流與 IP 封鎖都能用一個偽造標頭繞過\n")
+		}
+	} else {
+		fmt.Fprintf(out, "  可信任代理位址段   : %s\n", cfg.TrustedProxyCIDRs)
+	}
+	fmt.Fprintln(out)
+
+	// 3. 限流。刻意逐組印出：它們是三個獨立的額度，站方常常只知道其中一個。
+	fmt.Fprintf(out, "限流（每組為獨立額度；超出的部分直接丟棄，不排隊）\n")
+	fmt.Fprintf(out, "  內容寫入           : %d 次 / %s\n", cfg.RateLimitRequests, cfg.RateLimitWindow)
+	fmt.Fprintf(out, "  圖片上傳           : %d 次 / %s\n", cfg.RateLimitUploadRequests, cfg.RateLimitUploadWindow)
+	fmt.Fprintf(out, "  OAuth              : %d 次 / %s\n", cfg.RateLimitAuthRequests, cfg.RateLimitAuthWindow)
+	fmt.Fprintln(out)
+
+	// 4. 相依端點。憑證只報「有無」，不報內容。
+	fmt.Fprintf(out, "相依端點\n")
+	fmt.Fprintf(out, "  MySQL              : %s\n", dbEndpoint(cfg.DbDSN))
+	fmt.Fprintf(out, "  連線池             : 開 %d / 閒置 %d / 存活 %s\n",
+		cfg.DbMaxOpenConns, cfg.DbMaxIdleConns, cfg.DbConnMaxLifetimeMinutes)
+	fmt.Fprintf(out, "  Redis              : %s (db %d)\n", cfg.RedisAddr, cfg.RedisDB)
+	fmt.Fprintf(out, "  檔案伺服器（後台） : %s\n", cfg.FilesServerURL)
+	fmt.Fprintf(out, "  檔案伺服器（對外） : %s\n", cfg.FilesServerPublicURL)
+	fmt.Fprintf(out, "  Elasticsearch      : %s（索引 %s）\n", orNotSet(cfg.ESURL, "未設定 → 搜尋功能不會啟用，會退回 MySQL 的 LIKE 比對"), cfg.ESIndex)
+	fmt.Fprintln(out)
+
+	// 5. 憑證。只報有無 —— 見函式檔頭的說明。
+	//
+	// 刻意「不」對欄位名做 %-Ns 的對齊：Go 的 fmt 依**位元組**計算寬度，而這些
+	// 標籤是中文，因此任何以位元組對齊的嘗試都會產生錯位的欄位。改用一個分隔
+	// 點「·」讓眼睛有錨點，而不追求機械對齊。
+	fmt.Fprintf(out, "憑證（只報有無，不報內容）\n")
+	for _, c := range []struct{ name, value string }{
+		{"GOOGLE_CLIENT_ID", cfg.GoogleClientID},
+		{"GOOGLE_CLIENT_SECRET", cfg.GoogleClientSecret},
+		{"GOOGLE_REDIRECT_URL", cfg.GoogleRedirectURL},
+		{"FILES_SERVER_TOKEN", cfg.FilesServerToken},
+		{"REDIS_PASSWORD", cfg.RedisPassword},
+		{"DB_DSN 內含帳密", cfg.DbDSN},
+	} {
+		fmt.Fprintf(out, "  %s · %s\n", c.name, present(c.value))
+	}
+	// 這兩項的關係是「一起才有意義」，因此不只報有無，還要報對不對得上。
+	if cfg.GoogleClientID != "" && cfg.GoogleRedirectURL == "" {
+		fmt.Fprintf(out, "  警告              : 有 client id 卻沒有回呼網址，登入會以 500 結束\n")
+	}
+	if cfg.IsProduction() && cfg.FilesServerToken == "" {
+		fmt.Fprintf(out, "  警告              : 正式環境未設定 FILES_SERVER_TOKEN —— "+
+			"上傳端點會接受任何來源的請求\n")
+	}
+	fmt.Fprintln(out)
+
+	// 6. 媒體 token。TTL 的「有無」是這份報告裡最重要的一行。
+	fmt.Fprintf(out, "媒體存取權杖\n")
+	fmt.Fprintf(out, "  Redis key 前綴     : %s\n", cfg.MediaTokenKeyPrefix)
+	fmt.Fprintf(out, "  TTL                : %d 秒 · %s\n", cfg.MediaTokenTTLSecs, humanizeSeconds(cfg.MediaTokenTTLSecs))
+	if !cfg.MediaTokenTTLExplicit {
+		fmt.Fprintf(out, "  來源              : 設定檔未明確設定，採用開發用兜底值\n")
+		if cfg.IsProduction() {
+			fmt.Fprintf(out, "  錯誤              : 正式環境不接受兜底值，請設定 MEDIA_TOKEN_TTL_SECONDS\n")
+		}
+	} else {
+		fmt.Fprintf(out, "  來源              : 設定檔明確設定\n")
+	}
+	// 前綴與 session 共用同一個 Redis，因此互相覆蓋是一個靜默的嚴重錯誤。
+	if cfg.MediaTokenKeyPrefix == "" || strings.Contains(cfg.MediaTokenKeyPrefix, "session") {
+		fmt.Fprintf(out, "  錯誤              : 媒體 token 的前綴不得為空，也不得含 \"session\" —— "+
+			"兩種資料共用同一個 Redis，前綴重疊會互相覆寫\n")
+	}
+	fmt.Fprintln(out)
+
+	// 7. 逾時。這一組是「部署端與程式端必須對齊」的值，因此印出來讓人比對。
+	fmt.Fprintf(out, "逾時（必須大於部署端的停止上限，否則排空會被從中途砍掉）\n")
+	fmt.Fprintf(out, "  讀取標頭           : %s\n", cfg.ReadHeaderTimeout)
+	fmt.Fprintf(out, "  優雅停止排空       : %s\n", cfg.ShutdownTimeout)
+	fmt.Fprintln(out)
+
+	// 8. 管理員白名單。列出實際存進去的值（已經過正規化）——
+	//    這正是部署者要確認的東西：「我寫的那個信箱，真的在名單裡嗎」。
+	fmt.Fprintf(out, "管理員白名單（%d 筆，已去除空白並轉小寫）\n", len(cfg.AllowedAdminEmail))
+	if len(cfg.AllowedAdminEmail) == 0 {
+		fmt.Fprintf(out, "  （空白）\n")
+		fmt.Fprintf(out, "  警告              : 沒有管理員就沒有人能進後台；"+
+			"白名單不動是刻意的安全預設值\n")
+	}
+	sorted := append([]string(nil), cfg.AllowedAdminEmail...)
+	sort.Strings(sorted)
+	for _, email := range sorted {
+		fmt.Fprintf(out, "  - %s\n", email)
+	}
+	fmt.Fprintln(out)
+
+	// 9. 保留期與站名。這兩組的失效都是靜默的（稽核頁看起來正常、頁面標題
+	//    用著預設站名），所以值得各佔一行。
+	fmt.Fprintf(out, "資料保留與站名\n")
+	fmt.Fprintf(out, "  稽核紀錄保留       : %d 天\n", cfg.AuditRetentionDays)
+	fmt.Fprintf(out, "  監控彙總保留       : %d 小時\n", cfg.MonitorRetentionHours)
+	fmt.Fprintf(out, "  站名               : %s\n", cfg.ForumName)
+	fmt.Fprintf(out, "  標誌短名           : %s\n", cfg.ForumShortName)
+	fmt.Fprintln(out)
+
+	// 10. 日誌。
+	fmt.Fprintf(out, "日誌\n")
+	fmt.Fprintf(out, "  等級 / 格式        : %s / %s\n", cfg.LogLevel, cfg.LogFormat)
+	fmt.Fprintf(out, "  輸出檔案           : %s\n", orNotSet(cfg.LogFile, "未設定 → 只輸出到 stdout"))
+	fmt.Fprintln(out)
+
+	// 最後跑一次 Validate —— 上面那些是人可讀的資訊，這一個是機器可判定的結論，
+	// 而它的判定標準（含「正式環境不接受 30 天兜底值」）不在上面任何一組裡。
+	//
+	// 刻意在這裡就把結論與原因印完，而不是讓呼叫端去印：報告是一份要被「從頭
+	// 讀到尾」的東西，結論夾在中間或跑到 stderr 都不是好形式。
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(out, "結論：不通過\n\n%v\n\n", err)
+		fmt.Fprintf(out, "  這些設定不會讓服務啟動失敗 —— 服務會啟動，但行為是錯的。\n")
+		fmt.Fprintf(out, "  請依上面列出的項目修正設定檔後重跑一次。\n")
+		return err
+	}
+	fmt.Fprintf(out, "結論：通過 —— 這個設定檔可以讓服務正常啟動。\n")
+	fmt.Fprintf(out, "      （本檢查沒有驗證 MySQL／Redis／檔案伺服器是否連得上；"+
+		"那三件事各自有獨立的失敗訊息，症狀不會與設定問題混淆。）\n")
+	return nil
+}
+
+// dbEndpoint 從 DSN 取出主機與埠，不含帳密。
+//
+// 刻意不印整個 DSN：它含帳密，而 -check 的輸出經常被貼進 issue 或截圖。
+// 手寫解析而不是用 mysql.ParseDSN，是為了讓這個檢查不依賴驅動套件 ——
+// 它必須在「設定有問題」的情況下仍然能跑。
+func dbEndpoint(dsn string) string {
+	if dsn == "" {
+		return "（未設定）"
+	}
+	at := strings.LastIndex(dsn, "@")
+	rest := dsn
+	if at >= 0 {
+		rest = dsn[at+1:]
+	}
+	// 形如 "tcp(host:port)/dbname?params"
+	if open := strings.Index(rest, "("); open >= 0 {
+		if closeIdx := strings.Index(rest[open:], ")"); closeIdx > 0 {
+			return rest[open+1 : open+closeIdx]
+		}
+	}
+	return "（無法解析 DSN）"
+}
+
+// present 把一個值轉成「已設定（長度 N）」或「未設定」。
+//
+// 刻意連長度都印出：維運需要它來確認「設定檔裡那一行有沒有被讀到」，
+// 而長度不足以洩漏內容。
+func present(value string) string {
+	if value == "" {
+		return "未設定"
+	}
+	return fmt.Sprintf("已設定（%d 個字元）", len(value))
+}
+
+// orNotSet 把空字串換成帶說明的文字。
+//
+// 為什麼不共用一個空白佔位符：ES_URL 與 LOG_FILE 為空時的**後果完全不同** ——
+// 一個是搜尋功能不啟用，另一個是日誌只進 stdout。共用一個「（未設定）」會讓
+// 讀者以為兩者的嚴重程度相同，而它們不是。
+func orNotSet(value, reason string) string {
+	if value == "" {
+		return "（" + reason + "）"
+	}
+	return value
+}
+
+// humanizeSeconds 把秒數轉成人看得懂的描述。
+//
+// 刻意特別處理 2592000 這個數字（30 天）：它是開發用兜底值，而它在報告裡
+// 最需要被一眼認出來 —— 一個寫著「2592000 秒」的 TTL 很容易被讀者當成一個
+// 刻意設定的數字而放過。
+func humanizeSeconds(seconds int) string {
+	switch {
+	case seconds <= 0:
+		return "無限期"
+	case seconds%86400 == 0 && seconds >= 86400:
+		days := seconds / 86400
+		if days == 30 {
+			return "30 天 —— 這是開發用兜底值，正式環境應設成秒數級"
+		}
+		return fmt.Sprintf("%d 天", days)
+	case seconds%3600 == 0 && seconds >= 3600:
+		return fmt.Sprintf("%d 小時", seconds/3600)
+	case seconds%60 == 0 && seconds >= 60:
+		return fmt.Sprintf("%d 分鐘", seconds/60)
+	default:
+		return fmt.Sprintf("%d 秒", seconds)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// -healthz：容器健康檢查
+// ---------------------------------------------------------------------------
+
+/*
+reportHealth 探測 MySQL 與 Redis，兩者都通就回傳 nil。
+
+【為什麼要獨立一個模式，而不是讓 healthcheck 打 /healthz】
+那是最直覺的做法，而且它對「服務本身活著」這件事是正確的判斷。但容器的
+healthcheck 需要一個**存在於容器內**的指令，而 backend 映像是 distroless
+（沒有 shell、沒有 curl）。要讓 healthcheck 走 HTTP 就得放一個 HTTP 探測
+工具進去，那要嘛增加一個相依，要嘛寫一支二進位。
+
+把探測交給執行檔本身有兩個好處：零新增相依、而且探測的是「這個行程即將
+使用的相依」而不是「某個埠有東西在聽」—— 後者在 port-forward 或 sidecar
+存在時會給出錯誤的健康判定。
+
+【探測什麼、不探測什麼】
+探測：MySQL（Ping）、Redis（Ping）。
+不探測：
+  - Elasticsearch —— 它是可選的（ES_URL 留空就是未啟用），而未啟用時把它算
+    成不健康會讓一個完全正常的部署永遠顯示 unhealthy。
+  - 檔案伺服器 —— 它每次上傳都會用，而「上傳失敗」的診斷訊息遠比 healthcheck
+    的結論有價值。把一個非同步的依賴塞進同步的健康檢查只會讓重啟迴圈。
+  - 前端靜態檔 —— 那是資產存在性，不是相依服務。
+
+【逾時】
+每個探測各自 2 秒，總計最多 4 秒。這個數字必須小於 healthcheck 的 timeout
+（compose 裡是 5 秒），否則探測本身還沒結束容器就被判定為 unhealthy —— 而
+那會產生一個沒有任何資訊的重啟迴圈。
+*/
+func reportHealth(path string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("設定檔不可用：%w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
+	defer cancel()
+
+	// MySQL。刻意開一個**獨立的**連線而不是重用任何全域狀態：healthcheck 是
+	// 另一個行程（Docker 每次探測都重新執行 CMD），它必須能獨立運作。
+	if cfg.DbDSN == "" {
+		// 沒有 DSN 時不能判斷健康 —— 但也不能因此報 unhealthy：後端理論上
+		// 可以在沒有資料庫的情況下啟動（部分功能會失敗）。把這個情況報成
+		// 「無法驗證」而不是「不健康」，否則一個純快取式的部署會永遠不健康。
+		fmt.Println("[HEALTH] MySQL: 未設定 DSN，跳過探測（無法驗證）")
+	} else {
+		db, err := sql.Open("mysql", cfg.DbDSN)
+		if err != nil {
+			return fmt.Errorf("MySQL DSN 無法使用：%w", err)
+		}
+		// 設定上限，避免 Ping 逾時時連線池無限增長。
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(0)
+		pingErr := db.PingContext(ctx)
+		_ = db.Close()
+		if pingErr != nil {
+			return fmt.Errorf("MySQL 不可用：%w", pingErr)
+		}
+		fmt.Println("[HEALTH] MySQL: OK")
+	}
+
+	if cfg.RedisAddr == "" {
+		fmt.Println("[HEALTH] Redis: 未設定位址，跳過探測（媒體 token 驗證會停用）")
+	} else {
+		client := redis.NewClient(&redis.Options{
+			Addr:     cfg.RedisAddr,
+			Password: cfg.RedisPassword,
+			DB:       cfg.RedisDB,
+		})
+		pingErr := client.Ping(ctx).Err()
+		_ = client.Close()
+		if pingErr != nil {
+			return fmt.Errorf("Redis 不可用：%w", pingErr)
+		}
+		fmt.Println("[HEALTH] Redis: OK")
+	}
+
+	return nil
+}
+
+// healthProbeTimeout 是每個相依探測的期限。
+//
+// 刻意小於 compose healthcheck 的 timeout（5 秒）：探測必須在逾時之前回應，
+// 否則結果會是「探測被中斷」而那與「相依不可用」無法區分。
+const healthProbeTimeout = 2 * time.Second

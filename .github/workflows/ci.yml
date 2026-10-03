@@ -1,0 +1,333 @@
+# CI 閘門。
+#
+# 這個檔的存在理由只有一句：這個專案的不變條件目前靠紀律維持，而紀律的上限是
+# 「有人記得看」。沒有任何自動化閘門的狀態下，加功能等於擴大一個沒有人會自動
+# 檢查的面 —— 詳見 ROADMAP.md 的「為什麼是這個順序」。
+#
+# 三個 job 的取捨：
+#   backend / files_server  是兩個獨立的 Go 模組。刻意不合併：它們的 go.mod
+#                           與相依完全不同，合在一個 job 裡會讓其中一個壞掉時
+#                           難以判斷是哪一邊的問題。
+#   frontend                這個專案的 lint 就是型別檢查（strict +
+#                           noUncheckedIndexedAccess + exactOptionalPropertyTypes），
+#                           而 npm run build 內含 typecheck，因此不必另開 lint job。
+#
+# 刻意不做的事：
+#   - 不設一個虛高的覆蓋率目標（例如 70%）。那會誘發無行為斷言的測試來拉數字，
+#     而那種測試是負債：它會在重構時壞掉，卻沒有指出任何東西壞了。地板只防止
+#     退化（見 coverage-floor job）。
+#   - 不跑 E2E。Phase 3.1 的遷移測試已經需要真實 MySQL，而 CI 已經是容器裡，
+#     用 services: 區塊提供 MySQL 比在測試程式裡起容器更簡單也更可靠。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一個分支連續推送時取消舊的那次：省下排隊時間，且結果與最新一次推送相同。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (build / vet / test -race)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      # 固定到 1.26.x 而不是浮動的 stable：兩條 build 指令需要不同版本的 go.mod
+      # 是本專案過去的持續地雷（Phase 0.2 已統一），而 CI 是唯一會自動發現
+      # 「設定檔要求的版本比工具鏈舊」的地方。
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      # CGO 開啟是為了 race detector（Phase 1.2）。成本是這一個 apt line，
+      # 收益是把「這個專案沒有資料競爭」從靜態審查結論變成實證 —— 這個專案
+      # 大量依賴 goroutine 與記憶體共享（metrics.Registry 的 mutex + atomics、
+      # 三個 RateLimiter、probeDependencies 的三個並行探測、beginAdminTx 邊界的
+      # defer tx.Rollback()），而 CODE_REVIEW.md 明寫那個結論未經實證。
+      - name: 安裝 C 編譯器（race detector 需要）
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # -race 的測試必須真的跑了東西。coverageprofile 的存在就是為了這一點：
+      # 若某個套件完全沒有測試，它不會出現在 profile 裡，因此下面用
+      # coverage-floor 那個 job 來確保「有測試的套件沒有消失」。
+      - name: test -race
+        run: go test ./... -race -covermode=count -coverprofile=coverage.out
+
+      - name: 上傳覆蓋率
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.out
+          if-no-files-found: warn
+
+  files_server:
+    name: files_server (build / vet / test -race)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: files_server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      - name: 安裝 C 編譯器（race detector 需要）
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # 這個模組過去是 0% 覆蓋（Phase 3.4 才補上測試）。留著 -race 是因為
+      # 它現在有了 upload 與 delete 兩條會碰磁碟的路徑，以及一個 Redis 用戶端。
+      - name: test -race
+        run: go test ./... -race -covermode=count -coverprofile=coverage.out
+
+      - name: 上傳覆蓋率
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: files-server-coverage
+          path: files_server/coverage.out
+          if-no-files-found: warn
+
+  frontend:
+    name: frontend (typecheck / build / i18n)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci 而不是 npm install：前者依 package-lock.json 建置，會在 lock 與
+      # package.json 不同步時直接失敗。後者會靜默更新 lock，讓「建置結果與
+      # 上次不同」這件事沒有任何訊號。
+      - name: 安裝相依
+        run: npm ci
+
+      # 這個專案最好的設計之一：i18n 完整性已經在編譯期由 Record<MessageKey, string>
+      # 強制 —— typecheck 通過即代表沒有任何語系漏 key，也沒有任何元件用了不存在的
+      # key。因此型別檢查是 i18n 檢查的一部分，不是兩件事。
+      - name: typecheck
+        run: npm run typecheck
+
+      # build 內含 typecheck，重跑一次是刻意的：Vite 的 HTML 轉換與混淆插件
+      # 只在 build 時才會執行，而它們正是「CSP style hash 授權失效」與
+      # 「service-worker.js 位置被改掉」這兩類只在 build 產物裡才會出現的問題
+      # 的發生點。
+      - name: build
+        run: npm run build
+
+      # verify-catalogs 檢查 build 之外的事：未翻譯殘留、佔位符一致性，以及
+      # README 宣稱的語系數量與清單是否與目錄實際內容相符。這三件事都不會
+      # 讓編譯失敗，但每一件都是「文件與實作漂移」或「翻譯壞掉」的第一個徵兆。
+      - name: 驗證翻譯目錄與 README 語系宣稱
+        run: node ../tools/i18n/verify-catalogs.mjs
+
+      # 產出的十六個 HTML 殼必須與後端的 CSP 授權清單同步（Phase 2.4 的
+      # 不變條件三處之一）。把 dist/ 當成附件上傳，是為了讓「後端的
+      # frontendShellFiles 少了一個」這種錯誤在前端 job 裡就看得出來。
+      - name: 上傳建置產物
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
+coverage-floor:
+    name: coverage floor
+    runs-on: ubuntu-latest
+    needs: [backend, files_server]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: coverage
+          pattern: '*-coverage'
+          merge-multiple: true
+
+      # 地板從 25.0 起算（2026-10-02 實測合併後 26.5%，留 1.5 個百分點的餘裕）。
+      #
+      # 實測值的組成：backend 25.1%（auth 92%、config 89%、logger 86%、
+      # data 0%—— 沒有 MySQL 時全部 skip、httpapi 10.6%）+
+      # files_server 48.9%（從 0% 開始），合併 26.5%。
+      #
+      # 刻意不是 0：那樣這道閘門就只是記錄一個數字。25.0 如實反映
+      # 「工具性套件測得好、業務邏輯沒測」這個狀況，而地板的作用是**防止退化**，
+      # 不是製造動機。ROADMAP.md 的 Phase 3 會把這個數字往上推，那時改這一行的
+      # 常量即可。
+      #
+      # 這個數字不含 migrations job 的覆蓋率（那個 job 有獨立 MySQL，
+      # 產出的 profile 刻意不合併 —— 否則「有 MySQL 與沒有 MySQL」兩種情況
+      # 會讓這道閘門的意義取決於跑在哪裡）。
+      #
+      # 刻意只在這裡用總數而不逐套件：逐套件會讓「把一個套件的測試搬去補
+      # 另一個套件」變成一種合法的玩法 —— 總數不變，但那個套件的保護消失了。
+      - name: 檢查覆蓋率地板
+        run: go run ./tools/coveragefloor coverage/coverage.out 25.0
+
+  invariants:
+    name: invariants (audit / admin auth / blocklist mount)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      # 分析器是獨立的 Go 模組（它的相依 golang.org/x/tools 不該進 runtime 相依），
+      # 因此要先建置成執行檔才能餵給 go vet。
+      #
+      # 失敗模式是**編譯失敗**而不是「有人沒注意到」—— 這就是把這四條不變條件
+      # 從紀律變成工具的全部意義。
+      - name: 建置不變條件 analyzer
+        working-directory: tools/invariants
+        run: go build -o invariants .
+
+      - name: 不變條件 analyzer
+        working-directory: backend
+        run: go vet -vettool="$(pwd)/../tools/invariants/invariants" ./...
+
+      # 分析器自己也要被測試，而且**必須含負向測試**。這裡曾經有一個 handler
+      # 索引寫成「只索引自由函式」，結果全部 24 條後台路由（全是方法）都被靜默
+      # 跳過 —— 分析器看起來在跑、CI 全綠，而規則沒有守住任何東西。
+      # testdata/src/*/bad 是唯一能抓到這類錯誤的東西（見 analyzer_test.go 的
+      # 檔頭）。
+      - name: analyzer 自測
+        working-directory: tools/invariants
+        run: go test ./...
+
+  migrations:
+    name: migrations (real MySQL, idempotency / restart / upgrade)
+    runs-on: ubuntu-latest
+    needs: backend
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      # 8.0.29 是下限不是偏好：ADD COLUMN IF NOT EXISTS 需要它，而那正是
+      # MigrateMySQL 裡反覆用到的語法。選這個版本等於讓 CI 持續驗證「下限
+      # 版本真的能跑」，否則那個下限只在文件裡成立。
+      #
+      # 刻意用 services: 而不是 testcontainers：CI 已經在容器裡了，這個區塊
+      # 比在測試程式裡起一個容器更簡單也更可靠，而且失敗時診斷容易得多。
+      mysql:
+        image: mysql:8.0.29
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: forum_migration_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      # go-sqlmock 驗證不了 DDL 真的能執行，miniredis 對 MySQL 沒有對應物 ——
+      # 而這正是本 job 存在的理由。測試自己會 CREATE / DROP 一個拋棄式的資料庫，
+      # 因此連線字串只需要指向伺服器。
+      - name: 遷移測試
+        env:
+          FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
+        run: go test ./forum/data/... -v -timeout 10m
+
+  secrets:
+    name: secrets (config.conf 不得進版控)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 是必要的：要掃整份歷史才抓得到「曾經被提交、
+          # 後來才刪掉」的憑證。只掃工作區的話，一個刪掉檔案的 commit 就足以
+          # 讓真正的憑證留在倉庫裡。
+          fetch-depth: 0
+
+      # .gitignore 擋住 config.conf，而那是**唯一**的防線。一份設定檔含
+      # GOOGLE_CLIENT_SECRET、FILES_SERVER_TOKEN、REDIS_PASSWORD 與 DSN 裡的
+      # 帳密，被誤提交之後「刪掉檔案」並不會把它從歷史裡移除。
+      #
+      # 這裡刻意不依賴 gitleaks 之類的外部 action：這個檢查要擋的只有一件事
+      # （這兩份設定檔），把它寫成 20 行可讀的 shell 比引入一個 action 更容易
+      # 讓維運在告警時知道規則是什麼。
+      - name: 確認設定檔從未被追蹤
+        run: |
+          set -euo pipefail
+          status=0
+          for path in backend/config/config.conf files_server/config.conf; do
+            if git log --all --full-history -- "$path" --quiet | grep -q .; then
+              echo "::error::$path 曾經被提交進版控（憑證可能已外洩，必須輪替）"
+              status=1
+            fi
+            if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+              echo "::error::$path 目前被版控追蹤"
+              status=1
+            fi
+          done
+          exit $status
+
+      # 設定檔含明文憑證，因此版控裡只允許去密碼化的 .example 範本。
+      # 這一項擋的是「有人把範本裡填上真實 token 後改名成 config.conf 並提交」
+      # 這條常見路徑。
+      - name: 確認範本檔不含明文憑證
+        run: |
+          set -euo pipefail
+          status=0
+          for path in backend/config/config.conf.example files_server/config.conf.example; do
+            if grep -nE '^[[:space:]]*[A-Za-z_]+[[:space:]]*=[[:space:]]*[^"'"'"'[:space:]#][^#]*' "$path"; then
+              echo "::error::$path 有未加引號且看起來不是佔位符的值（可能是明文憑證）"
+              status=1
+            fi
+          done
+          exit $status

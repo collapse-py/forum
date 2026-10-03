@@ -1,0 +1,89 @@
+# 倉庫根目錄的 .dockerignore。
+#
+# 【這個檔管的是哪一個建置情境】
+# 倉庫根目錄。backend/Dockerfile 的建置情境是**這裡**（它需要同時看到
+# backend/ 的 Go 程式碼與 frontend/ 的 TypeScript），所以這是唯一一份
+# 真正生效的 .dockerignore。
+#
+# backend/.dockerignore 與 files_server/.dockerignore 仍然存在，但它們對
+# `docker build -f backend/Dockerfile .` **完全無效**（Docker 只讀建置情境
+# 根目錄的那一份）。它們的用途是：
+#   1. 讓「這支 Go 模組的建置輸入有哪些」在該模組的目錄裡就看得見，
+#      而不必去翻根目錄那份。
+#   2. 讓任何人在該目錄底下跑 `docker build .` 時仍然不會把 config.conf
+#      送進去 —— 那是常見的直覺操作。
+#
+# 【為什麼 .dockerignore 必須存在，而不是靠 .gitignore】
+# .gitignore 說明「什麼不該進版控」，.dockerignore 說明「什麼不該進建置情境」。
+# 兩者**不重疊**，而且缺的常常是那種不會有人發現的：
+#   - .gitignore 擋掉的 node_modules/ 在 .dockerignore 裡必須再寫一次。
+#     缺了的症狀不是安全問題而是**建置壞掉**：在 Linux 主機上用 macOS 開發時，
+#     送進去的 node_modules 含錯誤平台的 esbuild/rollup，npm ci 會得到
+#     "You installed esbuild for another platform" —— 而那個錯誤訊息完全不會
+#     指向「你的 .dockerignore 少了一條」。
+#   - config/config.conf 被 .gitignore 擋掉，但**沒有**被任何機制自動擋在
+#     建置情境之外 —— 因為它是部署者在機器上建立的檔案，從來沒被 git 看見。
+#     因此它必須在這裡被明確排除。
+
+# --- 容器相關 ---
+docker-compose.yml
+docker-compose.*.yml
+deploy/settings.conf
+# 為什麼連 settings.conf 也要擋：它含 MYSQL_ROOT_PASSWORD 與 REDIS_PASSWORD。
+# 它**不需要**出現在映像裡（compose 是在執行時讀它的，不是在建置時），
+# 而把它送進建置情境會讓那兩個密碼進到每一層的 blob 裡。
+
+# --- 版本控與 CI ---
+.git
+.gitignore
+.github
+.dockerignore
+# 各自的 Dockerfile 與 .dockerignore 也不需要進建置情境：它們只在建置時由
+# Docker 讀取一次，而 Docker 讀的是**建置情境外的**那個檔案（`-f` 指定的）。
+# 把們送進去只會多幾 KB。
+
+# --- 依賴 ---
+node_modules/
+# 這一條的理由寫在上面（錯誤平台的原生相依）。它是最常見、症狀最難反推的一條。
+
+# --- 憑證與本地設定 ---
+**/config.conf
+**/*.conf.local
+# 註：上面的 glob 不會命中 *.conf.example —— 那是部署者需要的範本。
+# 但 backend/config/config.conf.example **不該**出現在映像裡（它的內容沒有用途，
+# 而 runtime 讀的是 config.conf），因此明確排除它。
+backend/config/config.conf.example
+files_server/config.conf.example
+
+# --- 建置產物（會讓層快取永遠失效）---
+**/dist/
+**/node_modules/
+*.exe
+*.out
+*.test
+**/coverage.out
+**/coverage/
+**/server.log
+# 檔案伺服器的使用者資料。一個跑了一個月的站可能有數 GB 的圖片。
+# 它們是**使用者上傳的私人照片**，不該出現在任何建置情境裡。
+files_server/storage/
+
+# --- 工具 ---
+# 這兩個是只有 CI 與開發者會用的工具，映像執行檔不需要它們。
+tools/
+.kilo/
+
+# --- 文件 ---
+# README.md 有 1,100 行，而它進入建置情境的唯一效果是讓每個 COPY 的快取
+# 在每次文件改動時失效。
+*.md
+!README.md
+# 註：上面的 !README.md 是不必要的例外（映像不需要它），刻意保留只是因為
+# 若將來要加一個除錯用的 metadata 檔，README 有時會被引用。這個例外是無害的。
+
+# --- 編輯器與作業系統 ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

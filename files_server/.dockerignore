@@ -1,0 +1,38 @@
+# files_server 建置情境的 .dockerignore
+#
+# 理由與 backend/.dockerignore 完全相同，這裡只列差異與特別注意的地方。
+#
+# 這個模組的 .dockerignore 有**額外**一個必須排除的目錄：
+
+storage/
+  那是使用者上傳的檔案。排除它的理由比設定檔更強：
+    1. 體積 —— 一個跑了一個月的站可能有數 GB 的圖片，全部送進建置情境會讓
+       建置慢到不可用（而且每一層都要重新上傳）。
+    2. 內容敏感 —— 這些是用戶上傳的私人照片。
+    3. 正確性 —— 如果它沒被排除，`COPY . .` 會把它放進 /src，而 builder 階段的
+       工作目錄是 /src；最終映像只 COPY 執行檔，所以它不會真的進到映像裡。
+       但它會讓建置情境大到 Docker 開始警告，而那個警告才是真正該注意的。
+
+# --- 憑證與設定 ---
+config.conf
+*.conf
+
+# --- 建置產物 ---
+*.exe
+*.out
+*.test
+
+# --- 版本控與工具設定 ---
+.git
+.gitignore
+.dockerignore
+Dockerfile
+
+# --- 使用者資料 ---
+storage/
+
+# --- 文件 ---
+*.md
+
+.DS_Store
+Thumbs.db

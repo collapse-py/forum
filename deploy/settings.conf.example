@@ -1,0 +1,53 @@
+# docker compose 的環境變數。
+#
+# 【這個檔為什麼在 .gitignore 裡】
+# 它含真正的密碼（MYSQL_ROOT_PASSWORD、REDIS_PASSWORD）。而這三個密碼是
+# 「內部」憑證 —— 它們只在 compose 建立的這組容器之間流通，從不對外。
+#
+# 這讓本專案可以**明確拒絕**使用 Docker secrets（見 ROADMAP.md 的「刻意不做
+# 的事」）：
+#   1. secrets 檔案是明文的（base64 而非加密），保護它的是檔案權限 ——
+#      而 settings.conf 同樣是明文、靠 .gitignore 保護。兩者的保護機制相同。
+#   2. secrets 讓 `docker compose` 的呼叫方式變複雜（非 swarm 模式必須給
+#      secret 掛一個檔案），而那個複雜度換不到這個架構下任何實際的安全提升。
+#   3. **真正值得保護的是對外的那組憑證**：GOOGLE_CLIENT_SECRET 與
+#      FILES_SERVER_TOKEN。它們**不在這個檔裡** —— 它們在
+#      backend/config/config.conf 裡，而那份檔案是部署者在機器上手動建立的，
+#      從不進版控、也從不進 build context（見 backend/.dockerignore）。
+#      這個分工是刻意的：compose 只負責「起服務」，
+#      應用層的憑證由應用層的設定檔負責。
+#
+# 用法：複製成 settings.conf（不帶副檔名名），填上自己的值。
+#   Linux / macOS：cp deploy/settings.conf.example deploy/settings.conf
+#   Windows：       Copy-Item deploy\settings.conf.example deploy\settings.conf
+
+# ---------------------------------------------------------------------------
+# 必須設定的值（沒有預設值）
+# ---------------------------------------------------------------------------
+# 刻意用 ${VAR:?...} 語法（沒有預設值 + 帶訊息）而不是 ${VAR:-default}：
+# 一個有預設值的密碼是一個**已經被公開的**密碼，而 docker-compose.yml 裡的
+# 預設值會隨著那個檔案一起進版控。用 :? 的話，忘記設定時 compose 會在啟動
+# 之前就停下來並說明缺什麼 —— 那比「服務起來了、然後被暴力破解」好得多。
+#
+# 生成一個夠強的密碼：
+#   openssl rand -base64 24
+
+MYSQL_ROOT_PASSWORD=
+REDIS_PASSWORD=
+
+# ---------------------------------------------------------------------------
+# 可選的值（有預設值）
+# ---------------------------------------------------------------------------
+
+# 資料庫名稱。必須與 backend/config/config.conf 裡 DB_DSN 的庫名一致。
+#
+# 這一組「必須一致」是 compose 唯一一個無法集中管理的關聯 —— compose 不會
+# 讀 backend 的設定檔（那需要一個 TOML/YAML 解析器，而 compose 沒有）。
+# 它被寫在這裡作為文件，而真正的保護是：啟動時後端連不上資料庫會立刻
+# Fatalf，症狀是明確的「Access denied for user」，不會靜默。
+MYSQL_DATABASE=forum
+
+# 容器時區。這個值同時是 MySQL、Redis 與兩個應用的時區 —— 刻意讓它們一致：
+# 資料庫裡的 NOW() 與應用程式產生的時間戳若在不同時區，「誰比較新」這個問題
+# 就沒有唯一的答案，而那會讓「今天有幾篇新貼文」這類查詢在跨午夜時出錯。
+TZ=Asia/Taipei

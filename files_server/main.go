@@ -1,497 +1,62 @@
+/*
+main 是檔案伺服器的執行進入點（package main，不可被其他套件 import）。
+
+【職責】
+本檔只做「組裝與啟動」，不承載業務邏輯。啟動順序固定為：
+讀取設定 → 建立儲存後端 → 連線 Redis（失敗則降級）→ 組出 HTTP Handler
+→ 監聽，收到停止訊號後依 shutdown.go 的流程排空在途請求再結束。
+逾時取值、訊號處理與監聽等待位於同模組的 shutdown.go。
+
+【檔案分工】
+config.go    設定檔（TOML）解析與兜底值。
+storage.go   儲存後端（本機磁碟 / S3）與檔名產生。
+server.go    路由、上傳與刪除、媒體 token 中介層。
+shutdown.go  監聽、停止訊號、優雅停止。
+測試分佈與各檔相同：每個 _test.go 只驗證同名的非測試檔。
+
+【為什麼不保留 package 層的 redisClient 全域變數】
+原本 redisClient 是 package 級別的變數，由本檔賦值、server.go 的中介層讀取。
+把它收進 Server 結構體之後，測試可以注入一個假的介面實作（見 server.go 的
+mediaTokenStore），因此「token 不存在回 401」與「Redis 故障回 503」兩條分支
+都能直接驗證 —— 前者是本服務的安全邊界，後者是它最容易被靜默降級掉的地方。
+
+【主要依賴】
+config.go / storage.go / server.go 的說明涵蓋各自的相依。
+
+【關鍵設計決策與限制】
+ 1. Redis 連不上時**不**停止啟動，只記警告並關閉靜態檔案的 token 驗證。
+    這是刻意的取捨：上傳與刪除不依賴 Redis，而「圖片要帶 token 才能讀」是
+    這個服務最外層的防護。停用它的後果是已發行的媒體連結不再需要 token
+    就能讀取，而繼續啟動（拒絕服務）會讓後端連上傳都做不了 —— 那個故障的
+    半徑大得多。README 的部署章節因此要求正式環境必須讓 Redis 可用。
+ 2. 停止流程的逾時取自 server.shutdown_timeout_seconds，預設 15 秒，
+    必須大於部署端的停止上限（compose 的 stop_grace_period、systemd 的
+    TimeoutStopSec）。反過來的話，「貼文存得下但圖片上傳失敗」會在每次
+    部署時發生 —— 那是排空被從中途砍掉的症狀。
+ 3. log.Fatal 走 os.Exit(1)，因此其後的 defer 都不會執行。停止流程用
+    log.Printf 而非 Fatal，正是為了讓 defer（redisClient.Close）與
+    os.Exit(0) 的路徑都能正常走完。
+*/
 package main
 
 import (
 	"context"
-	"crypto/rand"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
+	"os/signal"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/redis/go-redis/v9"
 )
 
-type ServerConfig struct {
-	Host string `toml:"host"`
-	Port int    `toml:"port"`
-}
-
-type LocalStorageConfig struct {
-	BaseDir  string      `toml:"base_dir"`
-	FilesDir string      `toml:"files_dir"`
-	DirPerm  os.FileMode `toml:"dir_perm"`
-	FilePerm os.FileMode `toml:"file_perm"`
-}
-
-type S3StorageConfig struct {
-	Endpoint         string `toml:"endpoint"`
-	AccessKey        string `toml:"access_key"`
-	SecretKey        string `toml:"secret_key"`
-	Region           string `toml:"region"`
-	Bucket           string `toml:"bucket"`
-	ForcePathStyle   bool   `toml:"force_path_style"`
-	FilesPrefix      string `toml:"files_prefix"`
-	PresignExpireSec int    `toml:"presign_expire_seconds"`
-}
-
-type StorageConfig struct {
-	Type  string             `toml:"type"`
-	Local LocalStorageConfig `toml:"local"`
-	S3    S3StorageConfig    `toml:"s3"`
-}
-
-type UploadConfig struct {
-	Token        string   `toml:"token"`
-	MaxSize      int64    `toml:"max_size"`
-	AllowedFiles []string `toml:"allowed_files"`
-}
-
-type CORSPolicy struct {
-	AllowedOrigins []string `toml:"allowed_origins"`
-	AllowedMethods []string `toml:"allowed_methods"`
-	AllowedHeaders []string `toml:"allowed_headers"`
-}
-
-type LoggerConfig struct {
-	Level        string `toml:"level"`
-	EnableColors bool   `toml:"enable_colors"`
-}
-
-type RedisConfig struct {
-	Addr           string `toml:"addr"`
-	Password       string `toml:"password"`
-	DB             int    `toml:"db"`
-	TokenKeyPrefix string `toml:"token_key_prefix"`
-	TokenTTLSec    int    `toml:"token_ttl_sec"`
-	PublicFiles    bool   `toml:"public_files"`
-}
-
-type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	Storage StorageConfig `toml:"storage"`
-	Upload  UploadConfig  `toml:"upload"`
-	CORS    CORSPolicy    `toml:"cors"`
-	Logger  LoggerConfig  `toml:"logger"`
-	Redis   RedisConfig   `toml:"redis"`
-}
-
-func loadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("讀取配置失敗: %w", err)
-	}
-
-	var cfg Config
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
-		return nil, fmt.Errorf("解析配置失敗: %w", err)
-	}
-
-	if cfg.Server.Host == "" {
-		cfg.Server.Host = "0.0.0.0"
-	}
-	if cfg.Server.Port == 0 {
-		cfg.Server.Port = 8080
-	}
-	if cfg.Storage.Type == "" {
-		cfg.Storage.Type = "local"
-	}
-	if cfg.Storage.Local.BaseDir == "" {
-		cfg.Storage.Local.BaseDir = "./storage"
-	}
-	if cfg.Storage.Local.FilesDir == "" {
-		cfg.Storage.Local.FilesDir = "files"
-	}
-	if cfg.Storage.Local.DirPerm == 0 {
-		cfg.Storage.Local.DirPerm = 0755
-	}
-	if cfg.Storage.Local.FilePerm == 0 {
-		cfg.Storage.Local.FilePerm = 0644
-	}
-	if cfg.Storage.S3.PresignExpireSec == 0 {
-		cfg.Storage.S3.PresignExpireSec = 3600
-	}
-	if cfg.Upload.MaxSize == 0 {
-		cfg.Upload.MaxSize = 50 << 20
-	}
-	if len(cfg.Upload.AllowedFiles) == 0 {
-		cfg.Upload.AllowedFiles = []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus"}
-	}
-	if cfg.Logger.Level == "" {
-		cfg.Logger.Level = "info"
-	}
-	if len(cfg.CORS.AllowedOrigins) == 0 {
-		cfg.CORS.AllowedOrigins = []string{"*"}
-	}
-	if len(cfg.CORS.AllowedMethods) == 0 {
-		cfg.CORS.AllowedMethods = []string{"GET", "HEAD", "OPTIONS"}
-	}
-	if len(cfg.CORS.AllowedHeaders) == 0 {
-		cfg.CORS.AllowedHeaders = []string{"Origin", "Range", "Accept", "Accept-Language"}
-	}
-	if cfg.Redis.Addr == "" {
-		cfg.Redis.Addr = "localhost:6379"
-	}
-	if cfg.Redis.DB == 0 {
-		cfg.Redis.DB = 0
-	}
-	if cfg.Redis.TokenKeyPrefix == "" {
-		cfg.Redis.TokenKeyPrefix = "media:token:"
-	}
-	if cfg.Redis.TokenTTLSec == 0 {
-		cfg.Redis.TokenTTLSec = 300
-	}
-
-	return &cfg, nil
-}
-
-type storageBackend interface {
-	saveFile(dir, filename string, data io.Reader) (string, error)
-	deleteFile(path string) error
-	getBaseURL() string
-}
-
-type localStorage struct {
-	baseDir   string
-	filesDir  string
-	dirPerm   os.FileMode
-	filePerm  os.FileMode
-	publicURL string
-}
-
-func newLocalStorage(cfg *Config) (*localStorage, error) {
-	base := filepath.Clean(cfg.Storage.Local.BaseDir)
-	files := filepath.Join(base, cfg.Storage.Local.FilesDir)
-
-	for _, dir := range []string{base, files} {
-		if err := os.MkdirAll(dir, cfg.Storage.Local.DirPerm); err != nil {
-			return nil, fmt.Errorf("建立目錄 %s 失敗: %w", dir, err)
-		}
-	}
-
-	return &localStorage{
-		baseDir:   base,
-		filesDir:  cfg.Storage.Local.FilesDir,
-		dirPerm:   cfg.Storage.Local.DirPerm,
-		filePerm:  cfg.Storage.Local.FilePerm,
-		publicURL: "",
-	}, nil
-}
-
-func (l *localStorage) resolveDir(dir string) string {
-	switch dir {
-	case "files":
-		return filepath.Join(l.baseDir, l.filesDir)
-	}
-	return l.baseDir
-}
-
-func (l *localStorage) saveFile(dir, filename string, data io.Reader) (string, error) {
-	destDir := l.resolveDir(dir)
-	dstPath := filepath.Join(destDir, filename)
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		return "", err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, data); err != nil {
-		os.Remove(dstPath)
-		return "", err
-	}
-
-	rel := "/" + dir + "/" + filename
-	return rel, nil
-}
-
-func (l *localStorage) deleteFile(path string) error {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	abs := filepath.Join(l.baseDir, strings.TrimPrefix(path, "/"))
-	return os.Remove(abs)
-}
-
-func (l *localStorage) getBaseURL() string {
-	return l.publicURL
-}
-
-type s3Storage struct {
-	endpoint         string
-	accessKey        string
-	secretKey        string
-	region           string
-	bucket           string
-	forcePathStyle   bool
-	filesPrefix      string
-	presignExpireSec int
-	publicURL        string
-}
-
-func newS3Storage(cfg *Config) (*s3Storage, error) {
-	return &s3Storage{
-		endpoint:         cfg.Storage.S3.Endpoint,
-		accessKey:        cfg.Storage.S3.AccessKey,
-		secretKey:        cfg.Storage.S3.SecretKey,
-		region:           cfg.Storage.S3.Region,
-		bucket:           cfg.Storage.S3.Bucket,
-		forcePathStyle:   cfg.Storage.S3.ForcePathStyle,
-		filesPrefix:      cfg.Storage.S3.FilesPrefix,
-		presignExpireSec: cfg.Storage.S3.PresignExpireSec,
-		publicURL:        "",
-	}, nil
-}
-
-func (s *s3Storage) saveFile(dir, filename string, data io.Reader) (string, error) {
-	objectKey := s.filesPrefix + filename
-
-	var b strings.Builder
-	if _, err := io.Copy(&b, data); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest(http.MethodPut, s.endpoint+"/"+s.bucket+"/"+objectKey, strings.NewReader(b.String()))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.SetBasicAuth(s.accessKey, s.secretKey)
-	if s.region != "" {
-		req.Header.Set("x-amz-region", s.region)
-	}
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("s3 上傳失敗 status=%d body=%s", resp.StatusCode, string(body))
-	}
-
-	return "/" + dir + "/" + filename, nil
-}
-
-func (s *s3Storage) deleteFile(path string) error {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid s3 path %s", path)
-	}
-	filename := parts[1]
-
-	objectKey := s.filesPrefix + filename
-
-	req, err := http.NewRequest(http.MethodDelete, s.endpoint+"/"+s.bucket+"/"+objectKey, nil)
-	if err != nil {
-		return err
-	}
-	req.SetBasicAuth(s.accessKey, s.secretKey)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
-		return nil
-	}
-	body, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("s3 刪除失敗 status=%d body=%s", resp.StatusCode, string(body))
-}
-
-func (s *s3Storage) getBaseURL() string {
-	if s.publicURL != "" {
-		return s.publicURL
-	}
-	return s.endpoint + "/" + s.bucket
-}
-
-func newStorageBackend(cfg *Config) (storageBackend, error) {
-	switch strings.ToLower(strings.TrimSpace(cfg.Storage.Type)) {
-	case "local":
-		return newLocalStorage(cfg)
-	case "s3":
-		return newS3Storage(cfg)
-	default:
-		return nil, fmt.Errorf("不支援的存儲類型: %s", cfg.Storage.Type)
-	}
-}
-
-func isAllowedExt(ext string, allowed []string) bool {
-	ext = strings.ToLower(ext)
-	for _, a := range allowed {
-		if strings.ToLower(a) == ext {
-			return true
-		}
-	}
-	return false
-}
-
-// newFileName 為上傳的檔案產生一個新的儲存檔名：UUID v4 + 原始副檔名。
+// mediaPingTimeout 是啟動時探測 Redis 的期限。
 //
-// 為什麼不用使用者上傳的檔名當儲存鍵：原始檔名是使用者可控的輸入，直接拿來
-// 存檔會同時產生兩種問題——
-//   - 覆蓋：兩個人都傳 "IMG_0001.jpg" 時後者會無聲地蓋掉前者，任何人也可以
-//     刻意指定已知檔名把別人的圖片換掉；
-//   - 資訊洩漏與跨平台問題：檔名會出現在磁碟、URL 與日誌裡，含空白、Unicode
-//     或路徑片段時還會造成 URL 編碼與路徑正規化的麻煩。
-//
-// 改用 UUID 後，檔名內容與上傳者無關，既不會撞名也不會洩漏原始名稱。
-// 副檔名必須保留，因為它決定瀏覽器的 Content-Type，也讓後端
-// validForumImageFileName 的白名單檢查與前端 <img> 顯示都維持原樣。
-// 這裡刻意自行用 crypto/rand 組出 UUID v4，而不是引入相依套件：這個服務的
-// 相依項已經只有 toml 與 redis 兩個，為了一個 16 行的函式增加外部相依不值。
-func newFileName(original string) (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	// RFC 4122 §4.4：把版本與變異位元固定下來，產生合法的 v4 UUID。
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-
-	// 副檔名一律轉小寫：後端 validForumImageFileName 只認小寫的 .jpg/.png 等，
-	// 保留 "PHOTO.JPG" 的大小寫會讓上傳成功卻在後端被判定為非法圖片。
-	// 這裡只取副檔名（而非整個檔名），且呼叫端已先以 filepath.Base 正規化。
-	ext := strings.ToLower(filepath.Ext(original))
-
-	return fmt.Sprintf("%x-%x-%x-%x-%x%s", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16], ext), nil
-}
-
-func resolveDir(filename string, allowed []string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	if isAllowedExt(ext, allowed) {
-		return "files"
-	}
-	return ""
-}
-
-func originAllowed(origin string, allowed []string) bool {
-	for _, a := range allowed {
-		if a == "*" || a == origin {
-			return true
-		}
-	}
-	return false
-}
-
-func addCORSHeaders(w http.ResponseWriter, r *http.Request, cfg *Config) {
-	origin := r.Header.Get("Origin")
-	if originAllowed(origin, cfg.CORS.AllowedOrigins) {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		if len(cfg.CORS.AllowedMethods) > 0 {
-			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.AllowedMethods, ", "))
-		}
-		if len(cfg.CORS.AllowedHeaders) > 0 {
-			w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORS.AllowedHeaders, ", "))
-		}
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Content-Length")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-	}
-}
-
-func corsMiddleware(cfg *Config) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			addCORSHeaders(w, r, cfg)
-			if r.Method == http.MethodOptions {
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-var redisClient *redis.Client
-
-func newRedisClient(cfg *Config) *redis.Client {
-	if cfg.Redis.Addr == "" {
-		return nil
-	}
-	return redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr,
-		Password: cfg.Redis.Password,
-		DB:       cfg.Redis.DB,
-	})
-}
-
-func mediaTokenKey(cfg *Config, token string) string {
-	return cfg.Redis.TokenKeyPrefix + token
-}
-
-func validUploadToken(cfg *Config, r *http.Request) bool {
-	token := r.Header.Get("Authorization")
-	if token == "" {
-		token = r.Header.Get("X-Upload-Token")
-	}
-	return cfg.Upload.Token == "" || token == cfg.Upload.Token || token == "Bearer "+cfg.Upload.Token
-}
-
-func mediaTokenMiddleware(cfg *Config, next http.Handler) http.Handler {
-	if cfg.Redis.PublicFiles || cfg.Redis.Addr == "" || redisClient == nil {
-		return next
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/files/") {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		token := r.URL.Query().Get("token")
-		if token == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"error":"missing media token"}`)
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		key := mediaTokenKey(cfg, token)
-		exists, err := redisClient.Exists(ctx, key).Result()
-		if err != nil {
-			log.Printf("Redis token check failed: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, `{"error":"media token service unavailable"}`)
-			return
-		}
-
-		if exists == 0 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"error":"invalid or expired media token"}`)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
+// 刻意短（2 秒）：這是啟動路徑上的阻塞點，Redis 的位址寫錯時每多等一秒就多
+// 慢一秒。超時後會降級（見檔頭第 1 點），因此不需要更寬的期限。
+const mediaPingTimeout = 2 * time.Second
 
 func main() {
+	// 設定檔路徑相對於工作目錄（見 config.go 的說明），不是執行檔目錄。
 	cfg, err := loadConfig("config.conf")
 	if err != nil {
 		log.Fatalf("載入配置失敗: %v", err)
@@ -502,144 +67,82 @@ func main() {
 		log.Fatalf("初始化存儲失敗: %v", err)
 	}
 
-	redisClient = newRedisClient(cfg)
-	if redisClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := redisClient.Ping(ctx).Err(); err != nil {
-			log.Printf("Redis 連線失敗，將跳過靜態檔案 token 驗證: %v", err)
-			redisClient = nil
-		} else {
-			log.Printf("Redis 連線成功 addr=%s db=%d", cfg.Redis.Addr, cfg.Redis.DB)
-		}
-	}
+	redisClient := connectRedis(cfg)
 
-	mux := http.NewServeMux()
+	srv := NewServer(cfg, backend, mediaTokenStoreOrNil(redisClient))
+	// 逾時設定集中在 newHTTPServer 裡，這裡只負責組裝與啟動。
+	httpSrv := newHTTPServer(cfg, srv.Handler())
 
-	mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost && r.Method != http.MethodPut {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	// 訊號處理必須在開始監聽**之前**就緒：容器環境的停止訊號可能在啟動的
+	// 瞬間就送達，若先 ListenAndServe 再註冊，那段空窗期內的訊號會依預設
+	// 行為直接終止行程（等於回到沒有優雅停止的狀態）。
+	sigCh := make(chan os.Signal, 1)
+	notifyOnSignal(sigCh)
+	defer signal.Stop(sigCh)
 
-		if !validUploadToken(cfg, r) {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.Upload.MaxSize)
-
-		if err := r.ParseMultipartForm(cfg.Upload.MaxSize); err != nil {
-			http.Error(w, "Unable to parse form or file exceeds size limit", http.StatusBadRequest)
-			return
-		}
-
-		file, handler, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, "Unable to get file from request", http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
-
-		// 副檔名決定目錄與 Content-Type，仍以「上傳者給的檔名」為準判斷；
-		// 但實際寫進磁碟的檔名是 UUID（見 newFileName），兩者不可混為一談。
-		original := filepath.Base(handler.Filename)
-		dir := resolveDir(original, cfg.Upload.AllowedFiles)
-		if dir == "" {
-			http.Error(w, "Unsupported file type", http.StatusBadRequest)
-			return
-		}
-
-		filename, err := newFileName(original)
-		if err != nil {
-			log.Printf("產生檔名失敗: %v", err)
-			http.Error(w, "Unable to save file", http.StatusInternalServerError)
-			return
-		}
-
-		rel, err := backend.saveFile(dir, filename, file)
-		if err != nil {
-			log.Printf("儲存檔案失敗: %v", err)
-			http.Error(w, "Unable to save file", http.StatusInternalServerError)
-			return
-		}
-
-		fileURL := backend.getBaseURL() + rel
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"url":"%s"}`, fileURL)
-	})
-
-	mux.HandleFunc("/delete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		if !validUploadToken(cfg, r) {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		fileURL := r.URL.Query().Get("url")
-		if fileURL == "" && r.Method == http.MethodPost {
-			_ = r.ParseForm()
-			fileURL = r.Form.Get("url")
-		}
-
-		if fileURL == "" {
-			http.Error(w, "Missing url parameter", http.StatusBadRequest)
-			return
-		}
-
-		u, err := url.Parse(fileURL)
-		if err != nil {
-			http.Error(w, "Invalid URL", http.StatusBadRequest)
-			return
-		}
-
-		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		if len(parts) < 2 {
-			http.Error(w, "Invalid URL format", http.StatusBadRequest)
-			return
-		}
-
-		dir := parts[len(parts)-2]
-		filename := filepath.Base(parts[len(parts)-1])
-
-		if dir != "files" {
-			http.Error(w, "Invalid directory in URL", http.StatusBadRequest)
-			return
-		}
-
-		rel := "/" + dir + "/" + filename
-		if err := backend.deleteFile(rel); err != nil {
-			if os.IsNotExist(err) {
-				http.Error(w, "File not found", http.StatusNotFound)
-				return
-			}
-			log.Printf("刪除檔案失敗: %v", err)
-			http.Error(w, "Unable to delete file", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"status":"deleted"}`)
-	})
-
-	if cfg.Storage.Type == "local" {
-		base := backend.(*localStorage).baseDir
-		staticHandler := http.StripPrefix("/", http.FileServer(http.Dir(base)))
-		mux.Handle("/", mediaTokenMiddleware(cfg, staticHandler))
-	}
-
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	log.Printf("Starting files server on %s (storage=%s)", addr, cfg.Storage.Type)
+	log.Printf("Starting files server on %s (storage=%s)", listenAddr(cfg), cfg.Storage.Type)
 	if cfg.Upload.Token != "" {
 		log.Println("Upload token authentication enabled")
 	}
 	if redisClient != nil {
 		log.Println("Static file media token authentication via Redis enabled")
 	}
-	log.Fatal(http.ListenAndServe(addr, corsMiddleware(cfg)(mux)))
+
+	// 監聽期間發生錯誤（埠被占用等）不可降級：exit 1。收到停止訊號則排空在途
+	// 請求後正常返回，exit 0。部署端靠這個區分分辨「正常停止」與「服務壞掉」。
+	if err := serveUntilSignal(httpSrv, sigCh); err != nil {
+		log.Fatalf("Server stopped: %v", err)
+	}
+
+	if drainUntilTimeout(httpSrv, shutdownTimeout(cfg)) {
+		log.Printf("在途請求已全部完成")
+	}
+	log.Println("Files server stopped")
+
+	// 排在停止流程之後：Redis 用戶端仍可能被排空中完成的請求用到，而
+	// os.Exit 會跳過 defer，所以這裡必須同步呼叫。
+	if redisClient != nil {
+		if err := redisClient.Close(); err != nil {
+			log.Printf("關閉 Redis 連線時發生錯誤: %v", err)
+		}
+	}
+}
+
+// connectRedis 建立 Redis 用戶端並主動探測一次。
+//
+// 探測失敗時回 nil（而不是回一個連不上的用戶端）：後續對 nil 用戶端的呼叫會
+// panic，而「不驗證靜態檔案 token」是一個明確的降級行為，記在日誌裡即可 ——
+// 見檔頭第 1 點的理由。
+func connectRedis(cfg *Config) *redis.Client {
+	if cfg.Redis.Addr == "" {
+		return nil
+	}
+	client := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), mediaPingTimeout)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		log.Printf("Redis 連線失敗，將跳過靜態檔案 token 驗證: %v", err)
+		client.Close()
+		return nil
+	}
+	log.Printf("Redis 連線成功 addr=%s db=%d", cfg.Redis.Addr, cfg.Redis.DB)
+	return client
+}
+
+// mediaTokenStoreOrNil 把 *redis.Client 轉成中介層需要的介面，並在它為 nil 時
+// 回 nil（而非「包住一個 nil 指標的介面」）。
+//
+// 這是 Go 裡最容易踩的陷阱之一：把 nil 指標指派給介面會得到一個非 nil 的介面
+// 值，介面內的 == nil 判斷因此失效，症狀是 Stop 流程中呼叫 Close 時 panic ——
+// 而那正是「正常停止」該走通的路徑。
+func mediaTokenStoreOrNil(client *redis.Client) mediaTokenStore {
+	if client == nil {
+		return nil
+	}
+	return client
 }

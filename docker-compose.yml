@@ -1,0 +1,302 @@
+# 這個論壇專案的容器編排。
+#
+# 【它是什麼】
+# 四個服務：mysql、redis、backend、files_server，加上一個**只建置、不執行**的
+# frontend（見下方 frontend 的說明）。啟動順序由 healthcheck + depends_on 的
+# service_healthy 條件決定。
+#
+# 【為什麼不是「一個容器跑全部」】
+# 四個元件的生命週期與擴充需求都不同：
+#   - MySQL 的資料必須跨重啟存在（volume），而且它的備份策略與應用無關。
+#   - Redis 存的是 session 與媒體 token；它可以在某種程度上重建（登入會被踢，
+#     但貼文還在）。
+#   - backend 與 files_server 是無狀態的應用（除了檔案儲存），它們是真正需要
+#     水平擴充或快速重啟的兩個。
+# 把 MySQL 與 backend 放進同一個容器會讓「重建應用」變成「資料也沒了」——
+# 而那是這個專案最不能犯的一種錯誤。
+#
+# 【怎麼用】
+#   # 1. 準備三份設定檔（容器編排用的環境變數 + 兩個應用各自的設定檔）
+#   cp deploy/settings.conf.example deploy/settings.conf
+#   cp backend/config/config.conf.example backend/config/config.conf
+#   cp files_server/config.conf.example files_server/config.conf
+#   （三份都改成自己的值；deploy/settings.conf 在 .gitignore 裡）
+#
+#   # 2. 部署前先驗證設定 —— 這是整份 compose 裡最值得做的一步
+#   docker compose run --rm backend -check
+#
+#   # 3. 起服務
+#   docker compose up -d
+#
+#   # 4. 看狀態與日誌
+#   docker compose ps
+#   docker compose logs -f backend
+#
+# 第 2 步的 -check 會輸出這份專案最高價值的那份報告（見 ROADMAP.md Phase 4.3），
+# 並在設定有問題時以 exit 1 結束。它的輸出回答的是「這個行程會以什麼組態啟動」，
+# 而那些設定問題的共同特徵是：啟動之後完全沒有症狀。
+#
+# 【首次啟動需要多久】
+# 第一次 `docker compose up -d` 會建置 backend 映像，那需要先跑 npm ci 與兩次
+# Go 編譯，視機器而定約 2–5 分鐘。之後的啟動是秒級 —— 前提是已經有過一次
+# 建置。若同時需要 mysql 首次初始化，再加 30–60 秒（InnoDB 初始化）。
+#
+# 【關於這個檔刻意沒有做的事】
+#   - 沒有 secrets 關鍵。憑證一律從 settings.conf 的環境變數注入，而那份檔
+#     在 .gitignore 裡。理由見 settings.conf 的檔頭。
+#   - 沒有 reverse proxy。這個專案不做 nginx（ROADMAP.md 的「刻意不做的事」）。
+#     backend 自己就是對外服務，TLS 由它的上游（家用路由器、Cloudflare Tunnel、
+#     或一台不屬於本專案的機器）終結。
+#   - 沒有自動備份。備份策略取決於資料的重要性與保留需求，而任何自動化的猜測
+#     都會在還沒被需要時先產生一堆 volume。把 MySQL 的資料目錄掛成 named volume
+#     已經是必要的第一步；備份是第二步，而且應該由部署者依自己的需求決定。
+
+name: forum
+
+# ---------------------------------------------------------------------------
+# 相依服務
+# ---------------------------------------------------------------------------
+
+services:
+  mysql:
+    image: mysql:8.0.29
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必須在 settings.conf 設定}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-forum}
+      # 這個檔案讓 MySQL 只用 utf8mb4。預設的 latin1 會讓中文與 emoji 存不進去，
+      # 而那個錯誤訊息是 "Incorrect string value"——完全不會指向資料庫的字元集。
+      MYSQL_INITDB_SKIP_TZINFO: "1"
+    command:
+      # 這四個參數是為了讓「容器裡的 MySQL」在時間與排序上跟得上資料的實際規模：
+      #   utf8mb4_0900_ai_ci：預設值，確保中文能正確比較大小寫不敏感
+      #   innodb_buffer_pool_size = 512M：預設 128M 對一個論壇太小，
+      #     症狀是「資料量一上去就全面變慢」而沒有人知道是記憶體
+      #   max_connections = 200：後端的連線池預設開 20，而 128 的預設在
+      #     多執行緒部署時會被背景程式的短連線吃光
+      #   --character-set-server 與 --collation-server 與上面的 initdb 檔一致
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb_buffer_pool_size=512M
+      - --max_connections=200
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
+    # 這個 healthcheck 是 depends_on 的前提，因此它必須測「真的能接受查詢」而不只是
+    # 「行程活著」。mysqladmin ping 會在伺服器還在初始化時就成功 —— 那一刻它還在
+    # 對任何資料庫回 "Access denied"，而以為它就緒的 backend 會在第一次查詢時失敗。
+    # 因此改用 mysqladmin status 並要求它回 0（status 會實際連線並嘗試列出
+    # 資料庫）。start-period 給 60 秒是因為 8.0 第一次啟動要初始化 InnoDB。
+    healthcheck:
+      test: ["CMD", "mysqladmin", "status", "--host=127.0.0.1", "--user=root", "--password=${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    # MySQL 資料目錄需要時間寫完；20 秒足以讓它完成 checkpoint。
+    stop_grace_period: 20s
+    networks:
+      - forum-net
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # 密碼與 appendonly 兩件事都在指令列而不是設定檔，理由相同：讓這個檔保持
+    # 可讀——一個部署者打開這個檔就能知道 Redis 有密碼、有持久化。
+    #
+    # appendonly yes 對這個服務是必要的：Redis 存的是 session（登入狀態）與
+    # 媒體 token。沒有 AOF 時 `docker restart` 會讓所有人被踢出登入，而症狀是
+    # 「使用者說我剛才明明有登入」。
+    #
+    # maxmemory-policy noeviction（Redis 的預設值，刻意寫出來）：這個專案的
+    # Redis 裝的是「不能無聲消失」的資料。若改成 allkeys-lru，記憶體壓力時
+    # Redis 會安靜地刪掉 session，而症狀是「使用者莫名其妙地被登出」。
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD 必須在 settings.conf 設定}
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      # 刻意用 redis-cli -a 而不是 --no-auth-warning：這個 healthcheck 會出現在
+      # `docker inspect` 的輸出裡，而 --no-auth-warning 會讓密碼在那裡留下明文。
+      # 密碼會出現在 process args 這件事是 Redis 命令列介質的固有限制，
+      # 這裡不做更換 secret 的設計（見 settings.conf 檔頭的說明）。
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    # Redis 的 AOF 重寫可能需要一點時間；10 秒對它綽綽有餘。
+    stop_grace_period: 10s
+    networks:
+      - forum-net
+
+  # -------------------------------------------------------------------------
+  # backend（含前端產物）
+  # -------------------------------------------------------------------------
+  backend:
+    build:
+      # 建置情境是**倉庫根目錄**，不是 backend/：這個映像同時包含前端產物，
+      # 而後端在啟動時會掃描那些產物、算出 CSP 要授權的 SHA-256。
+      # 分開建置的話，「被提供的檔案」與「被授權的雜湊」就來自兩次建置 ——
+      # 症狀是整頁沒有版面而 console 只有一行 Refused to apply inline style。
+      # 合成一個映像讓那個不變量由建置流程結構性保證。
+      # 詳細理由見 backend/Dockerfile 的檔頭。
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      files_server:
+        condition: service_started
+    environment:
+      # 這些值進的是**容器內的設定檔**，不是環境變數。理由是這個專案的設定解析
+      # 讀檔案（key=value），而讓它同時支援環境變數會帶來「哪一個優先」的問題
+      # —— 那正是 ROADMAP.md Phase 0.4 剛剛統一過的一類問題。
+      #
+      # 刻意的例外：FILES_SERVER_TOKEN 支援環境變數後備（見 config.go），
+      # 而它在這裡就是用環境變數給的。
+      TZ: ${TZ:-Asia/Taipei}
+    volumes:
+      # 設定檔：bind mount 讓部署者可以直接編輯 host 上的檔案並
+      # `docker compose restart backend`。刻意**不**把設定檔烤進映像 ——
+      # 那會讓「改了設定」需要重新建置映像，而那是一個非常容易忘記的步驟。
+      #
+      # :ro 是重要的：設定檔含憑證，而這個行程不需要寫入它。read-only mount 讓
+      # 一個意外寫入設定檔的程式立刻失敗，而不是靜默地改掉正式環境的設定。
+      - ./backend/config/config.conf:/app/config/config.conf:ro
+      # 這一個是 backend 唯一的寫入需求：它要寫 server.log（LOG_FILE）。
+      - backend-logs:/app/logs
+      # 前端產物**刻意沒有** volume：它已經在建置時 COPY 進映像了。
+      # 若改成 volume 掛載，就會回到「掛進去的版本與映像裡的後端不同」這個問題 ——
+      # 而那正是這個設計要消除的。
+    expose:
+      # 只用 expose 不用 ports：這個專案不該從主機直接連後端。它會被上游的
+      # 反向代理或 Cloudflare Tunnel 導到，而那裡才是 TLS 終結與來源限制的地方。
+      #
+      # 需要從主機測試時用 `docker compose exec backend /app/forum -healthz`，
+      # 那比開一個 port 更能回答「它能不能用」。
+      - "8088"
+    # 20 秒，且必須大於 SHUTDOWN_TIMEOUT_SECONDS（預設 15 秒）。
+    # 詳細理由見本檔檔頭與 backend/forum/config 的說明。
+    #
+    # 部署者必須在 backend/config/config.conf 裡設定的值（compose 無法代勞，
+    # 因為那個檔是 bind mount 進去的應用層設定檔）：
+    #   TRUSTED_PROXY_CIDRS = 172.28.0.0/16
+    # 這是容器部署下唯一必須額外設定的安全項目 —— 理由見檔末的網路說明。
+    stop_grace_period: 20s
+    healthcheck:
+      # 呼叫執行檔自己的 -healthz，而不是 curl。backend 映像是 distroless，
+      # 沒有 shell 也沒有 curl（見 backend/Dockerfile 的檔頭）。
+      #
+      # timeout 5s 必須大於 -healthz 內部的 2 秒探測期限，
+      # 否則結果會是「探測被中斷」而那與「相依不可用」無法區分。
+      test: ["CMD", "/app/forum", "-healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - forum-net
+
+  # -------------------------------------------------------------------------
+  # files_server
+  # -------------------------------------------------------------------------
+  files_server:
+    build:
+      context: ./files_server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Taipei}
+    volumes:
+      - ./files_server/config.conf:/app/config.conf:ro
+      # 上傳的檔案。必須是 volume：容器每次重建都會失去所有檔案，
+      # 而症狀是「貼文裡的圖片全都 404」—— 沒有任何錯誤訊息。
+      - files-storage:/app/storage
+    expose:
+      - "7070"
+    # 20 秒，理由與 backend 相同：這個服務的 SHUTDOWN 預設也是 15 秒。
+    #
+    # 而這個值對**這個服務**更重要：一次 50 MB 的圖片上傳被砍斷時，
+    # 後端已經把貼文寫進 MySQL 了，而檔案沒有落地。於是資料庫裡有篇文章
+    # 引用一張不存在的圖片，而沒有任何日誌、沒有任何錯誤碼。
+    stop_grace_period: 20s
+    # 刻意**不**設 healthcheck。這個服務沒有可探測的端點，而加一個會把
+    # 「Redis 掛掉時降級為不驗證媒體 token」變成「容器被判定為不健康並重啟」
+    # —— 那與這個服務刻意採取的策略直接衝突（見 files_server/main.go 的檔頭）。
+    #
+    # compose 沒有「程序還在跑就算健康」這種弱檢查可用（那需要一個容器內的
+    # 指令，而 alpine 有 shell，因此理論上可以用 pgrep）。刻意不加：它會讓
+    # depends_on 的 service_healthy 條件失去意義，而 backend 其實只需要
+    # files_server「已啟動」而不是「已健康」。
+    networks:
+      - forum-net
+
+# ---------------------------------------------------------------------------
+# 網路
+# ---------------------------------------------------------------------------
+# 一個內部網路，不對外 publish。backend 與 files_server 用 `expose` 而不是
+# `ports` 正是靠它：容器之間用服務名稱通訊（mysql、redis、files_server），
+# 而主機不需要直接連到它們。
+#
+# 刻意**不**設定 internal: true：backend 需要對外連 Google（OAuth）與
+# Elasticsearch，而 internal 會把它們的對外連線全部擋掉。那個錯誤訊息是
+# "dial tcp: i/o timeout"，完全不會指向網路設定。
+#
+# 【為什麼 subnet 必須明確指定】
+# 這是 Phase 4.6 的落點，也是這個檔裡唯一一個「必須同時改兩個地方」的值。
+#
+# httpapi 的 clientIP 有兩種信任模型（見 backend/forum/httpapi/trustedproxy.go）：
+#   - TRUSTED_PROXY_CIDRS 有設定：只有 TCP 對端落在白名單裡才採信 X-Forwarded-For。
+#   - 留空（預設）：無條件採信 X-Forwarded-For。
+#
+# 預設的「無條件採信」在有代理擋在後面時是正確的，在容器部署下卻是錯的：
+# forum-net 內的任何容器都能直接連 8088，而它只要自己塞一個 X-Forwarded-For
+# 就能讓限流計數記到別的 IP 上 —— 一個連限流都能繞過的部署。
+# 因此容器部署**必須**設定 TRUSTED_PROXY_CIDRS 為下面這個 subnet。
+#
+# 而「必須寫成什麼」取決於 subnet —— 所以它被明確固定在 172.28.0.0/16，
+# 讓部署者可以把這個字串直接抄進 config.conf。留空讓 Docker 自己挑的話，
+# 每台機器的 subnet 都不同，而那個差異只在啟動之後的某個時間點才會以
+# 「限流對直連失效」的形式出現。
+networks:
+  forum-net:
+    driver: bridge
+    ipam:
+      config:
+        # 刻意避開 Docker 預設的 172.17.0.0/16（那是 docker0 bridge 的）。
+        # 理由：若這個 subnet 與網路上另一個網段重疊，容器到該網段的路由會被
+        # 改寫 —— 而症狀是「某個內網服務連不上，且沒有任何錯誤指向網路」。
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+
+# ---------------------------------------------------------------------------
+# Volume
+# ---------------------------------------------------------------------------
+# 全部用 named volume，不用 bind mount —— 除了 mysql-data 有特別的理由。
+#
+# 兩個應用容器的寫入需求（設定檔與上傳檔案）用 bind mount，而 MySQL 的資料
+# 目錄與 Redis 的 AOF 用 named volume：
+#
+#   1. 權限：bind mount 會把 host 的檔案權限帶進容器，而容器裡的行程是非 root
+#      的 UID 10001。named volume 的初次建立繼承映像裡那個目錄的權限，
+#      因此第一次啟動就能寫入。
+#   2. 擁有者：bind mount 到 /etc 或 /var 有時會讓 Docker 認為那是設定檔
+#      （macOS 與 Windows 上 bind mount 的已知問題），named volume 沒有這個問題。
+#   3. 備份：一個 named volume 可以用 `docker run --rm -v forum_mysql-data:/data ...`
+#      匯出，而 bind mount 的備份語義取決於 host 的檔案系統。
+volumes:
+  mysql-data:
+  redis-data:
+  files-storage:
+  backend-logs:

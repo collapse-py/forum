@@ -27,6 +27,15 @@
 # 只給本機用可改成 127.0.0.1。
 host = "0.0.0.0"
 port = 7070
+# 收到 SIGTERM（docker stop、systemd restart）後，等在途請求完成的秒數。
+# 超過就強制中斷 —— 症狀是「貼文存得下但圖片上傳失敗」，因為那時後端已經
+# 寫完 MySQL 而檔案還沒落地。
+#
+# 必須**大於**部署端等待行程結束的上限（docker compose 的 stop_grace_period、
+# systemd 的 TimeoutStopSec）。設得比它長不會讓請求有更多時間完成，只會讓
+# 部署看起來卡住，然後被部署端先殺掉 —— 那與直接砍掉請求沒有差別。
+# 0 或負值不採用，一律沿用預設值 15（與後端的 SHUTDOWN_TIMEOUT_SECONDS 相同）。
+shutdown_timeout_seconds = 15
 
 # ------------------------------------------------------------
 #  存儲後端

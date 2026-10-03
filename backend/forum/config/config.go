@@ -36,6 +36,7 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -123,7 +124,8 @@ import (
 // 使用的 "forum:session:" 區隔，否則兩種資料會互相覆蓋。
 // MediaTokenTTLSecs 是圖片存取 token 的存活秒數。在這段時間內持有 token 的人都能
 // 讀取該圖片，所以值應盡量貼近實際瀏覽行為。程式內兜底預設 2592000（30 天）只適合
-// 開發環境；範例設定檔用 60 秒，並在使用者離開頁面時呼叫釋用 API 提前刪除。
+// 開發環境，且**正式環境採用兜底值會讓 Validate 拒絕啟動**（見 MediaTokenTTLExplicit）。
+// 範例設定檔用 60 秒，並在使用者離開頁面時呼叫釋用 API 提前刪除。
 // RedisAddr 是 Redis 位址（host:port），Redis 與 MySQL 假設與本服務同側部署。
 // RedisPassword 是 Redis 的 AUTH 密碼，留空代表不驗證。同一個 Redis 也存放 session
 // token，未啟用密碼等同把登入權杖暴露給能連到該主機的任何程序。
@@ -138,7 +140,8 @@ import (
 // 失敗，因此解析時刻意不去除尾端斜線。
 // AllowedAdminEmail 是管理員白名單。登入時以此比對 Google 回傳的 email，命中者直接
 // 在 session 內標記為管理員，不需資料庫中的角色資料；因此新增一項等同授予後臺權限，
-// 屬高風險操作。逗號兩側可以有空白，解析時會去除。
+// 屬高風險操作。逗號兩側的空白會去除，整串轉小寫，比對時傳入值也做同樣正規化
+// （見 IsAdminEmail）—— 否則帶空白或大寫的白名單會靜默失效。
 // LogLevel 是日誌門檻，門檻低於此值的訊息完全不輸出；無法辨識的值由 logger 退回
 // INFO。範例設定檔的正式環境使用 WARN，可減少磁碟寫入但也會失去錯誤前的診斷線索。
 // LogFile 是日誌輸出檔案路徑，以附加（O_APPEND）模式開啟，檔案不存在時會被建立，
@@ -162,18 +165,18 @@ import (
 // forum_posts；它必須與 ES 上既有的其他索引（例如舊功能的 history_posts）
 // 不同名，否則兩種資料會混在同一个索引裡互相覆蓋。
 type Config struct {
-	CookieName     string        // COOKIE_NAME
-	SessionExpire  time.Duration // SESSION_EXPIRE_HOURS（設定檔單位：小時）
-	CookieSecure   bool          // COOKIE_SECURE
-	ServerPort     string        // SERVER_PORT（net/http 的 "host:port" 形式）
+	CookieName    string        // COOKIE_NAME
+	SessionExpire time.Duration // SESSION_EXPIRE_HOURS（設定檔單位：小時）
+	CookieSecure  bool          // COOKIE_SECURE
+	ServerPort    string        // SERVER_PORT（net/http 的 "host:port" 形式）
 	// ReadHeaderTimeout 是讀取請求標頭的期限（READ_HEADER_TIMEOUT_SECONDS，單位：秒）。
 	// 只卡標頭、不卡本文，理由見上方欄位說明（貼文附圖的本文可達 50 MB）。
 	ReadHeaderTimeout time.Duration
 	// ShutdownTimeout 是優雅停止時等待在途請求的期限（SHUTDOWN_TIMEOUT_SECONDS，
 	// 單位：秒）。超過即強制關閉連線，尚未完成的請求會被中斷。
 	ShutdownTimeout time.Duration
-	PublicBaseURL  string        // PUBLIC_BASE_URL
-	TrustedOrigins []string      // TRUSTED_ORIGINS（逗號分隔）
+	PublicBaseURL   string   // PUBLIC_BASE_URL
+	TrustedOrigins  []string // TRUSTED_ORIGINS（逗號分隔）
 	// TrustedProxyCIDRs 是可信任反向代理的位址段（TRUSTED_PROXY_CIDRS，逗號分隔，
 	// 每一項可以是 "IP/遮罩" 或裸 IP）。只有 TCP 對端落在這個白名單裡時，
 	// 程式才會採信 X-Forwarded-For / X-Real-IP；否則一律以 RemoteAddr 為準。
@@ -196,23 +199,29 @@ type Config struct {
 	FilesServerToken         string        // FILES_SERVER_TOKEN（後備值來自同名環境變數）
 	MediaTokenKeyPrefix      string        // MEDIA_TOKEN_KEY_PREFIX
 	MediaTokenTTLSecs        int           // MEDIA_TOKEN_TTL_SECONDS（設定檔單位：秒）
-	RedisAddr                string        // REDIS_ADDR
-	RedisPassword            string        // REDIS_PASSWORD
-	RedisDB                  int           // REDIS_DB
-	GoogleClientID           string        // GOOGLE_CLIENT_ID
-	GoogleClientSecret       string        // GOOGLE_CLIENT_SECRET
-	GoogleRedirectURL        string        // GOOGLE_REDIRECT_URL（須與 Google Console 登記值逐字相符）
-	AllowedAdminEmail        []string      // ALLOWED_ADMIN_EMAIL（逗號分隔）
-	ESURL                    string        // ES_URL（留空＝不啟用 Elasticsearch，搜尋退回 MySQL LIKE）
-	ESIndex                  string        // ES_INDEX（預設 forum_posts）
-	LogLevel                 string        // LOG_LEVEL
-	LogFile                  string        // LOG_FILE
-	LogFormat                string        // LOG_FORMAT（"json" 或 "text"）
-	MonitorRetentionHours    int           // MONITOR_RETENTION_HOURS（分鐘彙總保留小時數）
-	AuditRetentionDays       int           // AUDIT_RETENTION_DAYS（稽核紀錄保留天數）
-	ForumName                string        // FORUM_NAME（站台顯示名稱，預設 "forum 論壇"）
-	ForumShortName           string        // FORUM_SHORT_NAME（標誌短名，留空＝沿用 ForumName）
-	ForumDescription         string        // FORUM_DESCRIPTION（manifest 說明，留空＝沿用 ForumName）
+	// MediaTokenTTLExplicit 記錄 MEDIA_TOKEN_TTL_SECONDS 是否在設定檔中以正整數
+	// 明確出現過。存在的原因是「兜底值」與「刻意設成同一個數字」在 Config 上
+	// 長得一模一樣，而這個專案對 30 天的兜底值有明確的安全立场（見 Validate）：
+	// 正式環境採用兜底值必須是部署者知情同意的結果，不能是忘記設定的副產品。
+	// 因此 Validate 需要這個旗標才能分辨那兩種情況。
+	MediaTokenTTLExplicit bool
+	RedisAddr             string   // REDIS_ADDR
+	RedisPassword         string   // REDIS_PASSWORD
+	RedisDB               int      // REDIS_DB
+	GoogleClientID        string   // GOOGLE_CLIENT_ID
+	GoogleClientSecret    string   // GOOGLE_CLIENT_SECRET
+	GoogleRedirectURL     string   // GOOGLE_REDIRECT_URL（須與 Google Console 登記值逐字相符）
+	AllowedAdminEmail     []string // ALLOWED_ADMIN_EMAIL（逗號分隔，載入時已 TrimSpace + ToLower）
+	ESURL                 string   // ES_URL（留空＝不啟用 Elasticsearch，搜尋退回 MySQL LIKE）
+	ESIndex               string   // ES_INDEX（預設 forum_posts）
+	LogLevel              string   // LOG_LEVEL
+	LogFile               string   // LOG_FILE
+	LogFormat             string   // LOG_FORMAT（"json" 或 "text"）
+	MonitorRetentionHours int      // MONITOR_RETENTION_HOURS（分鐘彙總保留小時數）
+	AuditRetentionDays    int      // AUDIT_RETENTION_DAYS（稽核紀錄保留天數）
+	ForumName             string   // FORUM_NAME（站台顯示名稱，預設 "forum 論壇"）
+	ForumShortName        string   // FORUM_SHORT_NAME（標誌短名，留空＝沿用 ForumName）
+	ForumDescription      string   // FORUM_DESCRIPTION（manifest 說明，留空＝沿用 ForumName）
 }
 
 // Load 讀取並解析 path 指向的設定檔，回傳套用預設值後的 Config。
@@ -364,7 +373,13 @@ func Load(path string) (Config, error) {
 		case "MEDIA_TOKEN_KEY_PREFIX":
 			cfg.MediaTokenKeyPrefix = val
 		case "MEDIA_TOKEN_TTL_SECONDS":
-			cfg.MediaTokenTTLSecs, _ = strconv.Atoi(val)
+			// 只有「成功解析成正數」才算明確設定過：寫成 0、負數或 abc 時
+			// 沿用兜底值，而那種情況必須被 Validate 視為「沒有設定」，
+			// 否則正式環境會以為自己設了 TTL，實際上吃的是 30 天兜底值。
+			if secs, ok := parsePositiveInt(val); ok {
+				cfg.MediaTokenTTLSecs = secs
+				cfg.MediaTokenTTLExplicit = true
+			}
 		case "REDIS_ADDR":
 			cfg.RedisAddr = val
 		case "REDIS_PASSWORD":
@@ -381,8 +396,9 @@ func Load(path string) (Config, error) {
 			// 這裡若擅自去掉結尾斜線，反而會造成 redirect_uri_mismatch。
 			cfg.GoogleRedirectURL = val
 		case "ALLOWED_ADMIN_EMAIL":
-			// 逗號分隔的白名單；解析時去除每項前後空白。
-			cfg.AllowedAdminEmail = parseList(val)
+			// 逗號分隔的白名單；parseList 去除每項前後空白，normalizeEmails 再
+			// 轉小寫 —— 兩者缺一不可，理由見 normalizeEmails 的說明。
+			cfg.AllowedAdminEmail = normalizeEmails(parseList(val))
 		case "ES_URL":
 			// 去掉尾斜線：es 套件會以 baseURL + "/{index}" 組出路徑，
 			// 留著尾斜線會變成 "//forum_posts"（ES 容忍但 log 很難看）。
@@ -547,20 +563,137 @@ func (c *Config) applyDefaults() {
 
 // IsAdminEmail 判斷 email 是否列在 ALLOWED_ADMIN_EMAIL 白名單中。
 //
-// 比對是大小寫敏感且不做任何正規化（不轉小寫、不去空白）。這是安全的，因為
-// Google 回傳的 email 已是穩定的小寫形式，而白名單也應以相同字面書寫；反過來說，
-// 白名單若寫成帶空白或大寫的樣子會靜默失效。
+// 比對兩邊都做正規化（TrimSpace + ToLower）：設定檔的白名單在 parseList
+// 階段就已正規化，而這裡對傳入值做同樣的處理，因此
+// " Admin@Example.com " 會命中 "admin@example.com"。
+//
+// 為什麼需要正規化：白名單若寫成帶空白或大寫的樣子會**靜默失效** —— 症狀是
+// 管理員被鎖在後台外，而且沒有任何錯誤訊息，因為 Google 回傳的 email 已是穩定
+// 的小寫形式，設定檔卻多了一個空白或大寫字母。靜默失效是本專案最難排查的一類
+// 問題（它不會出現在任何日誌、任何狀態碼裡），而它的成本只是三行字串處理。
+//
+// 刻意「不」做的正規化：Gmail 的點號與 + 別名（a.b+c@example.com 與
+// abc@example.com 是同一信箱）。那會把「同一個信箱」變成一個需要業務規則的判斷
+// （本站有多個信箱服務商，且網域的大小數點語意各不相同），而白名單的重點是
+// 「只有這些明確的信箱可以當管理員」—— 放寬比對只會讓它更容易被誤加。
 //
 // 副作用：無，只讀取欄位。回傳值型別是值接收者，代表每次呼叫會複製整個 Config
 // （含 slice 的標頭），但因為只讀且結構不大，這點複製成本可以忽略。
 func (c Config) IsAdminEmail(email string) bool {
+	target := normalizeEmail(email)
+	// 空白輸入在正規化後是空字串，而白名單裡不可能有正規化後的空字串
+	// （normalizeEmails 會丟掉空項目），因此空輸入必然落到迴圈結束後的 false。
+	// 這裡仍不額外加防呆判斷：多一個分支等於多一條要測的路徑，而這個不變式
+	// 已經由 parseList + normalizeEmails 兩層一起保證。
 	for _, allowed := range c.AllowedAdminEmail {
-		if email == allowed {
+		if target == allowed {
 			return true
 		}
 	}
 	// 迴圈走完代表白名單沒有命中。
 	return false
+}
+
+// IsProduction 判斷這份設定是否面向正式環境。
+//
+// 判斷依據是兩個「本來就必須為正式環境而設」的旗標，而不是新增一個
+// ENVIRONMENT=production 的開關：多一個開關就多一種「忘了打開」的狀態，而
+// COOKIE_SECURE 忘了打開本身就是正式環境的重大缺陷（見下方說明），所以它
+// 已經是一個可靠的間接訊號。
+//
+// 兩個條件是「或」而不是「且」：
+//   - CookieSecure：對外走 HTTPS 時必須為 true。反過來說，false 意味著
+//     session cookie 會在明文連線上送出 —— 那不可能是正式環境的意圖。
+//   - PublicBaseURL 以 https 開頭：站方對外網址是 HTTPS。同一個道理，即使
+//     CookieSecure 漏設，這一條仍然能認出正式環境。
+//
+// 已知邊界：正式環境「刻意」以 http 服務（例如內部測試站、或 TLS 在上游代理
+// 終結而 cookie 仍標 Secure）時，這個判斷會誤認為開發環境。誤判的方向是
+// 「不報警」，也就是回到這個專案原本的行為，不會造成新的阻擋。
+func (c Config) IsProduction() bool {
+	if c.CookieSecure {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(c.PublicBaseURL), "https://")
+}
+
+// Validate 回報那些「不會讓程式啟動失敗、卻會讓部署以靜默的錯誤行為運作」的
+// 設定問題。目前只檢查一項（媒體 token 的 TTL 兜底值），但刻意設計成可累積的
+// 檢查清單而不是單一布林：回傳 nil 代表設定可用，非 nil 代表部署者必須先修正。
+//
+// 為什麼值得一個專門的階段：這個專案最大的失敗模式不是「服務掛掉」，而是
+// 「服務看起來正常，行為卻是錯的」—— 白名單大小寫不匹配（管理員被鎖在後台外）、
+// 媒體 token TTL 變成 30 天（圖片的存取權杖一個月不失效）、限流視窗是 0 秒
+// （限流形同不存在）。這些都不會出現在任何日誌或 HTTP 狀態碼裡，只能在部署時
+// 逐項點名出來。
+//
+// 呼叫端（main）把回傳的錯誤視為致命：這個專案既有的立場是「不啟動比錯誤啟動好」
+// （見 main.go 對 Redis / MySQL 的處理），而這一項同樣屬於那個類別 —— 啟動之後
+// 它只會以「有人回報圖片壞掉、但查不出原因」的形式回來。
+//
+// 副作用：無，只讀取欄位。
+func (c Config) Validate() error {
+	var problems []string
+
+	// 媒體 token TTL 的兜底值（30 天）對正式環境明顯過長：在這段時間內持有
+	// token 的人都能讀取該圖片，而 30 天後仍有效的存取權杖等於「圖片連結外流」
+	// 與「永久」在實務上無法區分。開發環境採用兜底值是合理的（忘記設定時圖片
+	// 仍要能顯示），因此這個檢查刻意以 IsProduction 為前提條件。
+	//
+	// 這裡要問的是「部署者知不知道自己在用兜底值」，而不是「TTL 是不是很大」：
+	// 有人部署在 CDN 後面、圖片本來就該長期可取，30 天對他是正確的設定。
+	// MediaTokenTTLExplicit 讓那種「刻意設成 30 天」與「忘記設定」可以區分開來。
+	if !c.MediaTokenTTLExplicit && c.IsProduction() {
+		problems = append(problems, fmt.Sprintf(
+			"MEDIA_TOKEN_TTL_SECONDS 未設定，採用兜底值 %d 秒（約 30 天）。"+
+				"正式環境的圖片存取權杖不該存活這麼久；請在設定檔明確設定一個值"+
+				"（若確實需要長期有效，寫出你想要的數字即可，這個值會被視為知情同意）",
+			c.MediaTokenTTLSecs,
+		))
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("設定檢查失敗（%d 項）:\n  - %s",
+		len(problems), strings.Join(problems, "\n  - "))
+}
+
+// normalizeEmail 對單一 email 做正規化：去除前後空白並轉小寫。
+//
+// 兩個步驟都不可省：
+//   - TrimSpace：白名單是人手寫的，"a@example.com, b@example.com" 中逗號後的
+//     空白是最常見的寫法。parseList 會去掉它，但比對的另一側（Google 回傳值
+//     或呼叫端傳入值）不保證乾淨，因此在比對點再收一次是防禦而非冗餘。
+//   - ToLower：email 的網域部分在規格上不區分大小寫，本機部分則由服務商自行
+//     決定。Google 回傳的 email 已是穩定的小寫，因此轉小寫不會造成漏判，
+//     卻能讓設定檔寫成 "Admin@Example.com" 時不再靜默失效。
+//
+// 刻意不做的事見 IsAdminEmail 的說明（Gmail 點號與 + 別名一律不處理）。
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// normalizeEmails 對白名單的每一項套用 normalizeEmail，並丟掉空項目。
+//
+// 為什麼需要獨立的一層：parseList 已經做了 TrimSpace 與丟空項目，但那是
+// 「以半形逗號分隔的清單」共用的邏輯，不該為了 email 特有的需求而讓它變複雜。
+// 同一份邏輯在 ALLOWED_ADMIN_EMAIL 上會出現兩次（一次在解析、一次在比對），
+// 這正是抽出這兩行的原因。
+func normalizeEmails(emails []string) []string {
+	if emails == nil {
+		return nil
+	}
+	result := make([]string, 0, len(emails))
+	for _, e := range emails {
+		if normalized := normalizeEmail(e); normalized != "" {
+			result = append(result, normalized)
+		}
+	}
+	// 全部項目都被丟掉時回傳長度為 0 的切片而非 nil：len() == 0 對呼叫端
+	// 兩者等價，而這裡保持非 nil 讓「設定檔寫了這個 key 但內容全空」與
+	// 「這個 key 不存在」在 debug 時可以從 %v 的輸出看出差別。
+	return result
 }
 
 // parseList 解析以半形逗號分隔的清單，回傳去除空白與空項目後的切片。

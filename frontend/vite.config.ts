@@ -152,6 +152,31 @@ function copyForumRuntimeAssets(): Plugin {
  */
 export default defineConfig({
   base: '/',
+  /*
+   * 開發模式的後端代理。少了這一組，npm run dev 是開箱即壞的狀態。
+   *
+   * 原因：dev server 只服務 5173，而前端的 API 呼叫全部是相對路徑（/api/*、
+   * /auth/*、/healthz）。這些請求因此會打到 Vite 自己 —— 拿到的是 HTML 或
+   * 404，而不是後端的 JSON。症狀是「頁面載得出来但永遠顯示未登入」，而且
+   * console 裡只有一串 HTML 內容型別的抱怨，看起來像後端的問題。
+   *
+   * 目標埠刻意寫成明碼 8088 而不是讀環境變數：後端的 SERVER_PORT 預設就是
+   * 8088（見 backend/forum/config 的 applyDefaults），而這個設定存在的目的
+   * 是讓「改了後端埠的人」一眼看出這裡也要跟著改。從 process.env 讀取會讓
+   * 「proxy 指向哪裡」變成一個需要追查三個檔案才能回答的問題。
+   *
+   * 刻意**不**代理 /files/*：開發模式下前端取圖走的是 FILES_SERVER_PUBLIC_URL
+   *（預設直連 :7070 的跨來源請求），把它轉進 8088 會讓圖片請求多繞一圈，並與
+   * 媒體 token 的驗證路徑（後端簽發、檔案伺服器驗證）互動出意料之外的行為：
+   * 症狀是 dev 模式看得到圖、生產模式卻 401，而兩邊的差別只是一個 proxy 設定。
+   */
+  server: {
+    proxy: {
+      '/api': 'http://localhost:8088',
+      '/auth': 'http://localhost:8088',
+      '/healthz': 'http://localhost:8088',
+    },
+  },
   plugins: [
     react(),
     copyForumRuntimeAssets(),

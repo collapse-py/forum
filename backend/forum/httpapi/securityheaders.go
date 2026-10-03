@@ -395,6 +395,18 @@ func cspSourceFromURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
+	// 拒絕含逗號的值：這個函式的契約是「一個絕對 URL → 一個來源運算式」，
+	// 而呼叫端（buildContentSecurityPolicy）傳的是單一的
+	// FILES_SERVER_PUBLIC_URL。
+	//
+	// 為什麼需要這一道：url.Parse 不會拒絕 "https://a.example,https://b.example"
+	// 那樣的字串，它會把 Host 解讀成 "a.example,https:"。把這個垃圾組進
+	// img-src 會讓瀏覽器遇到一個語法非法的來源運算式 —— 而瀏覽器對 CSP 裡的
+	// 非法來源是**靜默忽略**的。症狀是「圖片全部載不出來，主控台只有一行
+	// 不指向任何設定的 CSP 警告」，那正是這個函式存在的理由要避免的形狀。
+	if strings.ContainsAny(raw, ", \t\r\n") {
+		return ""
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""

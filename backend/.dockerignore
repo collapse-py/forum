@@ -1,0 +1,59 @@
+# backend 建置情境的 .dockerignore
+#
+# 【為什麼這裡必須有 .dockerignore】
+# Docker 的建置情境是**整個檔案系統樹**，不是 git 的追蹤集合。沒有這份檔案，
+# `COPY . .` 會把下列東西送進建置階段：
+#   - config/config.conf：真實的 GOOGLE_CLIENT_SECRET、FILES_SERVER_TOKEN、
+#     REDIS_PASSWORD 與 DSN 裡的帳密。
+#     這不是「理論上的風險」—— build context 會被送給 Docker daemon，而 daemon
+#     在本機、在 CI 上、在任何有權限讀取該 daemon socket 的程序面前。
+#   - server.log / coverage.out / *.exe：每次建置都會變動的產物。它們不會進到
+#     最終映像（多階段建置只帶執行檔），但會讓建置情境變大，且會讓 Docker 的
+#     層快取**永遠失效** —— 因為 COPY . . 的雜湊每次都不同。
+#
+# 最後那一句是真正會讓人煩躁的理由：一個 30 KB 的 coverage.out 讓每次建置都
+# 要重跑 go mod download。
+#
+# 【順序】
+# 從最具體排到最一般，讓上面的註解對應到實際會被排除的東西。
+
+# --- 憑證與設定（最重要）---
+config/config.conf
+*.conf
+# 註：上面的 *.conf 會連 config.conf.example 一起排除，而它是**要**進版控的。
+# 它的作用只是給部署者一個範本，不需要出現在映像裡 —— 映像執行時讀的是
+# volume 掛進來的 config.conf。
+
+# --- 版本控與工具設定 ---
+.git
+.gitignore
+.github
+.dockerignore
+Dockerfile
+
+# --- 建置產物（會讓層快取永遠失效）---
+*.exe
+*.out
+*.test
+server.log
+coverage.out
+
+# --- 測試與文件 ---
+# 測試檔必須排除嗎？不需要 —— go build 不會編譯 _test.go。但它們確實會
+# 出現在建置情境裡並佔空間，因此保留（排除它們會讓「這個映像沒有測試」
+# 這件事變得不可查，而那不是我們想隱藏的資訊）。
+# 刻意**不**排除 *_test.go。
+
+# --- 工具 ---
+# coveragefloor 這個工具只在 CI 裡用，映像執行檔根本不需要它。
+tools/
+
+# --- 文件 ---
+*.md
+
+# --- 與 backend 無關的東西 ---
+# 這個建置情境是 backend/，理論上不會有這些。但顯式列出來有兩個好處：
+# 一是把意圖寫下來，二是防止未來有人在 backend/ 底下誤放一個含憑證的檔案
+# 而以為 .dockerignore 會擋掉它。
+.DS_Store
+Thumbs.db

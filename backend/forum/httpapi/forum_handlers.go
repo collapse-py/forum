@@ -61,9 +61,16 @@ Origin 檢查在 csrf.go。
  7. 所有 DB 錯誤都先寫入 logger，再對外回傳固定的通用訊息，避免把 SQL 與
     schema 細節洩漏給使用者。
 
-四、已知限制（刻意保留，非本檔案可自行修正）
-  - Server.rateLimiter 雖已建立，但 server.go 未把它掛到任何路由上，
-    因此本檔案的寫入端點目前沒有速率限制。
+四、已知限制（刻意保留，非本檔文件可自行修正）
+  - 本檔文件**每一條會改動資料的端點都已掛限流**（掛載點在 server.go 的
+    Handler()，說明見該處的「限流的四個要點」）：/api/forum/posts、
+    /api/forum/posts/{id}... 掛 write 額度，/api/forum/images 與
+    /api/forum/image-tokens/release 掛 upload 額度，/api/forum/profile 與
+    /api/forum/follows 掛 write 額度。唯一在此範圍內卻**刻意不限流**的是
+    /api/forum/public-profile 與 /api/forum/public-posts —— 它們是設計給
+    未登入訪客看的唯讀查詢，限流會直接擋掉正常瀏覽（理由見 server.go 的註解）。
+    限流用量本身由設定檔控制（見上方 Server 的三個限流器欄位），因此本檔文件
+    不得假設任何固定的額度數值。
   - MySQL schema 未定義外鍵，父資源存在性一律以 SELECT COUNT(*) 檢查，
     交易隔離層級為預設的 REPEATABLE READ，理論上仍可能出現競態（見 handleForumPostLike）。
 */

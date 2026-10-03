@@ -76,6 +76,17 @@ var (
 	// 限制：Init 必須在服務開始處理請求之前完成；執行期間若仍寫入，
 	// 會與併發讀取產生資料競爭，本套件沒有提供任何鎖定或 once 保護。
 	OauthConfig *oauth2.Config
+
+	// userInfoURL 是向 Google 查詢 email 的端點。
+	//
+	// 為什麼是變數而不是直接寫在 GetUserEmail 裡：GetUserEmail 是本套件唯一
+	// 有分支邏輯（狀態碼檢查、JSON 解析、錯誤分類）的函式，而它的兩次對外
+	// 請求都寫死主機名時，整支函式就無法測試 —— 測試只能真的去呼叫 Google。
+	// oauth2 的 Endpoint（TokenURL / AuthURL）本來就是透過 OauthConfig 注入的，
+	// 這裡讓 userinfo 端點有同樣的注入點，兩者就一致了。
+	//
+	// 限制與 OauthConfig 相同：只在啟動時或測試中寫入，之後唯讀。
+	userInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
 )
 
 // Init 建立 Google OAuth2 用戶端設定並寫入全域變數 OauthConfig。
@@ -227,7 +238,7 @@ func GetUserEmail(r *http.Request) (string, error) {
 	client := OauthConfig.Client(context.Background(), token)
 	// 使用 oauth2 的 client 而非裸 http.Client：它會在 token 過期時自動以
 	// refresh_token 換發新 token，並在需要時於請求前先做一次更新。
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	resp, err := client.Get(userInfoURL)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[AUTH] Failed getting user info: %v", err)
 		return "", fmt.Errorf("failed getting user info: %s", err.Error())

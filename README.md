@@ -60,7 +60,7 @@ URL 裡都不會出現 email。管理員的身分不看資料庫角色表，只�
 - **Elasticsearch 全文搜尋**：`ES_URL` 留空則自動退回 MySQL `LIKE`
 - **PWA**：可安裝、有 service worker 與 manifest，頁面 network-first、
   靜態資源 cache-first
-- **多語系**：18 個語系（含 `zh-TW` 為基準），阿拉伯文為 RTL
+- **多語系**：17 個語系（含 `zh-TW` 為基準），阿拉伯文為 RTL
 - **三段式 IP 限流**：內容寫入、上傳、OAuth 各自獨立額度
 - **媒體存取權杖**：上傳時發短 TTL 的 Redis token 綁定圖片網址，可主動釋放
 
@@ -228,24 +228,34 @@ npm run build       # 內含 typecheck，產出 frontend/dist/
 ```bash
 cd backend
 go build .
-./forum             # Windows: .\forum.exe；或直接 go run .
+
+./forum -check      # 先驗證設定：輸出報告，有問題時 exit 1
+./forum             # 正常啟動（Windows: .\forum.exe；或直接 go run .）
 ```
 
-啟動順序是固定的：讀設定 → 初始化 logger → ping Redis → 開 MySQL →
-`data.MigrateMySQL` → `auth.Init` → `session.NewManager` → 註冊路由 →
-啟動限流清理 → 背景重建 ES 索引 → 監聽。
+啟動順序是固定的：讀設定 → 初始化 logger → **驗證設定（`config.Validate`）**
+→ ping Redis → 開 MySQL → `data.MigrateMySQL` → `auth.Init` →
+`session.NewManager` → 註冊路由 → 啟動限流清理 → 背景重建 ES 索引 → 監聽。
 
 開瀏覽器到 <http://localhost:8088/forum>（`/` 會 302 到這裡）。
 
-> **一定要在 `backend/` 目錄下執行。** 設定檔路徑是
-> `filepath.Join("config", "config.conf")`，相對於工作目錄而不是執行檔所在目錄，
-> 在別的目錄跑會直接 fatal。
+> **一定要在 `backend/` 目錄下執行。** 設定檔路徑是 `config/config.conf`
+> （相對於工作目錄而不是執行檔所在目錄），在別的目錄跑會直接 fatal。
+> 用 `-config <路徑>` 可以覆寫它。
+
+後端執行檔有三種模式，都是同一支執行檔：
+
+| 旗標 | 做什麼 | 連線任何相依服務？ | 退出碼 |
+| --- | --- | --- | --- |
+| （無） | 正常啟動服務 | 是 | 0（正常停止）／1（監聽失敗） |
+| `-check` | 輸出設定報告後結束 | **否** | 0（通過）／1（有問題） |
+| `-healthz` | 探測 MySQL 與 Redis 後結束 | 是（僅探測） | 0（健康）／1（不健康） |
 
 停止後端按 Ctrl-C（或 `kill`／`systemctl stop`／`docker stop`）即可：收到
 `SIGINT` / `SIGTERM` 之後會停止接受新連線、等在途請求完成（上限
 `SHUTDOWN_TIMEOUT_SECONDS`）、寫出最後一次分鐘彙總，然後以 exit code 0 結束。
 超過上限仍有請求沒完成時會記警告並強制中斷 —— 那時 `docker stop` 預設 10 秒的
-停止上限通常會先到，所以容器部署時要一併把 `--stop-timeout` 調大（見「部署」）。
+停止上限通常會先到，所以容器部署時要一併把 `stop_grace_period` 調大（見「部署」）。
 
 ---
 
@@ -269,7 +279,7 @@ go build .
 | `SHUTDOWN_TIMEOUT_SECONDS` | `15` | 收到停止訊號後等待在途請求的秒數，超過即強制中斷。必須小於部署環境的停止上限 |
 | `PUBLIC_BASE_URL` | `http://localhost` + `SERVER_PORT` | 尾斜線會被自動去掉 |
 | `TRUSTED_ORIGINS` | `[PUBLIC_BASE_URL]` | CSRF 來源白名單。**留空等於關閉 CSRF 防護** |
-| `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。留空 = 舊的「標頭優先」行為（限流與封鎖可被偽造標頭繞過） |
+| `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。留空 = 舊的「標頭優先」行為（限流與封鎖可被偽造標頭繞過）。**容器部署必須填 `172.28.0.0/16`**，理由見「容器部署」 |
 | `DB_DSN` | — | 內含帳密 |
 | `DB_MAX_OPEN_CONNS` | — | 連線池上限 |
 | `DB_MAX_IDLE_CONNS` | — | 連線池閒置數 |
@@ -283,7 +293,7 @@ go build .
 | `FILES_SERVER_PUBLIC_URL` | 同上 | 寫進資料庫的對外網址 |
 | `FILES_SERVER_TOKEN` | 讀環境變數 `FILES_SERVER_TOKEN` | **唯一支援環境變數的設定** |
 | `MEDIA_TOKEN_KEY_PREFIX` | `forum:token:` | 必須與 files_server 的 `token_key_prefix` 相同 |
-| `MEDIA_TOKEN_TTL_SECONDS` | `2592000`（30 天） | 這個兜底值對正式環境明顯過長，請明確設定 |
+| `MEDIA_TOKEN_TTL_SECONDS` | `2592000`（30 天） | 這個兜底值對正式環境明顯過長，因此**正式環境採用兜底值會讓啟動被拒絕**（`-check` 會指出；開發環境不受影響）。寫出你想要的數字即可 —— 刻意設成 2592000 會被視為知情同意 |
 | `RATE_LIMIT_REQUESTS` | `10` | 內容寫入 |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | |
 | `RATE_LIMIT_UPLOAD_REQUESTS` | `5` | 圖片上傳（最貴，額度最緊） |
@@ -293,7 +303,7 @@ go build .
 | `GOOGLE_CLIENT_ID` | — | |
 | `GOOGLE_CLIENT_SECRET` | — | |
 | `GOOGLE_REDIRECT_URL` | — | 必須與 Google Cloud Console 完全一致 |
-| `ALLOWED_ADMIN_EMAIL` | 空 | 逗號分隔，大小寫敏感且不做正規化 |
+| `ALLOWED_ADMIN_EMAIL` | 空 | 逗號分隔。**載入時會去除每項前後空白並轉小寫，比對時對傳入值做同樣的正規化** —— 因此帶空白或大寫不會再靜默失效 |
 | `LOG_LEVEL` | `INFO` | |
 | `LOG_FILE` | `server.log` | |
 | `LOG_FORMAT` | `text` | 或 `json` |
@@ -918,41 +928,146 @@ server: {
 
 ## 測試
 
-後端有 Go 測試，**前端沒有測試**（package.json 內沒有 `test` 腳本）。
+後端與檔案服務都有 Go 測試，**前端沒有單元測試**（package.json 內沒有 `test`
+腳本）—— 前端的測試是**型別檢查**加上編譯期保證的翻譯完整性，理由見
+`src/i18n/messages.ts` 的說明（`Record<MessageKey, string>` 讓漏翻譯與用錯鍵
+在編譯期就失敗）。
 
 ```bash
+# 後端
 cd backend
 go test ./...                # 全域
+go test ./forum/config/...   # 設定解析（三組限流的兜底、管理員白名單正規化、TTL 守門）
+go test ./forum/auth/...     # OAuth（開放轉向防護、state 往返、四種上游失敗）
+go test ./forum/logger/...   # 欄位清洗（含日誌注入）、兩種格式、分級、併行安全
 go test ./forum/metrics/...  # 請求統計（注入假時鐘，斷言快照）
 go test ./forum/audit/...    # 稽核（CSV 防護、佔位符、截斷）
 go test ./forum/session/...  # Session 列舉與撤銷（miniredis）
 go test ./forum/ipban/...    # IP 封鎖名單（miniredis；過期、清理、長度上下限）
 go test ./forum/es/...       # ES 傳輸層（用 httptest 與 fake server）
-go test .                    # 監聽逾時與優雅停止（package main，含在途請求排空）
+go test .                    # 監聽逾時、優雅停止、-check 報告（package main）
+
+# 檔案服務（上傳／刪除／token 驗證／路徑穿越）
+cd files_server
+go test ./...
+
+# 需要真實 MySQL 的遷移測試（未設定 DSN 時會自動跳過）
+FORUM_TEST_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/?parseTime=true&loc=UTC&multiStatements=true' \
+  go test ./backend/forum/data/...
+
+# 翻譯目錄與本文件的語系宣稱（路徑以腳本自身位置推導，可從任何目錄執行）
+node tools/i18n/verify-catalogs.mjs
 ```
 
-現有的測試檔：
+### 測試檔清單
 
 | 檔案 | 覆蓋 |
 | --- | --- |
+| `backend/forum/config/config_test.go` | 三組限流與兩組逾時**拒絕 0 與負數**、管理員白名單的 TrimSpace + ToLower（雙邊正規化）、`MEDIA_TOKEN_TTL_SECONDS` 的正式環境守門與「刻意設成 30 天」豁免、尾斜線裁切、`GOOGLE_REDIRECT_URL` 不裁切、DSN 的 `=` 切分、未知 key 靜默忽略 |
+| `backend/forum/auth/auth_test.go` | **開放轉向的全家族**（絕對網址／protocol-relative／反斜線／五種編碼繞過）、`HandleLogin` → `ReturnPath` 的 state 編碼往返、授權網址形狀（scope 正確、client_secret 不外洩）、`GetUserEmail` 的成功路徑與四種上游失敗、**上游內容不洩漏進錯誤訊息** |
+| `backend/forum/logger/logger_test.go` | `sanitizeLogValue` 的四條規則（含 **UTF-8 rune 邊界截斷**與「清洗後為空要用佔位符」）、門檻過濾、text 與 json 兩種格式、背景訊息省略前綴、**中繼欄位也會被清洗**、存取記錄的分級、併行寫入（`-race`） |
+| `backend/forum/httpapi/frontend_shells_test.go` | **十六個 HTML 殼在三處同步**（`src/entries/`、`vite.config.ts`、`frontendShellFiles`）—— 新增一頁而不動另外兩處會指名缺哪一處 |
+| `backend/forum/httpapi/security_invariants_test.go` | CSRF 來源檢查（含「兩個標頭都沒有」這個刻意放行）、限流器的設定轉換與 per-client 計數、CSP 來源正規化、**樣式區塊內容的位元組精確性** |
+| `backend/forum/data/migration_test.go` | **真實 MySQL**：13 張表全部建立、冪等（跑兩次結構不變且**資料不被清掉**）、舊 schema 升級路徑、中文與 emoji 往返、三個併行遷移不死鎖 |
+| `files_server/server_test.go` | 上傳的 token 驗證與大小限制、副檔名白名單、**UUID 命名（不覆蓋、不洩漏檔名）**、**刪除的路徑穿越全家族**、媒體 token（不存在 → 401、Redis 故障 → **503 而非 401**）、兩條降級路徑、CORS 預檢、**沒有任何路徑能列出儲存結構** |
+| `files_server/shutdown.go`（`drainUntilTimeout` 的回傳值） | 由 `files_server` 的測試與 `backend/shutdown_test.go` 共同覆蓋 |
+| `tools/invariants/analyzer_test.go` | 三條不變條件分析器的**負向測試**（刻意寫違規程式碼，確認會被報）與正向測試（確認不誤報），加上 `walkBody` 的 stack 配對 |
 | `backend/forum/httpapi/site_test.go` | 站名樣板取代、跳脫、manifest、style hash 穩定性 |
 | `backend/forum/httpapi/securityheaders_test.go` | `frontendShellFiles` 與實際頁面殼的同步、雜湊的完整與穩定 |
-| `backend/forum/httpapi/monitoring_test.go` | 統計中介層的路由／狀態碼／in-flight、**每 IP 統計的接線與封鎖標記**、限流器計數、監控端點的授權、`INFO memory` 解析 |
+| `backend/forum/httpapi/monitoring_test.go` | 統計中介層的路由／狀態碼／in-flight、**每 IP 統計的接線與封鎖標記**、限流器計數、監控端點的授權、記憶體解析 |
 | `backend/forum/httpapi/stats_handlers_test.go` | 統計視窗的收斂與起點、摘要的字元計算、端點授權 |
 | `backend/forum/httpapi/batch_export_test.go` | **CSV 注入的六個危險前綴**、BOM 與下載標頭、email 清單正規化、匯出與批次的授權 |
 | `backend/forum/httpapi/announcement_test.go` | 公告內文的邊界（空白／300 字／有效時間上下限）、後臺端點的授權、公開端點的 null 路徑 |
-| `backend/forum/metrics/metrics_test.go` | 路由正規化、維度上限、分鐘桶的守恆、歷史讀回、時間軸長度 |
+| `backend/forum/httpapi/trustedproxy_test.go` | `TRUSTED_PROXY_CIDRS` 的解析與信任模型（標頭優先 vs 白名單） |
+| `backend/forum/metrics/metrics_test.go` | 請求統計：路由正規化、延遲分桶、分鐘桶守恆、歷史讀回、時間軸連續性 |
 | `backend/forum/metrics/clients_test.go` | 每 IP 統計的累加、被封鎖擋下的計數、上限時驅逐最舊的、`clientsDropped` 可觀察、閒置剪枝、排序穩定 |
 | `backend/forum/session/session_list_test.go` | 掃描走遍整個 keyspace、**絕不回傳完整 token**、SCAN 去重、上限截斷、撤銷只刪目標帳號 |
 | `backend/forum/ipban/ipban_test.go` | 過期封鎖視為未封鎖、重複封鎖延長到期、`Ban` 順手清理、CIDR 被拒、長度上下限、nil 連線安全 |
 | `backend/forum/audit/audit_test.go` | 稽核寫入的參數順序與錯誤傳遞、UTF-8 邊界截斷、變更筆數上限、查詢條件的佔位符與分頁收斂 |
-| `backend/forum/metrics/metrics_test.go` | 路徑正規化（含基數上限）、延遲分桶、排序、時間軸連續性與歷史來源 |
 | `backend/forum/es/es_test.go` | ES 傳輸層約 16 個案例（`httptest` 假伺服器） |
-| `backend/forum/httpapi/trustedproxy_test.go` | `TRUSTED_PROXY_CIDRS` 的解析與信任模型（標頭優先 vs 白名單） |
 | `backend/shutdown_test.go` | 逾時設定（**含「刻意留白」的 `ReadTimeout` / `WriteTimeout`**）、停止訊號與監聽錯誤的分流、**`Shutdown` 會等在途請求完成** |
 
-`go.mod` 有宣告 `miniredis`（供 Redis 相關測試），但目前實際用到的 ES 測試是
-`httptest`。`httpapi` 大部分 handler 沒有測試覆蓋。
+### 覆蓋率
+
+2026-10-02 的實測（合併兩個 Go 模組，**26.5%**）：
+
+| 套件 | 覆蓋率 | 說明 |
+| --- | --- | --- |
+| `forum/auth` | 92.0% | OAuth 的防護面幾乎全覆蓋 |
+| `forum/config` | 89.1% | 全部純函式 + 每個兜底分支 |
+| `forum/logger` | 85.5% | 含併行安全與注入防護 |
+| `forum/es` | 84.3% | 原本就有 |
+| `forum/ipban` | 82.4% | 原本就有 |
+| `forum/metrics` | 72.6% | 原本就有 |
+| `forum/session` | 67.1% | 原本就有 |
+| `forum/audit` | 50.0% | 原本就有 |
+| `files_server` | 48.9% | 從 **0%** 開始（Phase 3.4） |
+| `forum/httpapi` | 10.6% | 約 2,500 行；已覆蓋 CSRF、限流、CSP、殼檔同步 |
+| `forum/data` | 0%（本機）/ 高（有 MySQL） | 需要真實資料庫，CI 的 `migrations` job 提供 |
+
+CI 有一道**覆蓋率地板**（`.github/workflows/ci.yml` 的 `coverage-floor` job，
+地板值 25.0）。它的作用是**防止退化**，不是製造動機 —— 刻意不設一個虛高的
+目標（例如 70%），因為那會誘發無行為斷言的測試來拉數字，而那種測試是負債：
+它會在重構時壞掉，卻沒有指出任何東西壞了。
+
+### 不變條件 analyzer
+
+這個專案有四條**專屬**的不變條件。它們約束的不是「型別對不對」或「有沒有
+測試」，因此通用工具抓不到 —— 一個 handler 從 0% 變成 30% 覆蓋，與「Commit
+之前有沒有檢查稽核錯誤」毫無關係。
+
+| 不變條件 | 由什麼守住 |
+| --- | --- |
+| 稽核與操作同生共死：`beginAdminTx` → **檢查** `recordAdminAction` 的錯誤 → `tx.Commit()` | `auditcheck` analyzer |
+| `/api/admin/*` 的 handler 在 method 分派**之前**呼叫 `requireAdminForum` | `adminauth` analyzer |
+| `withBlocklistHandler` 只在 `applyRateLimit` 內被呼叫（單一掛載點） | `blocklistmount` analyzer |
+| 十六個 HTML 殼在三處同步 | `frontend_shells_test.go` |
+
+前三條是 `tools/invariants` 這個獨立 Go 模組裡的 `go/analysis` analyzer。
+**失敗模式是編譯失敗**（`go vet` 回報），而不是「有人沒注意到」。
+
+```bash
+# 建置並執行
+cd tools/invariants && go build -o invariants .
+cd ../../backend && go vet -vettool=<abs>/tools/invariants/invariants ./...
+
+# 分析器自己也要被測試（含負向測試：刻意寫違規程式碼，確認會被報）
+cd tools/invariants && go test ./...
+```
+
+它刻意是**獨立的 Go 模組**：它需要 `golang.org/x/tools`，而 backend 的相依項
+刻意維持在四個（miniredis、mysql、go-redis、oauth2）。把分析工具的相依塞進
+runtime 相依裡，等於讓每個部署環境都多下載一份只有 CI 需要的程式碼。
+
+第四條跨越 Go / TypeScript / HTML 三種語言，`go/analysis` 表達不了，因此它是
+一個**測試**而不是 analyzer。兩種失敗模式（編譯失敗 vs 測試失敗）刻意不混在
+同一個工具裡，以免搞混哪一條失效了。
+
+### CI
+
+`.github/workflows/ci.yml` 有八個 job：
+
+| job | 做什麼 |
+| --- | --- |
+| `backend` | build、`go vet`、`go test -race`（CGO 開啟就是為了它） |
+| `files_server` | 同上 |
+| `frontend` | `npm ci`、`typecheck`、`build`、`verify-catalogs` |
+| `coverage-floor` | 合併兩個模組的覆蓋率，檢查是否 ≥ 25.0 |
+| `invariants` | 建置並執行分析器，加上分析器自測 |
+| `migrations` | 起真實 MySQL 8.0.29，跑 `forum/data` 的遷移測試 |
+| `secrets` | 確認 `config.conf` 從未被追蹤、範本檔不含明文憑證 |
+
+`secrets` 那個 job 用 `fetch-depth: 0` 掃**整份歷史** —— 只掃工作區的話，一個
+「刪掉檔案」的 commit 就足以讓真正的憑證留在倉庫裡。
+
+### 靜態檢查與格式
+
+這個專案**刻意沒有** gofmt / golangci-lint 的閘門。理由不是懶，而是它們會在
+第一次執行時擋下 25 個既有檔案，而那些格式差異是**行尾（CRLF）**造成的 ——
+在一個以 Windows 為主的開發環境裡，那會讓每一個開發者第一次推上去時都被擋，
+而他們完全無法理解原因。
+
+`go vet` 有閘門（它找的是真問題，不是排版）。
 
 ---
 
@@ -1004,6 +1119,119 @@ cd ../backend && go build -o forum .
 
 `backend/update.sh` 是給 Debian/Ubuntu 的一次性建置腳本（apt 裝 Go 再 `go build`）。
 
+### 容器部署（docker compose）
+
+`docker-compose.yml` 提供四個服務：`mysql`、`redis`、`backend`、`files_server`。
+**沒有「前端」服務** —— 那是這個架構最刻意的一個決定，理由見下。
+
+```bash
+# 1. 準備三份設定檔
+cp deploy/settings.conf.example deploy/settings.conf       # 容器編排的環境變數
+cp backend/config/config.conf.example backend/config/config.conf
+cp files_server/config.conf.example files_server/config.conf
+# 三份都改成自己的值
+
+# 2. 部署前先驗證設定 —— 這是整份 compose 裡最值得做的一步
+docker compose run --rm backend -check
+
+# 3. 起服務
+docker compose up -d
+docker compose ps
+docker compose logs -f backend
+```
+
+#### 為什麼前端沒有獨立服務
+
+因為後端在啟動時會掃描前端產物、算出每個 HTML 殼裡 `<style>` 區塊的 SHA-256，
+然後把它們放進 CSP 的 `style-src`（`backend/forum/httpapi/securityheaders.go`）。
+也就是說：**被提供的檔案與被授權的雜湊必須來自同一份建置輸出**。
+
+它們分開的症狀是「整頁沒有版面」——`style.css` 仍會作用（它是 `<link>` 載入的
+外部檔案，`style-src 'self'` 已經涵蓋），所以畫面看起來「有樣式但怪怪的」，
+而瀏覽器主控台只有一行 `Refused to apply inline style`。
+
+因此 `backend/Dockerfile` 的建置情境是**倉庫根目錄**，它先跑 `npm ci` +
+`npm run typecheck` + `npm run build`，再編譯 Go，最後把 `dist/` 從同一個 stage
+COPY 進最終映像。那個不變量由建置流程**結構性**保證 —— 不可能提供一份與雜湊
+不符的檔案，因為兩者來自同一次建置。
+
+另一個好處：部署時需要啟動的容器只有兩個。沒有第三個「前端」服務，也就不會有
+「啟動了靜態檔案伺服器，而它指向後端，但後端還沒起來」這個啟動順序問題。
+
+#### 容器部署**必須**額外設定的兩個值
+
+1. **`TRUSTED_PROXY_CIDRS=172.28.0.0/16`**（寫在 `backend/config/config.conf`）
+
+   這是容器部署下唯一必須額外設定的安全項目。留空會讓「無條件採信
+   `X-Forwarded-For`」生效，而 `forum-net` 內的**任何容器**都能直接連 8088 ——
+   它只要自己塞一個標頭就能讓限流計數記到別的 IP 上：那等於限流完全失效，
+   而症狀是「限流看起來有開，只是擋不住任何人」。
+
+   為什麼那個 subnet 是寫死的：`docker-compose.yml` 明確指定了
+   `172.28.0.0/16`，讓這裡可以直接抄。留空讓 Docker 自己挑的話，每台機器都
+   不同，而那個差異只在啟動之後才會以上述症狀出現。確認實際生效的值可以看
+   後臺監控頁的「來源 IP 信任模型」。
+
+2. **`MEDIA_TOKEN_TTL_SECONDS`**（同樣寫在 `config.conf`）
+
+   這不是容器專屬的，但 `-check` 會在正式環境擋下忘記設定的部署
+   （見下面的「設定檢查」）。
+
+#### 停止行為
+
+`backend` 與 `files_server` 都有 `stop_grace_period: 20s`，而 `SHUTDOWN_TIMEOUT_SECONDS`
+的預設是 15 秒。那 5 秒的間隙是刻意留的：給後端寫最後一次監控彙總與關閉資料庫
+連線的時間。
+
+`docker compose stop` 送出 `SIGTERM` 後，兩個容器都會走各自的排空流程然後以
+**exit code 0** 結束（見 `backend/shutdown.go` 與 `files_server/shutdown.go`）。
+一個回 1 會讓部署端以為有東西壞了。
+
+MySQL 的 `stop_grace_period` 是 20 秒、`Redis` 是 10 秒 —— 分開設定是因為它們
+的停止成本完全不同（InnoDB 需要時間 checkpoint，Redis 的 AOF 重寫很快）。
+
+#### `-check`：部署前先驗證設定
+
+```bash
+cd backend
+go run . -check
+docker compose run --rm backend -check    # 不啟動任何服務
+```
+
+它讀設定檔、套用兜底值、跑一次 `Validate`，然後輸出一份報告。**它不連線任何
+外部服務**，所以它回答的是「這個行程會以什麼組態啟動」，而不是「相依服務能不能
+連上」。
+
+報告刻意**不印任何憑證**（只印「已設定（N 個字元）」）——`-check` 的輸出會出現在
+CI 日誌、issue 回報與截圖裡，而那些地方經常沒有存取控制。
+
+它會點名的項目，都是**啟動之後完全沒有症狀**的那一類：
+
+- `COOKIE_SECURE` / `PUBLIC_BASE_URL` 判定為開發環境，而設定裡有正式環境的痕跡
+- 三組限流的實際額度（它們在設定檔打錯字時會沿用預設值，而那看起來「有開」）
+- 媒體 token 的 TTL 與**它是明確設定還是採用兜底值**（30 天）
+- 管理員白名單的**實際儲存值**（已去除空白並轉小寫）—— 這正是部署者要確認的
+  東西：「我寫的那個信箱，真的在名單裡嗎」
+- 逾時值（拿來和部署端的停止上限對照）
+- 正式環境下未設定 `FILES_SERVER_TOKEN` 的警告
+
+#### 這個專案在容器上的三個刻意取捨
+
+| 決定 | 理由 | 代價 |
+| --- | --- | --- |
+| 後端映像是 **distroless** | 沒有 shell 與套件管理員；一個有 shell 的正式環境容器距離「有人 exec 進去手動修東西」只有一步 | 診斷不能靠 `exec` 進去看檔案；改用 `LOG_FORMAT=json` 從 stdout 收集（compose 的預設） |
+| 檔案服務映像是 **alpine** | 這個服務處理使用者上傳的檔名（不可信輸入），需要一個 shell 作為未來的緩解手段 | 多 7 MB、多一層 libc 的 CVE 曝露面 |
+| 不用 **Docker secrets** | secrets 檔案是明文（base64），靠檔案權限保護 —— 與 `settings.conf` 的保護機制**相同**。而真正值得保護的 `GOOGLE_CLIENT_SECRET` 與 `FILES_SERVER_TOKEN` 在應用層的設定檔裡，從不進版控、也從不進 build context | `settings.conf` 必須靠 gitignore 保護 |
+
+#### systemd 部署
+
+容器不是唯一的選擇。`docker-compose.yml` 與 systemd 是**並存**的兩條路
+（ROADMAP.md 的 Phase 4.7 刻意保留 systemd 單元檔）。
+
+systemd 的部署條件與容器相同：反向代理在別處、`COOKIE_SECURE=true`、
+`TRUSTED_ORIGINS` 對齊、`TimeoutStopSec` > `SHUTDOWN_TIMEOUT_SECONDS`、
+`TRUSTED_PROXY_CIDRS` 填真正在前面那道代理的位址段。
+
 ---
 
 ## 安全設計
@@ -1050,8 +1278,10 @@ node ../../tools/i18n/merge-translations.mjs <輸出目錄> <語言> <匯出名�
 # 附帶：把 todo 再切小
 node ../../tools/i18n/split-todo.mjs <輸出目錄> <語言> [份數]
 
-# 隨時驗證全部語系目錄
+# 隨時驗證全部語系目錄（路徑以腳本自身位置推導，可從任何目錄執行）
 node ../../tools/i18n/verify-catalogs.mjs
+#    這一項同時比對本文件宣稱的語系數量與清單：新增或刪除語系而沒更新
+#    上面兩處數字時，它會指名 README 的哪一處過期（CI 會跑這一步）。
 ```
 
 四種失敗的處理方式：
@@ -1066,8 +1296,8 @@ node ../../tools/i18n/verify-catalogs.mjs
 `make-worklist.mjs` 會排除 11 個必須原樣保留的鍵（拉丁字母排版裝飾與產品名，
 例如 `NEW POST`、`Admin Console`、`ID`）—— 翻譯會破壞視覺設計，而且本來就不需要翻。
 
-現有語系（`frontend/src/i18n/translations/`）共 17 份，連同基準的 `zh-TW`
-（`src/i18n/messages.ts`）共 18 個：
+現有語系（`frontend/src/i18n/translations/`）共 16 份，連同基準的 `zh-TW`
+（`src/i18n/messages.ts`）共 17 個：
 `ar`（RTL）、`de`、`en`、`es`、`fr`、`hi`、`id`、`ja`、`ko`、`pt-BR`、`ru`、
 `th`、`vi`、`zh-CN`、`zh-HK`、`zh-MO`。
 
@@ -1077,13 +1307,28 @@ node ../../tools/i18n/verify-catalogs.mjs
 
 誠實記錄現況，避免下次 deploy 時踩到：
 
+- **`httpapi` 約 2,500 行仍有約 90% 沒有測試覆蓋**（Phase 3.3 補了 CSRF、限流、
+  CSP 與殼檔同步，其餘的 handler 邏輯仍未涵蓋）。優先順序建議依「壞掉時的
+  爆炸半徑」排：批次／匯出 → 貼文 CRUD → 公告 → 統計。
+- **`forum/data` 的遷移測試需要真實 MySQL**，本機執行時會全部跳過
+  （未設 `FORUM_TEST_MYSQL_DSN`）。CI 的 `migrations` job 會跑它們 —— 但那也
+  意味著**本機的 `go test ./...` 不會驗證 schema 遷移**。
+- **`docker compose` 尚未在本機實測過**：這個環境沒有 Docker，因此映像與
+  compose 檔只經過靜態檢查（YAML 結構驗證 + 每個值與程式碼的設定鍵對照）。
+  第一次實際部署時請特別留意 `docker compose run --rm backend -check` 的輸出。
+- **`files_server` 的 S3 模式未經測試**。測試覆蓋的是本機模式；S3 後端是刻意
+  保持「最小可用子集」（PUT / DELETE + BasicAuth），而它的 `saveFile` 會把整個
+  檔案讀進記憶體 —— 因此 `upload.max_size` 被調到數百 MB 時那會成為記憶體尖峰。
 - **`token_key_prefix` 兩邊不一致的後果很難診斷**。範本已把 `files_server` 的
   `[redis].token_key_prefix` 對齊成 `forum:token:`，但既有的 `config.conf` 若仍留著
   舊值（例如 `hpnm:token:`），症狀是「上傳成功、貼文也存得下，但圖片一律 403/401」。
   兩邊都要是 `forum:token:`，且都要與 session 的 `forum:session:` 前綴區隔。
 - **`npm run dev` 開箱即壞**。沒有 `server.proxy`，相對路徑的 API 請求打不到後端。
 - **兩個 Go 模組版本不一致**：backend 要 1.25、files_server 要 1.26。
-- **`MEDIA_TOKEN_TTL_SECONDS` 的兜底值是 30 天**，對正式環境明顯過長。
+- **`MEDIA_TOKEN_TTL_SECONDS` 的兜底值是 30 天**，對正式環境明顯過長。已緩解：
+  正式環境（`COOKIE_SECURE=true` 或 `PUBLIC_BASE_URL` 為 https）未明確設定時，
+  `config.Validate` 會讓啟動被拒絕，並由 `-check` 在部署前指出。
+  刻意「設成 30 天」是允許的 —— 那代表部署者知道自己在做什麼。
 - **後端刻意不設 `ReadTimeout` 與 `WriteTimeout`**（`shutdown.go`）。這是刻意的：
   前者會連請求本文一起計時，而貼文附圖的本文可達 50 MB 且還要轉送給檔案伺服器；
   後者會在回應寫完前砍斷連線，而 CSV 匯出的耗時就落在這段裡。補上這兩項時必須
@@ -1168,8 +1413,11 @@ node ../../tools/i18n/verify-catalogs.mjs
   隨時間累積列數；若要清理過期且已停用的公告，目前得直接動資料庫。
 - **測試覆蓋集中在少數幾個檔**，`httpapi` 的主要 handler 沒有測試；
   `server.go` 的註解提到的 `forum_handlers_test.go` 目前不存在於 repo 中。
-- **`ALLOWED_ADMIN_EMAIL` 比對大小寫敏感且不做正規化**。白名單若寫成帶空白或
-  大寫會靜默失效（因為 Google 回傳的 email 已是穩定的小寫）。
+- **`ALLOWED_ADMIN_EMAIL` 的正規化**：比對**兩邊**都做 TrimSpace + ToLower，
+  因此帶空白或大寫的寫法不再靜默失效。刻意「不」做的正規化是 Gmail 的點號與
+  `+` 別名（`a.b+c@example.com` 與 `abc@example.com` 是同一信箱）—— 那會把
+  「同一個信箱」變成一個需要業務規則的判斷，而白名單的重點是「只有這些明確的
+  信箱可以當管理員」，放寬比對只會讓它更容易被誤加。
 - **`backend/server.log` 是舊版配置留下的**，裡面寫的是 `frontend/web/dist`，
   這個目錄現在不存在了。
 - **schema 沒有 migration 版本控制**，只有 idempotent 步驟，沒有降級路徑。
