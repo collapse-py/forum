@@ -198,6 +198,8 @@ export const zhCN: Record<MessageKey, string> = {
   'profile.saveFailed': '保存失败，请稍后再试。',
   'profile.loadFailed': '读取失败，请稍后再试。',
   'profile.followingEntry': '我的关注',
+  'profile.postsLabel': '我的帖子',
+  'profile.emptyPosts': '你还没有发表帖子。',
 
   /* ==========================================================================
      publicProfile

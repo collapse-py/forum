@@ -17,6 +17,7 @@ Origin 檢查在 csrf.go。
 	GET  /api/forum/public-profile?key=       -> handleForumPublicProfile 依 publicKey 讀取公開資料
 	GET  /api/forum/public-posts?user=        -> handleForumPublicPosts 依 publicKey 讀取該使用者的貼文分頁
 	GET|PUT /api/forum/profile                -> handleForumProfile      讀取／更新自己的資料
+	GET  /api/forum/my-posts                  -> handleForumMyPosts      讀取自己的貼文分頁
 	GET|POST /api/forum/follows               -> listForumFollows / toggleForumFollow 追蹤清單與切換
 	GET  /api/forum/following/posts           -> handleForumFollowingPosts 追蹤者的貼文動態
 	GET  /forum/login                         -> handleForumLoginPage    登入頁殼
@@ -69,6 +70,9 @@ Origin 檢查在 csrf.go。
     /api/forum/follows 掛 write 額度。唯一在此範圍內卻**刻意不限流**的是
     /api/forum/public-profile 與 /api/forum/public-posts —— 它們是設計給
     未登入訪客看的唯讀查詢，限流會直接擋掉正常瀏覽（理由見 server.go 的註解）。
+    /api/forum/my-posts 同樣刻意不限流，但理由不同：它掛在 requireLogin 之後，
+    匿名訪客本來就進不來，因此「限流 GET 的前提」不成立（與
+    /api/forum/following/posts 同一組判斷）。
     限流用量本身由設定檔控制（見上方 Server 的三個限流器欄位），因此本檔文件
     不得假設任何固定的額度數值。
   - MySQL schema 未定義外鍵，父資源存在性一律以 SELECT COUNT(*) 檢查，
@@ -1650,6 +1654,61 @@ func (s *Server) handleForumPublicPosts(w http.ResponseWriter, r *http.Request) 
 	posts, err := s.loadForumPosts(r, `WHERE fp.author_email = ?`, []interface{}{author}, pageSize, offset)
 	if err != nil {
 		s.writeForumPostLoadError(w, err, "unable to load public posts")
+		return
+	}
+
+	writeOK(w, map[string]interface{}{
+		"items":   posts,
+		"hasMore": len(posts) == pageSize,
+	})
+}
+
+// handleForumMyPosts 回傳「我自己」的貼文分頁，供 /forum/profile 的「我的貼文」
+// 區塊使用。
+//
+// 為什麼不讓前端改用 public-posts?user=<自己的金鑰>
+// ---------------------------------------------------
+// 那條路徑需要前端先知道自己的 publicKey，而目前唯一會回傳 selfKey 的端點是
+// GET /api/forum/follows（見 forum_follow_handlers.go 的 listForumFollows）——
+// 為了列自己的貼文先下載一份追蹤清單，是把不相干的成本塞進最常走的路徑。
+//
+// 而更關鍵的是錯誤語意：從未發過文的帳號在 forum_profiles 與 forum_posts 都
+// 沒有任何一列，forumEmailByPublicKey 對它回 sql.ErrNoRows，public-posts 因此回
+// 404。前端的 useFeed 分不出 404 與網路錯誤，兩者都會變成「貼文載入失敗」——
+// 於是「還沒發過文」會被顯示成一個錯誤狀態。這裡直接回空陣列，讓同一個畫面能
+// 如實顯示「你還沒有發表貼文」。
+//
+// 與 handleForumPublicPosts 的差別只有 WHERE 子句，其餘（欄位、計數、去識別化、
+// 圖片 token、分頁推測）全部走同一支 loadForumPosts —— 因此「自己的貼文」與
+// 「自己貼文在首頁的樣子」不可能漂移（例如按讚數、置頂順序不一致）。
+//
+// 刻意不過濾停權：listForumPosts 不過濾，這裡額外過濾會讓同一篇貼文在首頁可見、
+// 在自己的個人頁消失 —— 而這正是使用者最需要把它找出來刪掉的情形。
+func (s *Server) handleForumMyPosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	email := s.sessions.ResolveUser(r)
+	// 路由已用 requireLogin 包住（含停權檢查），此處重複確認是縱深防禦。
+	if email == "" {
+		unauthorized(w, "請先使用 Google 登入")
+		return
+	}
+
+	// 單頁筆數與另外三個貼文列表一致（見 listForumPosts 的說明）。
+	const pageSize = 25
+
+	offset, ok := forumOffsetParam(w, r)
+	if !ok {
+		return
+	}
+
+	// author_email 有索引（遷移第 21 步），因此這是「索引等值過濾 + 依
+	// idx_forum_posts_feed 排序」，不會退化成掃描。
+	posts, err := s.loadForumPosts(r, `WHERE fp.author_email = ?`, []interface{}{email}, pageSize, offset)
+	if err != nil {
+		s.writeForumPostLoadError(w, err, "unable to load own posts")
 		return
 	}
 

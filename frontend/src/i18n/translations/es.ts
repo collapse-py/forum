@@ -263,6 +263,10 @@ export const es: Record<MessageKey, string> = {
     'No se pudo cargar. Inténtalo de nuevo más tarde.',
   'profile.followingEntry':
     'A quién sigo',
+  'profile.postsLabel':
+    'Mis publicaciones',
+  'profile.emptyPosts':
+    'Todavía no has publicado nada.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

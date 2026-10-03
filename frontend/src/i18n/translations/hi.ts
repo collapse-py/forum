@@ -263,6 +263,10 @@ export const hi: Record<MessageKey, string> = {
     'डेटा पढ़ने में सफलता मिली नहीं। कृपया बाद में फिर प्रयास करें।',
   'profile.followingEntry':
     'मेरी फ़ॉलोइंग',
+  'profile.postsLabel':
+    'मेरी पोस्ट',
+  'profile.emptyPosts':
+    'आपने अभी तक कोई पोस्ट नहीं की है।',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

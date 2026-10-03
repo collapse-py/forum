@@ -263,6 +263,10 @@ export const zhMO: Record<MessageKey, string> = {
     '讀取失敗，請稍後再試。',
   'profile.followingEntry':
     '我的追蹤',
+  'profile.postsLabel':
+    '我的貼文',
+  'profile.emptyPosts':
+    '你還沒有發表貼文。',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

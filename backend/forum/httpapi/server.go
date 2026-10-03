@@ -480,6 +480,7 @@ func (s *Server) Handler() http.Handler {
 		  /api/forum/follows              requireLogin → rateLimit(write) → handleForumFollows
 		                                 （GET 回追蹤清單、POST 切換追蹤）
 		  /api/forum/following/posts      requireLogin → handleForumFollowingPosts（私有唯讀）
+		  /api/forum/my-posts              requireLogin → handleForumMyPosts（自己的貼文，私有唯讀）
 		  /api/forum/public-profile       handleForumPublicProfile（刻意公開且不限流）
 		  /api/forum/public-posts         handleForumPublicPosts（依金鑰讀取某人貼文，公開且不限流）
 		  /api/forum/search               handleForumSearch（公開唯讀；ES 不可用時降級 MySQL LIKE）
@@ -567,6 +568,11 @@ func (s *Server) Handler() http.Handler {
 	// 追蹤者的貼文動態。純私有讀取（沒有登入就沒有追蹤清單），因此只掛
 	// requireLogin，不掛限流 —— 限流 GET 的前提是匿名訪客也要能讀，而這裡本來就擋掉了匿名。
 	mux.HandleFunc("/api/forum/following/posts", s.requireLogin(s.handleForumFollowingPosts))
+	// 自己的貼文（個人頁的「我的貼文」區塊）。與上一條同一組判斷：純私有唯讀，
+	// 因此只掛 requireLogin。刻意不讓前端改走 public-posts?user=<自己的金鑰> ——
+	// 那條路徑對「還沒發過文的帳號」會回 404，而個人頁必須把「還沒發過文」顯示成
+	// 空狀態而不是錯誤（理由見 handleForumMyPosts）。
+	mux.HandleFunc("/api/forum/my-posts", s.requireLogin(s.handleForumMyPosts))
 	// 公開個人頁刻意不掛任何認證中介層，因為它就是設計給未登入訪客看的。
 	mux.HandleFunc("/api/forum/public-profile", s.handleForumPublicProfile)
 	// 貼文搜尋。唯讀且刻意不限流：與貼文列表同一個道理，匿名訪客也要能搜尋。

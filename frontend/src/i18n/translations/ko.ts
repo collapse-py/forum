@@ -263,6 +263,10 @@ export const ko: Record<MessageKey, string> = {
     '불러오기에 실패했습니다. 나중에 다시 시도해 주세요.',
   'profile.followingEntry':
     '내 팔로우',
+  'profile.postsLabel':
+    '내 글',
+  'profile.emptyPosts':
+    '아직 글을 쓰지 않았습니다.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

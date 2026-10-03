@@ -263,6 +263,10 @@ export const vi: Record<MessageKey, string> = {
     'Không thể tải dữ liệu, vui lòng thử lại sau.',
   'profile.followingEntry':
     'Đang theo dõi',
+  'profile.postsLabel':
+    'Bài viết của tôi',
+  'profile.emptyPosts':
+    'Bạn chưa đăng bài nào.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

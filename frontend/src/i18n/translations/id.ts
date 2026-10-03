@@ -263,6 +263,10 @@ export const id: Record<MessageKey, string> = {
     'Gagal memuat. Silakan coba lagi nanti.',
   'profile.followingEntry':
     'Yang Saya Ikuti',
+  'profile.postsLabel':
+    'Postingan saya',
+  'profile.emptyPosts':
+    'Anda belum membuat postingan.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

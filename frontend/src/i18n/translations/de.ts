@@ -263,6 +263,10 @@ export const de: Record<MessageKey, string> = {
     'Profil konnte nicht geladen werden. Bitte versuche es später erneut.',
   'profile.followingEntry':
     'Meine Follows',
+  'profile.postsLabel':
+    'Meine Beiträge',
+  'profile.emptyPosts':
+    'Du hast noch nichts geschrieben.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

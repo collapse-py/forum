@@ -444,6 +444,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 | GET/PUT | `/api/forum/profile` | 自己的資料 |
 | GET/POST | `/api/forum/follows` | 追蹤名單 / 切換追蹤 |
 | GET | `/api/forum/following/posts` | 私密動態牆（需登入，不限流） |
+| GET | `/api/forum/my-posts` | 自己的貼文（需登入，不限流；未發過文回空清單而非 404） |
 | GET | `/api/forum/public-profile?key=` | 以 `public_key` 查公開資料（無需登入，不限流） |
 | GET | `/api/forum/public-posts?user=` | 以 `public_key` 查貼文 |
 | GET | `/api/forum/search?q=&offset=&limit=` | 全文搜尋；ES 不可用時退回 `LIKE` |

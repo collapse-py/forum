@@ -197,6 +197,8 @@ export const ja: Record<MessageKey, string> = {
   'profile.saveFailed': '保存に失敗しました。時間をおいてお試しください。',
   'profile.loadFailed': '読み込みに失敗しました。時間をおいてお試しください。',
   'profile.followingEntry': 'マイフォロー',
+  'profile.postsLabel': 'マイ投稿',
+  'profile.emptyPosts': 'まだ投稿していません。',
 
   /* ==========================================================================
      publicProfile

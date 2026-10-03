@@ -151,6 +151,8 @@ export const en: Record<MessageKey, string> = {
   'profile.saveFailed': 'Couldn\'t save, please try again.',
   'profile.loadFailed': 'Couldn\'t load, please try again.',
   'profile.followingEntry': 'Who I follow',
+  'profile.postsLabel': 'My posts',
+  'profile.emptyPosts': 'You haven\'t posted anything yet.',
 
   'publicProfile.eyebrow': 'PUBLIC PROFILE',
   'publicProfile.title': 'Public profile',

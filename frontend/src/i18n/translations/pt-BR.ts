@@ -263,6 +263,10 @@ export const ptBR: Record<MessageKey, string> = {
     'Falha ao carregar. Tente novamente em instantes.',
   'profile.followingEntry':
     'Quem eu sigo',
+  'profile.postsLabel':
+    'Minhas publicações',
+  'profile.emptyPosts':
+    'Você ainda não publicou nada.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

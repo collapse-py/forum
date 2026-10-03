@@ -237,6 +237,8 @@ export const zhTW = {
   'profile.saveFailed': '儲存失敗，請稍後再試。',
   'profile.loadFailed': '讀取失敗，請稍後再試。',
   'profile.followingEntry': '我的追蹤',
+  'profile.postsLabel': '我的貼文',
+  'profile.emptyPosts': '你還沒有發表貼文。',
 
   /* ==========================================================================
      publicProfile：他人的公開個人頁

@@ -263,6 +263,10 @@ export const ar: Record<MessageKey, string> = {
     'فشل التحميل، حاول مرة أخرى لاحقًا.',
   'profile.followingEntry':
     'متابَعون',
+  'profile.postsLabel':
+    'منشوراتي',
+  'profile.emptyPosts':
+    'لم تنشر شيئًا بعد.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

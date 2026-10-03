@@ -263,6 +263,10 @@ export const ru: Record<MessageKey, string> = {
     'Не удалось загрузить. Повторите попытку позже.',
   'profile.followingEntry':
     'Мои подписки',
+  'profile.postsLabel':
+    'Мои публикации',
+  'profile.emptyPosts':
+    'Вы ещё ничего не опубликовали.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

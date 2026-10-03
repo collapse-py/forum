@@ -263,6 +263,10 @@ export const fr: Record<MessageKey, string> = {
     'Échec du chargement. Veuillez réessayer plus tard.',
   'profile.followingEntry':
     'Mes abonnements',
+  'profile.postsLabel':
+    'Mes publications',
+  'profile.emptyPosts':
+    'Vous n’avez encore rien publié.',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

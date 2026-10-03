@@ -263,6 +263,10 @@ export const th: Record<MessageKey, string> = {
     'โหลดข้อมูลไม่สำเร็จ ให้ลองใหม่ภายหลัง',
   'profile.followingEntry':
     'รายชื่อที่ฉันติดตาม',
+  'profile.postsLabel':
+    'โพสต์ของฉัน',
+  'profile.emptyPosts':
+    'คุณยังไม่ได้โพสต์อะไรเลย',
   'publicProfile.eyebrow':
     'PUBLIC PROFILE',
   'publicProfile.title':

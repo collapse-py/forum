@@ -247,6 +247,25 @@
       .profile-form-actions .profile-cancel-button {
         display: inline-block;
       }
+
+      /* --- 我的貼文 -----------------------------------------------------------
+       * .feed 與 .post 都在 style.css 第 3 節（貼文卡是 /forum、/forum/following
+       * 與 /forum/others-profile 共用的），因此這裡只需要把這一段與上面的個人
+       * 資料卡分隔開 —— 與 .public-profile-posts 完全同樣的處理，理由見
+       * forum-others-profile.html 的註解。
+       *
+       * 上面留白比 .public-profile-posts 多：這一頁的卡片是可編輯的（表單很高），
+       * 貼文區緊接著表單會看起來像表單的一部分。
+       * ------------------------------------------------------------------ */
+      .profile-posts {
+        margin-top: 34px;
+        padding-top: 40px;
+        border-top: 1px solid var(--line);
+      }
+
+      .profile-posts .eyebrow {
+        margin-bottom: 4px;
+      }
     </style>
   </head>
   <body>
