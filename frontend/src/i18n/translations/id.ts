@@ -73,6 +73,10 @@ export const id: Record<MessageKey, string> = {
     'Gagal memuat komentar',
   'error.fallbackCommentPost':
     'Gagal mengirim komentar',
+  'error.fallbackCommentEdit':
+    'Gagal menyimpan komentar',
+  'error.fallbackCommentDelete':
+    'Gagal menghapus komentar',
   'error.fallbackReport':
     'Gagal mengirimkan laporan',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const id: Record<MessageKey, string> = {
     'Suka',
   'post.reply':
     'Balas',
+  'post.permalink':
+    'Tautan permanen',
+  'post.editedBadge':
+    'diedit',
+  'post.editContentLabel':
+    'Isi kiriman',
+  'post.editMax':
+    'Maksimal 10.000 karakter',
   'comment.loading':
     'Sedang memuat komentar...',
   'comment.none':
@@ -193,6 +205,14 @@ export const id: Record<MessageKey, string> = {
     'Laporkan',
   'comment.more':
     'Muat lebih banyak komentar...',
+  'comment.editedBadge':
+    'diedit',
+  'comment.editContentLabel':
+    'Isi komentar',
+  'comment.editFailed':
+    'Gagal menyimpan komentar, silakan coba lagi nanti.',
+  'comment.deleteFailed':
+    'Gagal menghapus komentar, silakan coba lagi nanti.',
   'report.reasonPlaceholder':
     'Masukkan alasan laporan (maksimal 500 karakter)',
   'report.note':
@@ -227,6 +247,18 @@ export const id: Record<MessageKey, string> = {
     'Sedang mengunggah gambar...',
   'newPost.failed':
     'Gagal mempublikasikan. Silakan coba lagi nanti.',
+  'newPost.imagePreviewAlt':
+    'Pratinjau gambar yang akan diunggah',
+  'newPost.draftNote':
+    'Draf disimpan otomatis di perangkat ini (hanya teks; gambar yang dipilih tidak ikut tersimpan).',
+  'postPage.loading':
+    'Memuat kiriman...',
+  'postPage.missing':
+    'Kiriman ini mungkin sudah dihapus, atau tautannya salah.',
+  'postPage.failed':
+    'Gagal memuat kiriman, silakan coba lagi nanti.',
+  'postPage.label':
+    'Kiriman',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const id: Record<MessageKey, string> = {
     'Artikel telah dihapus.',
   'posts.deleteFailed':
     'Gagal menghapus artikel.',
+  'posts.edited':
+    'Kiriman diperbarui.',
+  'posts.editFailed':
+    'Gagal menyimpan kiriman, silakan coba lagi nanti.',
   'posts.commentUpdated':
     'Komentar telah diperbarui.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const id: Record<MessageKey, string> = {
     'Profil Pribadi｜{site}',
   'title.publicProfile':
     'Profil Pribadi Publik｜{site}',
+  'title.post':
+    'Kiriman｜{site}',
   'title.following':
     'Mengikuti｜{site}',
   'title.adminUsers':

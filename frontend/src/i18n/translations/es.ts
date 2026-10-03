@@ -73,6 +73,10 @@ export const es: Record<MessageKey, string> = {
     'Error al cargar los comentarios',
   'error.fallbackCommentPost':
     'Error al publicar el comentario',
+  'error.fallbackCommentEdit':
+    'No se pudo guardar el comentario',
+  'error.fallbackCommentDelete':
+    'No se pudo eliminar el comentario',
   'error.fallbackReport':
     'Error al presentar la denuncia',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const es: Record<MessageKey, string> = {
     'Me gusta',
   'post.reply':
     'Responder',
+  'post.permalink':
+    'Enlace permanente',
+  'post.editedBadge':
+    'editado',
+  'post.editContentLabel':
+    'Contenido de la publicación',
+  'post.editMax':
+    'Máximo 10000 caracteres',
   'comment.loading':
     'Cargando comentarios…',
   'comment.none':
@@ -193,6 +205,14 @@ export const es: Record<MessageKey, string> = {
     'Denunciar',
   'comment.more':
     'Cargando más comentarios…',
+  'comment.editedBadge':
+    'editado',
+  'comment.editContentLabel':
+    'Contenido del comentario',
+  'comment.editFailed':
+    'No se pudo guardar el comentario. Intente de nuevo más tarde.',
+  'comment.deleteFailed':
+    'No se pudo eliminar el comentario. Intente de nuevo más tarde.',
   'report.reasonPlaceholder':
     'Introduzca el motivo de la denuncia (máximo 500 caracteres)',
   'report.note':
@@ -227,6 +247,18 @@ export const es: Record<MessageKey, string> = {
     'Subiendo imagen…',
   'newPost.failed':
     'No se pudo publicar. Inténtalo de nuevo más tarde.',
+  'newPost.imagePreviewAlt':
+    'Vista previa de la imagen que se enviará',
+  'newPost.draftNote':
+    'El borrador se guarda automáticamente en este dispositivo (solo el texto; la imagen elegida no se conserva).',
+  'postPage.loading':
+    'Cargando la publicación...',
+  'postPage.missing':
+    'Puede que esta publicación se haya eliminado o que el enlace sea incorrecto.',
+  'postPage.failed':
+    'Error al cargar la publicación. Intente de nuevo más tarde.',
+  'postPage.label':
+    'Publicación',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const es: Record<MessageKey, string> = {
     'Publicación eliminada.',
   'posts.deleteFailed':
     'No se pudo eliminar la publicación.',
+  'posts.edited':
+    'Publicación actualizada.',
+  'posts.editFailed':
+    'No se pudo guardar la publicación. Intente de nuevo más tarde.',
   'posts.commentUpdated':
     'Comentario actualizado.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const es: Record<MessageKey, string> = {
     'Perfil｜{site}',
   'title.publicProfile':
     'Perfil público | {site}',
+  'title.post':
+    'Publicación｜{site}',
   'title.following':
     'Siguiendo | {site}',
   'title.adminUsers':

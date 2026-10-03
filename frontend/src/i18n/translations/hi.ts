@@ -73,6 +73,10 @@ export const hi: Record<MessageKey, string> = {
     'टिप्पणियाँ लोड नहीं हो पाईं',
   'error.fallbackCommentPost':
     'टिप्पणी दर्ज करने में विफलता',
+  'error.fallbackCommentEdit':
+    'टिप्पणी सहेजी नहीं जा सकी',
+  'error.fallbackCommentDelete':
+    'टिप्पणी हटाई नहीं जा सकी',
   'error.fallbackReport':
     'रिपोर्ट करने में विफलता',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const hi: Record<MessageKey, string> = {
     'पसंद',
   'post.reply':
     'प्रतिक्रिया',
+  'post.permalink':
+    'स्थायी लिंक',
+  'post.editedBadge':
+    'संपादित',
+  'post.editContentLabel':
+    'पोस्ट सामग्री',
+  'post.editMax':
+    'अधिकतम 10000 अक्षर',
   'comment.loading':
     'टिप्पणी लोड हो रही है...',
   'comment.none':
@@ -193,6 +205,14 @@ export const hi: Record<MessageKey, string> = {
     'रिपोर्ट',
   'comment.more':
     'अधिक टिप्पणी लोड करें...',
+  'comment.editedBadge':
+    'संपादित',
+  'comment.editContentLabel':
+    'टिप्पणी सामग्री',
+  'comment.editFailed':
+    'टिप्पणी सहेजी नहीं जा सकी, कृपया बाद में फिर प्रयास करें।',
+  'comment.deleteFailed':
+    'टिप्पणी हटाई नहीं जा सकी, कृपया बाद में फिर प्रयास करें।',
   'report.reasonPlaceholder':
     'रिपोर्ट का कारण लिखें (अधिकतम 500 अक्षर)',
   'report.note':
@@ -227,6 +247,18 @@ export const hi: Record<MessageKey, string> = {
     'चित्र अपलोड हो रहा है...',
   'newPost.failed':
     'पोस्ट करने में सफलता मिली नहीं। कृपया बाद में फिर प्रयास करें।',
+  'newPost.imagePreviewAlt':
+    'अपलोड की जाने वाली छवि का पूर्वावलोकन',
+  'newPost.draftNote':
+    'आपका मसौदा इस डिवाइस पर अपने आप सहेजा जाता है (केवल पाठ; चुनी गई छवि नहीं रहती)।',
+  'postPage.loading':
+    'पोस्ट लोड हो रही है...',
+  'postPage.missing':
+    'यह पोस्ट शायद हटा दी गई है, या लिंक गलत है।',
+  'postPage.failed':
+    'पोस्ट लोड नहीं हो पाई, कृपया बाद में फिर प्रयास करें।',
+  'postPage.label':
+    'पोस्ट',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const hi: Record<MessageKey, string> = {
     'पोस्ट हटा दिया गया है।',
   'posts.deleteFailed':
     'पोस्ट हटाने में असफलता हुई।',
+  'posts.edited':
+    'पोस्ट अपडेट हो गई।',
+  'posts.editFailed':
+    'पोस्ट सहेजी नहीं जा सकी, कृपया बाद में फिर प्रयास करें।',
   'posts.commentUpdated':
     'टिप्पणी अपडेट हो गई है।',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const hi: Record<MessageKey, string> = {
     'प्रोफ़ाइल | {site}',
   'title.publicProfile':
     'सार्वजनिक प्रोफ़ाइल | {site}',
+  'title.post':
+    'पोस्ट｜{site}',
   'title.following':
     'फ़ॉलोइंग | {site}',
   'title.adminUsers':

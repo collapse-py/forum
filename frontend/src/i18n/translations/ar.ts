@@ -73,6 +73,10 @@ export const ar: Record<MessageKey, string> = {
     'فشل تحميل التعليقات',
   'error.fallbackCommentPost':
     'فشل إرسال التعليق',
+  'error.fallbackCommentEdit':
+    'فشل حفظ التعليق',
+  'error.fallbackCommentDelete':
+    'فشل حذف التعليق',
   'error.fallbackReport':
     'فشل البلاغ',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const ar: Record<MessageKey, string> = {
     'إعجاب',
   'post.reply':
     'الرد',
+  'post.permalink':
+    'رابط دائم',
+  'post.editedBadge':
+    'مُعدَّل',
+  'post.editContentLabel':
+    'محتوى المنشور',
+  'post.editMax':
+    'الحد الأقصى 10000 حرف',
   'comment.loading':
     'جارٍ تحميل التعليقات...',
   'comment.none':
@@ -193,6 +205,14 @@ export const ar: Record<MessageKey, string> = {
     'الإبلاغ عن التعليق',
   'comment.more':
     'تحميل تعليقات إضافية...',
+  'comment.editedBadge':
+    'مُعدَّل',
+  'comment.editContentLabel':
+    'محتوى التعليق',
+  'comment.editFailed':
+    'فشل حفظ التعليق، حاول مرة أخرى لاحقًا.',
+  'comment.deleteFailed':
+    'فشل حذف التعليق، حاول مرة أخرى لاحقًا.',
   'report.reasonPlaceholder':
     'أدخل سبب البلاغ (الحد الأقصى 500 حرف)',
   'report.note':
@@ -227,6 +247,18 @@ export const ar: Record<MessageKey, string> = {
     'جارٍ تحميل الصورة...',
   'newPost.failed':
     'فشل النشر، حاول مرة أخرى لاحقًا.',
+  'newPost.imagePreviewAlt':
+    'معاينة الصورة التي سيتم رفعها',
+  'newPost.draftNote':
+    'تُحفظ المسودة تلقائيًا على هذا الجهاز (النص فقط؛ لا تُحفظ الصورة المختارة).',
+  'postPage.loading':
+    'جارٍ تحميل المنشور...',
+  'postPage.missing':
+    'ربما تم حذف هذا المنشور، أو الرابط غير صحيح.',
+  'postPage.failed':
+    'فشل تحميل المنشور، حاول مرة أخرى لاحقًا.',
+  'postPage.label':
+    'المنشور',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const ar: Record<MessageKey, string> = {
     'تم حذف المنشور.',
   'posts.deleteFailed':
     'فشل حذف المنشور.',
+  'posts.edited':
+    'تم تحديث المنشور.',
+  'posts.editFailed':
+    'فشل حفظ المنشور، حاول مرة أخرى لاحقًا.',
   'posts.commentUpdated':
     'تم تحديث التعليق.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const ar: Record<MessageKey, string> = {
     'الملف الشخصي｜{site}',
   'title.publicProfile':
     'الملف الشخصي العام｜{site}',
+  'title.post':
+    'منشور｜{site}',
   'title.following':
     'المتابَعون｜{site}',
   'title.adminUsers':

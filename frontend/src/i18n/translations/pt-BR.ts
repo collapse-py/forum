@@ -73,6 +73,10 @@ export const ptBR: Record<MessageKey, string> = {
     'Falha ao carregar comentários',
   'error.fallbackCommentPost':
     'Falha ao enviar comentário',
+  'error.fallbackCommentEdit':
+    'Falha ao salvar o comentário',
+  'error.fallbackCommentDelete':
+    'Falha ao excluir o comentário',
   'error.fallbackReport':
     'Falha ao denunciar',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const ptBR: Record<MessageKey, string> = {
     'Curtir',
   'post.reply':
     'Responder',
+  'post.permalink':
+    'Link permanente',
+  'post.editedBadge':
+    'editado',
+  'post.editContentLabel':
+    'Conteúdo da publicação',
+  'post.editMax':
+    'No máximo 10000 caracteres',
   'comment.loading':
     'Carregando comentários...',
   'comment.none':
@@ -193,6 +205,14 @@ export const ptBR: Record<MessageKey, string> = {
     'Denunciar',
   'comment.more':
     'Carregar mais comentários...',
+  'comment.editedBadge':
+    'editado',
+  'comment.editContentLabel':
+    'Conteúdo do comentário',
+  'comment.editFailed':
+    'Falha ao salvar o comentário. Tente novamente em instantes.',
+  'comment.deleteFailed':
+    'Falha ao excluir o comentário. Tente novamente em instantes.',
   'report.reasonPlaceholder':
     'Insira o motivo da denúncia (no máximo 500 caracteres)',
   'report.note':
@@ -227,6 +247,18 @@ export const ptBR: Record<MessageKey, string> = {
     'Enviando imagem...',
   'newPost.failed':
     'Falha ao publicar. Tente novamente em instantes.',
+  'newPost.imagePreviewAlt':
+    'Pré-visualização da imagem que será enviada',
+  'newPost.draftNote':
+    'O rascunho é salvo automaticamente neste dispositivo (apenas o texto; a imagem escolhida não é mantida).',
+  'postPage.loading':
+    'Carregando a publicação...',
+  'postPage.missing':
+    'Esta publicação pode ter sido excluída, ou o link está incorreto.',
+  'postPage.failed':
+    'Falha ao carregar a publicação. Tente novamente em instantes.',
+  'postPage.label':
+    'Publicação',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const ptBR: Record<MessageKey, string> = {
     'Publicação excluída.',
   'posts.deleteFailed':
     'Falha ao excluir a publicação.',
+  'posts.edited':
+    'Publicação atualizada.',
+  'posts.editFailed':
+    'Falha ao salvar a publicação. Tente novamente em instantes.',
   'posts.commentUpdated':
     'Comentário atualizado.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const ptBR: Record<MessageKey, string> = {
     'Perfil｜{site}',
   'title.publicProfile':
     'Perfil público｜{site}',
+  'title.post':
+    'Publicação｜{site}',
   'title.following':
     'Seguindo｜{site}',
   'title.adminUsers':

@@ -159,10 +159,42 @@
         color: var(--text);
       }
 
+      /* 選好圖片之後的預覽。
+         圖片來源是 URL.createObjectURL（見 src/forum/NewPostPage.tsx），因此
+         它在這一刻完全沒有上傳 —— 顯示它只是讓使用者確認「選對檔案了」。
+         刻意限制最大高度：50 MB 的圖片若照原始尺寸鋪滿，會把底下的送出鈕
+         推到好幾屏之外。 */
       .image-preview {
+        display: flex;
+        align-items: center;
+        gap: 10px;
         margin-top: 8px;
         color: var(--muted);
         font-size: 12px;
+      }
+
+      .image-preview img {
+        max-width: 140px;
+        max-height: 140px;
+        border-radius: 8px;
+        object-fit: cover;
+      }
+
+      .image-preview__name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* 草稿自動儲存的說明。放在輸入框正下方，因此它繼承 .composer-note 的
+         視覺重量（那個 class 在 style.css 定義），只是多一個下邊界讓它
+         與輸入框之間留一點呼吸。 */
+      .new-post-draft-note {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
       }
 
       .new-post-footer {

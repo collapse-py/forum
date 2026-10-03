@@ -73,6 +73,10 @@ export const zhHK: Record<MessageKey, string> = {
     '留言載入失敗',
   'error.fallbackCommentPost':
     '留言失敗',
+  'error.fallbackCommentEdit':
+    '留言儲存失敗',
+  'error.fallbackCommentDelete':
+    '留言刪除失敗',
   'error.fallbackReport':
     '舉報失敗',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const zhHK: Record<MessageKey, string> = {
     '讚好',
   'post.reply':
     '回應',
+  'post.permalink':
+    '永久連結',
+  'post.editedBadge':
+    '已編輯',
+  'post.editContentLabel':
+    '貼文內容',
+  'post.editMax':
+    '最多 10000 字',
   'comment.loading':
     '留言載入中...',
   'comment.none':
@@ -193,6 +205,14 @@ export const zhHK: Record<MessageKey, string> = {
     '舉報',
   'comment.more':
     '載入更多留言...',
+  'comment.editedBadge':
+    '已編輯',
+  'comment.editContentLabel':
+    '留言內容',
+  'comment.editFailed':
+    '留言儲存失敗，請稍後再試。',
+  'comment.deleteFailed':
+    '留言刪除失敗，請稍後再試。',
   'report.reasonPlaceholder':
     '請輸入舉報原因（最多 500 字）',
   'report.note':
@@ -227,6 +247,18 @@ export const zhHK: Record<MessageKey, string> = {
     '圖片上載中...',
   'newPost.failed':
     '發佈失敗，請稍後再試。',
+  'newPost.imagePreviewAlt':
+    '待上傳的圖片預覽',
+  'newPost.draftNote':
+    '草稿會自動儲存在這台裝置（只有文字，選好的圖片不會保留）。',
+  'postPage.loading':
+    '貼文載入中...',
+  'postPage.missing':
+    '這篇貼文可能已被刪除，或連結不正確。',
+  'postPage.failed':
+    '貼文載入失敗，請稍後再試。',
+  'postPage.label':
+    '貼文',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const zhHK: Record<MessageKey, string> = {
     '帖文已刪除。',
   'posts.deleteFailed':
     '刪除帖文失敗。',
+  'posts.edited':
+    '貼文已更新。',
+  'posts.editFailed':
+    '貼文儲存失敗，請稍後再試。',
   'posts.commentUpdated':
     '留言已更新。',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const zhHK: Record<MessageKey, string> = {
     '個人資料｜{site}',
   'title.publicProfile':
     '公開個人資料｜{site}',
+  'title.post':
+    '貼文｜{site}',
   'title.following':
     '追蹤｜{site}',
   'title.adminUsers':

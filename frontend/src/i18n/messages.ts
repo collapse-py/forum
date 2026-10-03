@@ -91,6 +91,8 @@ export const zhTW = {
   'error.fallbackLike': '按讚失敗',
   'error.fallbackComments': '留言載入失敗',
   'error.fallbackCommentPost': '留言失敗',
+  'error.fallbackCommentEdit': '留言儲存失敗',
+  'error.fallbackCommentDelete': '留言刪除失敗',
   'error.fallbackReport': '檢舉失敗',
   'error.fallbackProfile': '讀取個人資料失敗',
   'error.fallbackProfileSave': '儲存失敗',
@@ -173,6 +175,12 @@ export const zhTW = {
   'post.unlike': '收回讚',
   'post.like': '讚',
   'post.reply': '回應',
+  /* 「編輯」沿用 common.edit：選單裡那一項的字與後臺的編輯鈕完全相同，
+     拆成兩個鍵只會讓兩處措辭各自漂移（見本檔檔頭的命名規則）。 */
+  'post.permalink': '永久連結',
+  'post.editedBadge': '已編輯',
+  'post.editContentLabel': '貼文內容',
+  'post.editMax': '最多 10000 字',
 
   /* ==========================================================================
      comment：留言串
@@ -187,6 +195,10 @@ export const zhTW = {
   'comment.failed': '留言失敗，請稍後再試。',
   'comment.report': '檢舉',
   'comment.more': '載入更多留言...',
+  'comment.editedBadge': '已編輯',
+  'comment.editContentLabel': '留言內容',
+  'comment.editFailed': '留言儲存失敗，請稍後再試。',
+  'comment.deleteFailed': '留言刪除失敗，請稍後再試。',
 
   /* ==========================================================================
      report：公開頁的檢舉表單
@@ -214,6 +226,19 @@ export const zhTW = {
   'newPost.publishing': '發佈中...',
   'newPost.uploading': '圖片上傳中...',
   'newPost.failed': '發佈失敗，請稍後再試。',
+  'newPost.imagePreviewAlt': '待上傳的圖片預覽',
+  /* 草稿說明刻意寫清楚「只有文字」：使用者若以為選好的圖片也會被保留，
+     下次回來時發現圖片不見，會以為是網站把它弄丟了。 */
+  'newPost.draftNote': '草稿會自動儲存在這台裝置（只有文字，選好的圖片不會保留）。',
+
+  /* ==========================================================================
+     postPage：單篇貼文（/forum/post/{id}）
+     ========================================================================== */
+
+  'postPage.loading': '貼文載入中...',
+  'postPage.missing': '這篇貼文可能已被刪除，或連結不正確。',
+  'postPage.failed': '貼文載入失敗，請稍後再試。',
+  'postPage.label': '貼文',
 
   /* ==========================================================================
      profile：自己的個人資料
@@ -983,6 +1008,13 @@ export const zhTW = {
   'posts.deleteConfirm': '刪除文章',
   'posts.deleted': '文章已刪除。',
   'posts.deleteFailed': '刪除文章失敗。',
+  /* 這兩條是**公開頁**的貼文編輯文案，而 posts.* 這個命名空間同時被後臺的
+     「論壇文章」管理頁使用。刻意沿用同一個命名空間：它們描述的是同一件事
+     （改一篇貼文），而兩組介面對它的說法應該一致。刪除留言的確認框則沿用
+     下方既有的 deleteCommentTitle / deleteCommentMessage（後臺與公開頁的
+     同一個動作不該有兩句話）。 */
+  'posts.edited': '貼文已更新。',
+  'posts.editFailed': '貼文儲存失敗，請稍後再試。',
   'posts.commentUpdated': '留言已更新。',
   'posts.commentActionFailed': '留言操作失敗。',
   'posts.pickPostTitle': '選擇留言所屬文章',
@@ -1117,6 +1149,7 @@ export const zhTW = {
   'title.newPost': '新增貼文｜{site}',
   'title.profile': '個人資料｜{site}',
   'title.publicProfile': '公開個人資料｜{site}',
+  'title.post': '貼文｜{site}',
   'title.following': '追蹤｜{site}',
   'title.adminUsers': '用戶管理｜{brand} 後臺',
   'title.adminLogin': '登入｜{brand} 後臺',

@@ -32,8 +32,15 @@ URL 裡都不會出現 email。管理員的身分不看資料庫角色表，只�
 ## 功能
 
 - **匿名發文**：文字貼文，可選一張圖片；刪除自己的貼文
-- **留言、按讚、檢舉**：留言公開可讀；按讚以 `(post_id, author_email)` 複合主鍵
-  限制每人一次；檢舉涵蓋貼文與留言
+- **編輯自己的貼文與留言**：兩者都在卡片上就地編輯（不用跳頁），並標示
+  「已編輯」；編輯後的貼文會同步更新搜尋索引，因此不會出現「改了字、
+  搜尋還是舊字」。替換附圖刻意**不在**這個端點的語意裡（見已知問題）
+- **永久連結**：`/forum/post/{id}` 是單篇貼文頁，貼文卡的 ⋯ 選單可直接前往。
+  該頁刻意不需登入 —— 分享連結的人不會先跟收連結的人說「請先登入」
+- **草稿自動儲存**：新增貼文頁的內文會 debounce 寫進 localStorage，
+  關掉分頁再回來仍在（只有文字；選好的圖片無法序列化，因此不保留）
+- **留言、按讚、檢舉**：留言公開可讀，也可由作者自己編輯或刪除；按讚以
+  `(post_id, author_email)` 複合主鍵限制每人一次；檢舉涵蓋貼文與留言
 - **追蹤與私密動態牆**：`/api/forum/following/posts` 只回傳追蹤中的人的貼文
 - **Google OAuth2 登入**：僅申請 `userinfo.email`，沒有密碼、沒有本機帳號
 - **Redis 版可撤銷 Session**：滑動續期，Redis 掛掉等於全部登入失效
@@ -362,8 +369,8 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 
 | 資料表 | 用途 | 關鍵結構 |
 | --- | --- | --- |
-| `forum_posts` | 貼文 | `image_url` 只存**檔名**，讀取時才用 `FILES_SERVER_PUBLIC_URL` 組網址 |
-| `forum_post_comments` | 留言 | 無外鍵，完整性靠應用層 |
+| `forum_posts` | 貼文 | `image_url` 只存**檔名**，讀取時才用 `FILES_SERVER_PUBLIC_URL` 組網址；`updated_at` 可空＝從未被作者編輯過 |
+| `forum_post_comments` | 留言 | 無外鍵，完整性靠應用層；`updated_at` 的語意同上 |
 | `forum_post_likes` | 按讚 | 複合 PK `(post_id, author_email)`，天然去重 |
 | `forum_reports` | 檢舉 | `target_type`（`post`/`comment`）+ `target_id` 的多型參照，無外鍵 |
 | `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一 |
@@ -433,9 +440,13 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：
 | --- | --- | --- |
 | GET | `/api/forum/posts?offset=&limit=` | 貼文列表 |
 | POST | `/api/forum/posts` | 建立貼文 |
+| GET | `/api/forum/posts/{id}` | 單篇貼文（永久連結頁；匿名可讀，找不到回 404） |
+| PUT | `/api/forum/posts/{id}` | 編輯自己的貼文本文（只有 `content`） |
 | DELETE | `/api/forum/posts/{id}` | 刪除自己的貼文 |
 | GET | `/api/forum/posts/{id}/comments` | 留言列表（公開） |
 | POST | `/api/forum/posts/{id}/comments` | 建立留言 |
+| PUT | `/api/forum/posts/{id}/comments/{cid}` | 編輯自己的留言 |
+| DELETE | `/api/forum/posts/{id}/comments/{cid}` | 刪除自己的留言 |
 | POST | `/api/forum/posts/{id}/like` | 按讚 |
 | POST | `/api/forum/posts/{id}/report` | 檢舉貼文 |
 | POST | `/api/forum/posts/{id}/comments/{cid}/report` | 檢舉留言 |
@@ -856,6 +867,7 @@ Redis 探測會變紅，那是這個狀態唯一的提示。因此記錄是**節
 | `/forum/profile` | `forum-profile.html` | 是 |
 | `/forum/others-profile` | `forum-others-profile.html` | 是 |
 | `/forum/following` | `forum-following.html` | 是 |
+| `/forum/post/{id}` | `forum-post.html` | 否（互動時需登入） |
 | `/admin` | `admin.html` | 管理員 |
 | `/admin/forum` | `forum-admin.html` | 管理員 |
 | `/admin/forum-report` | `forum-report.html` | 管理員 |
@@ -967,7 +979,7 @@ node tools/i18n/verify-catalogs.mjs
 | `backend/forum/config/config_test.go` | 三組限流與兩組逾時**拒絕 0 與負數**、管理員白名單的 TrimSpace + ToLower（雙邊正規化）、`MEDIA_TOKEN_TTL_SECONDS` 的正式環境守門與「刻意設成 30 天」豁免、尾斜線裁切、`GOOGLE_REDIRECT_URL` 不裁切、DSN 的 `=` 切分、未知 key 靜默忽略 |
 | `backend/forum/auth/auth_test.go` | **開放轉向的全家族**（絕對網址／protocol-relative／反斜線／五種編碼繞過）、`HandleLogin` → `ReturnPath` 的 state 編碼往返、授權網址形狀（scope 正確、client_secret 不外洩）、`GetUserEmail` 的成功路徑與四種上游失敗、**上游內容不洩漏進錯誤訊息** |
 | `backend/forum/logger/logger_test.go` | `sanitizeLogValue` 的四條規則（含 **UTF-8 rune 邊界截斷**與「清洗後為空要用佔位符」）、門檻過濾、text 與 json 兩種格式、背景訊息省略前綴、**中繼欄位也會被清洗**、存取記錄的分級、併行寫入（`-race`） |
-| `backend/forum/httpapi/frontend_shells_test.go` | **十六個 HTML 殼在三處同步**（`src/entries/`、`vite.config.ts`、`frontendShellFiles`）—— 新增一頁而不動另外兩處會指名缺哪一處 |
+| `backend/forum/httpapi/frontend_shells_test.go` | **十七個 HTML 殼在三處同步**（`src/entries/`、`vite.config.ts`、`frontendShellFiles`）—— 新增一頁而不動另外兩處會指名缺哪一處 |
 | `backend/forum/httpapi/security_invariants_test.go` | CSRF 來源檢查（含「兩個標頭都沒有」這個刻意放行）、限流器的設定轉換與 per-client 計數、CSP 來源正規化、**樣式區塊內容的位元組精確性** |
 | `backend/forum/data/migration_test.go` | **真實 MySQL**：13 張表全部建立、冪等（跑兩次結構不變且**資料不被清掉**）、舊 schema 升級路徑、中文與 emoji 往返、三個併行遷移不死鎖 |
 | `files_server/server_test.go` | 上傳的 token 驗證與大小限制、副檔名白名單、**UUID 命名（不覆蓋、不洩漏檔名）**、**刪除的路徑穿越全家族**、媒體 token（不存在 → 401、Redis 故障 → **503 而非 401**）、兩條降級路徑、CORS 預檢、**沒有任何路徑能列出儲存結構** |
@@ -979,6 +991,7 @@ node tools/i18n/verify-catalogs.mjs
 | `backend/forum/httpapi/stats_handlers_test.go` | 統計視窗的收斂與起點、摘要的字元計算、端點授權 |
 | `backend/forum/httpapi/batch_export_test.go` | **CSV 注入的六個危險前綴**、BOM 與下載標頭、email 清單正規化、匯出與批次的授權 |
 | `backend/forum/httpapi/announcement_test.go` | 公告內文的邊界（空白／300 字／有效時間上下限）、後臺端點的授權、公開端點的 null 路徑 |
+| `backend/forum/httpapi/post_edit_test.go` | 貼文／留言編輯與刪除的授權邊界（未登入 401、來源不可信 403）、**內文驗證在碰資料庫之前就擋下**（空白／超長／非 JSON）、`/api/forum/posts/` 子樹的方法分派（405 與 404 的分界）、兩個路徑解析純函式的表格測試 |
 | `backend/forum/httpapi/trustedproxy_test.go` | `TRUSTED_PROXY_CIDRS` 的解析與信任模型（標頭優先 vs 白名單） |
 | `backend/forum/metrics/metrics_test.go` | 請求統計：路由正規化、延遲分桶、分鐘桶守恆、歷史讀回、時間軸連續性 |
 | `backend/forum/metrics/clients_test.go` | 每 IP 統計的累加、被封鎖擋下的計數、上限時驅逐最舊的、`clientsDropped` 可觀察、閒置剪枝、排序穩定 |
@@ -990,7 +1003,7 @@ node tools/i18n/verify-catalogs.mjs
 
 ### 覆蓋率
 
-2026-10-02 的實測（合併兩個 Go 模組，**26.5%**）：
+2026-10-04 的實測（合併兩個 Go 模組，**26.2%**）：
 
 | 套件 | 覆蓋率 | 說明 |
 | --- | --- | --- |
@@ -1003,7 +1016,7 @@ node tools/i18n/verify-catalogs.mjs
 | `forum/session` | 67.1% | 原本就有 |
 | `forum/audit` | 50.0% | 原本就有 |
 | `files_server` | 48.9% | 從 **0%** 開始（Phase 3.4） |
-| `forum/httpapi` | 10.6% | 約 2,500 行；已覆蓋 CSRF、限流、CSP、殼檔同步 |
+| `forum/httpapi` | 12.0% | 約 2,500 行；已覆蓋 CSRF、限流、CSP、殼檔同步、貼文／留言編輯的授權與驗證邊界 |
 | `forum/data` | 0%（本機）/ 高（有 MySQL） | 需要真實資料庫，CI 的 `migrations` job 提供 |
 
 CI 有一道**覆蓋率地板**（`.github/workflows/ci.yml` 的 `coverage-floor` job，
@@ -1308,9 +1321,21 @@ node ../../tools/i18n/verify-catalogs.mjs
 
 誠實記錄現況，避免下次 deploy 時踩到：
 
-- **`httpapi` 約 2,500 行仍有約 90% 沒有測試覆蓋**（Phase 3.3 補了 CSRF、限流、
-  CSP 與殼檔同步，其餘的 handler 邏輯仍未涵蓋）。優先順序建議依「壞掉時的
-  爆炸半徑」排：批次／匯出 → 貼文 CRUD → 公告 → 統計。
+- **`httpapi` 約 2,500 行仍有約 88% 沒有測試覆蓋**（Phase 3.3 補了 CSRF、限流、
+  CSP 與殼檔同步；貼文／留言編輯補了授權與驗證邊界，其餘的 handler 邏輯仍未
+  涵蓋）。優先順序建議依「壞掉時的爆炸半徑」排：批次／匯出 → 貼文 CRUD →
+  公告 → 統計。
+- **編輯貼文刻意不接受替換附圖**。`PUT /api/forum/posts/{id}` 只有 `content`
+  欄位：換圖不只是改一個欄位，舊檔會變成沒有任何資料列指向的孤兒檔，而本站
+  沒有「使用者刪除自己圖片」的端點（`/api/forum/image-tokens/release` 只作廢
+  存取權杖，不刪檔）。在補上那條路徑之前，選錯圖只能刪掉整篇重發。
+- **留言與檢舉的 handler 沒有逐支重複的身分檢查**。`handleForumPostUpdate`、
+  `handleForumCommentUpdate`、`handleForumCommentDelete` 與
+  `handleForumPostDelete` 都在開頭確認一次登入狀態（縱深防禦），但
+  `handleForumComments`（POST 留言）與 `handleForumReport` 沒有 —— 它們的安全性
+  完全來自中介層的 `requireLoginForWrite`。這兩條路由目前不會被未登入者呼叫到，
+  所以不是可利用的缺口；但若日後有人把它們註冊到別的路徑上，就會同時失去
+  中介層與 handler 兩層。
 - **`forum/data` 的遷移測試需要真實 MySQL**，本機執行時會全部跳過
   （未設 `FORUM_TEST_MYSQL_DSN`）。CI 的 `migrations` job 會跑它們 —— 但那也
   意味著**本機的 `go test ./...` 不會驗證 schema 遷移**。

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>貼文｜{{FORUM_NAME}}</title>
+    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+TC:wght@400;500;700;900&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0..1,0&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /*
+       * 單篇貼文（/forum/post/{id}）樣式
+       *
+       * 共用層在 /style.css：公開頁殼層、貼文卡與留言串（第 3 節 —— 這一頁
+       * 與 /forum 渲染同一支 PostCard，因此那些規則必須是共用的）與後臺
+       * design tokens。本區塊只放這一頁自己渲染的東西：一張卡與它的
+       * 上下留白。
+       *
+       * 這是全站最簡單的一個頁面，而且是刻意的：它只有一篇內容，因此沒有
+       * 列表、沒有分頁、沒有篩選器 —— 唯一需要版面決定的只有「這張卡不要
+       * 貼齊視窗邊緣」與「它上方要有一個回首頁的連結」。寫成兩條規則足夠，
+       * 而把它做成一個有設計感的版面只會讓它與首頁看起來像另一個產品。
+       *
+       * html:root 必須在這裡重新宣告：--line 與 --accent 兩邊同名不同值。
+       * 寫成 html:root 而不是 :root，是為了用多一個元素選擇器贏過 style.css
+       * 第 4 節的 :root —— Vite 建置時會把 <link> 移到 <head> 最後，因此不能
+       * 靠「<style> 在 <link> 之後」取勝。理由見 style.css 的檔頭說明。
+       */
+      html:root {
+        --bg: #fff;
+        --line: #e7e7e7;
+        --text: #101010;
+        --muted: #777;
+        --accent: #111;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        color: var(--text);
+        background: var(--bg);
+        font-family: Inter, "Noto Sans TC", sans-serif;
+      }
+
+      /*
+       * 與 .profile-main 同一組上下邊界（28px / 100px）。下方的 100px 是為
+       * 讓底部導覽（固定定位）不會壓住這張卡的最後一則留言。
+       */
+      .post-page-main {
+        padding: 28px 16px 100px;
+      }
+
+      /*
+       * 單篇不需要 .feed 的 grid gap（那一組是為了多張卡片之間的間隔），
+       * 但沿用同一個 class 讓 .post 的上邊框與置頂徽章等規則一致。
+       * 這裡只把 grid 塌回單欄，避免一個沒有 sibling 的 grid 產生多餘的行高。
+       */
+      .post-page-main .feed {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 見 forum.html：整頁由 src/entries/forum-post.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-post.tsx"></script>
+  </body>
+</html>

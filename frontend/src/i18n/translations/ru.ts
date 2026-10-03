@@ -73,6 +73,10 @@ export const ru: Record<MessageKey, string> = {
     'Не удалось загрузить комментарии',
   'error.fallbackCommentPost':
     'Не удалось отправить комментарий',
+  'error.fallbackCommentEdit':
+    'Не удалось сохранить комментарий',
+  'error.fallbackCommentDelete':
+    'Не удалось удалить комментарий',
   'error.fallbackReport':
     'Не удалось отправить жалобу',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const ru: Record<MessageKey, string> = {
     'Нравится',
   'post.reply':
     'Ответить',
+  'post.permalink':
+    'Постоянная ссылка',
+  'post.editedBadge':
+    'изменено',
+  'post.editContentLabel':
+    'Текст публикации',
+  'post.editMax':
+    'Максимум 10000 символов',
   'comment.loading':
     'Загрузка комментариев...',
   'comment.none':
@@ -193,6 +205,14 @@ export const ru: Record<MessageKey, string> = {
     'Жалоба',
   'comment.more':
     'Загрузить больше комментариев...',
+  'comment.editedBadge':
+    'изменено',
+  'comment.editContentLabel':
+    'Текст комментария',
+  'comment.editFailed':
+    'Не удалось сохранить комментарий. Повторите попытку позже.',
+  'comment.deleteFailed':
+    'Не удалось удалить комментарий. Повторите попытку позже.',
   'report.reasonPlaceholder':
     'Введите причину жалобы (максимум 500 символов)',
   'report.note':
@@ -227,6 +247,18 @@ export const ru: Record<MessageKey, string> = {
     'Загрузка изображения...',
   'newPost.failed':
     'Не удалось выполнить публикацию. Повторите попытку позже.',
+  'newPost.imagePreviewAlt':
+    'Предпросмотр загружаемого изображения',
+  'newPost.draftNote':
+    'Черновик автоматически сохраняется на этом устройстве (только текст; выбранное изображение не сохраняется).',
+  'postPage.loading':
+    'Загрузка публикации...',
+  'postPage.missing':
+    'Эта публикация могла быть удалена, или ссылка неверна.',
+  'postPage.failed':
+    'Не удалось загрузить публикацию. Повторите попытку позже.',
+  'postPage.label':
+    'Публикация',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const ru: Record<MessageKey, string> = {
     'Публикация удалена.',
   'posts.deleteFailed':
     'Не удалось удалить публикацию.',
+  'posts.edited':
+    'Публикация обновлена.',
+  'posts.editFailed':
+    'Не удалось сохранить публикацию. Повторите попытку позже.',
   'posts.commentUpdated':
     'Комментарий обновлён.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const ru: Record<MessageKey, string> = {
     'Профиль пользователя | {site}',
   'title.publicProfile':
     'Открытый профиль пользователя | {site}',
+  'title.post':
+    'Публикация｜{site}',
   'title.following':
     'Подписки | {site}',
   'title.adminUsers':

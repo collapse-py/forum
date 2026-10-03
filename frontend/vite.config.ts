@@ -206,6 +206,7 @@ export default defineConfig({
         forumProfile: 'forum-profile.html',
         forumOthersProfile: 'forum-others-profile.html',
         forumFollowing: 'forum-following.html',
+        forumPost: 'forum-post.html',
         admin: 'admin.html',
         forumAdmin: 'forum-admin.html',
         forumReport: 'forum-report.html',

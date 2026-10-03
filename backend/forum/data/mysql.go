@@ -800,5 +800,42 @@ func MigrateMySQL(db *sql.DB) error {
 		return err
 	}
 
+	// 28) 貼文與留言的「最後修改時間」。
+	//
+	//     為什麼需要：公開端新增了「作者可以編輯自己的貼文／留言」之後，讀者
+	//     會遇到一個新問題 —— 眼前這段話可能已經不是作者最初寫的。沒有這個
+	//     欄位就只能在介面上假裝沒這件事，而假裝是論壇裡最不該做的一種掩蓋。
+	//
+	//     允許 NULL，且 NULL 的語意是「從未被編輯過」。這是本步驟唯一的關鍵
+	//     決定：若宣告 NOT NULL DEFAULT CURRENT_TIMESTAMP 或用計數器欄位，
+	//     每一筆既有資料都會看起來「剛剛被改過」，於是「已編輯」標記會出現在
+	//     每一篇文章上 —— 那等於沒有標記，只是讓全站多一個雜訊。既有資料
+	//     保持 NULL 正是它應得的答案：這些文章確實沒有被編輯過。
+	//
+	//     型別選 DATETIME 而非 TIMESTAMP：這個專案的 created_at 一律是應用層
+	//     寫入的 time.Now()（主機本地時區，見第 1 步），TIMESTAMP 會做時區
+	//     轉換而讓兩欄在同一列裡表示不同的時區，那是比「沒有時區資訊」更糟的
+	//     歧義。
+	//
+	//     各自一句 ALTER 而非併成一句：兩張表互相獨立，合併後若其中一張表已經
+	//     有該欄位，另一張是否被補上就不再是這段 SQL 能表達的事。
+	//
+	//     不加索引：唯一會用到它的地方是「取出一篇貼文看它有沒有被編輯過」，
+	//     而那一定已經有 id 等值條件走主鍵。為此在「最熱的表」上加一個只服務
+	//     單一列讀取的索引，與第 24 步不為熱門作者排行加 author_email 索引是
+	//     同一個判斷。
+	if _, err := db.Exec(`
+		ALTER TABLE forum_posts
+			ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER pinned;
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		ALTER TABLE forum_post_comments
+			ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER created_at;
+	`); err != nil {
+		return err
+	}
+
 	return nil
 }

@@ -338,17 +338,12 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 	// 圖片 token 延遲建立、整頁共用一把，理由與 listForumPosts 相同。
 	mediaToken := ""
 	for rows.Next() {
-		var post forumPost
-		// pinned 與 liked 一样以 0/1 讀入（MySQL 沒有原生布林），理由見
-		// forum_handlers.go 的 loadForumPosts。
-		var liked, pinned int
-		if err := rows.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL, &pinned, &post.LikeCount, &post.CommentCount, &liked); err != nil {
+		// 欄位集合與掃描順序由 forumPostProjection 與 scanForumPostRow 決定，
+		// 這裡刻意不各寫一份 —— 見 scanForumPostRow 的說明。
+		post, err := scanForumPostRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		post.Liked = liked == 1
-		// 搜尋結果也帶 pinned：使用者從搜尋找到一篇置頂文章時，應看到與首頁
-		// 相同的徽章。少了它，同一篇文章在兩個地方會長得不一樣。
-		post.Pinned = pinned == 1
 		imageName := s.forumImageFileName(post.ImageURL)
 		if imageName != "" && mediaToken == "" {
 			token, err := s.createMediaToken(r.Context())

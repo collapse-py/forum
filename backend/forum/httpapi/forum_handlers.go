@@ -10,7 +10,12 @@ Origin 檢查在 csrf.go。
 	POST /api/forum/posts                     -> createForumPost         建立文章
 	POST /api/forum/images                    -> handleForumImageUpload  上傳附圖並轉發檔案伺服器
 	POST /api/forum/image-tokens/release      -> handleForumImageTokensRelease 釋放圖片存取 token
+	GET  /api/forum/posts/{id}                -> handleForumPostDetail   單篇文章（永久連結頁）
+	PUT  /api/forum/posts/{id}                -> handleForumPostUpdate   編輯本人貼文本文
+	DELETE /api/forum/posts/{id}              -> handleForumPostDelete   刪除本人貼文
 	*    /api/forum/posts/{id}/comments       -> handleForumComments     留言列表／新增留言
+	PUT  /api/forum/posts/{id}/comments/{cid} -> handleForumCommentUpdate 編輯本人留言
+	DELETE /api/forum/posts/{id}/comments/{cid} -> handleForumCommentDelete 刪除本人留言
 	*    /api/forum/posts/{id}/comments/{cid}/report -> handleForumReport(targetType="comment")
 	POST /api/forum/posts/{id}/like           -> handleForumPostLike     按讚／取消按讚（切換）
 	POST /api/forum/posts/{id}/report         -> handleForumReport(targetType="post")
@@ -25,12 +30,16 @@ Origin 檢查在 csrf.go。
 	     /forum/profile, /forum/others-profile,
 	     /forum/following                     -> handleForumPage         論壇前端 SPA 殼
 
-	子資源（comments / like / report）都掛在同一個 /api/forum/posts/ 註冊點上，
-	由 handleForumPostAction 依路徑後綴分派，詳見該函式說明。
-	追蹤的兩個端點在 forum_follow_handlers.go，不在本檔案。
+子資源（comments / like / report）都掛在同一個 /api/forum/posts/ 註冊點上，
+    由 handleForumPostAction 依路徑後綴分派，詳見該函式說明。
+    追蹤的兩個端點在 forum_follow_handlers.go，不在本檔案。
 
-	/forum/following 沒有另註冊路由：它落在 server.go 的 /forum/ 子樹樣式上，
-	而那條路由掛了 requireLogin，因此未登入者會先被導去登入頁。
+    /forum/following 沒有另註冊路由：它落在 server.go 的 /forum/ 子樹樣式上，
+    而那條路由掛了 requireLogin，因此未登入者會先被導去登入頁。
+
+    /forum/post/{id}（永久連結頁）同樣落在 /forum/ 子樹，但 server.go 另外註冊了
+    一條公開的 /forum/post/ —— 它掛 requireLogin，而永久連結是給「收到連結的
+    人」看的，要求對方先登入等於讓這條連結對匿名訪客失效。
 
 二、資料表依賴
 
@@ -129,6 +138,10 @@ import (
 //	Pinned       是否為管理員置頂。省略未置頂的（false + omitempty）而不是恆
 //	             送出 false，讓「一般的貼文」在 JSON 裡沒有這個欄位 —— 那是
 //	             佔多數的情況，不該讓它們的每筆回應都多一個欄位。
+//	Edited       作者是否曾經編輯過這一篇。與 Pinned 同一個省略理由，且省略
+//	             的那一種是「從未被編輯」—— 那是這個欄位在沒有編輯功能之前的
+//	             全部內容，因此「看不到這個欄位」與「看到 true」都不需要
+//	             任何額外說明。
 type forumPost struct {
 	ID           int64     `json:"id"`
 	Author       string    `json:"author"`
@@ -139,6 +152,7 @@ type forumPost struct {
 	LikeCount    int       `json:"likeCount"`
 	Liked        bool      `json:"liked"`
 	Pinned       bool      `json:"pinned,omitempty"`
+	Edited       bool      `json:"edited,omitempty"`
 	CommentCount int       `json:"commentCount"`
 	ImageURL     string    `json:"imageUrl,omitempty"`
 }
@@ -151,12 +165,14 @@ type forumPost struct {
 //	AuthorKey email 的雜湊值，供前端作為穩定識別碼。
 //	Content   留言本文，已 TrimSpace 且限制在 2000 個 rune 以內。
 //	CreatedAt 對應 forum_post_comments.created_at；列表以它遞增排序。
+//	Edited    作者是否曾經編輯過這一則（語意與 forumPost.Edited 相同）。
 type forumComment struct {
 	ID        int64     `json:"id"`
 	Author    string    `json:"author"`
 	AuthorKey string    `json:"authorKey"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"createdAt"`
+	Edited    bool      `json:"edited,omitempty"`
 }
 
 // createForumCommentRequest 是 POST /api/forum/posts/{id}/comments 的請求主體。
@@ -164,6 +180,29 @@ type forumComment struct {
 //
 //	Content 去除前後空白後必須為 1 至 2000 個 rune，驗證規則在 handler 內。
 type createForumCommentRequest struct {
+	Content string `json:"content"`
+}
+
+// updateForumCommentRequest 是 PUT /api/forum/posts/{id}/comments/{cid} 的請求主體。
+//
+// 欄位與 createForumCommentRequest 完全相同，但刻意不共用同一個型別：建立與
+// 修改是兩條路由、兩種授權檢查（日後可能分歧），共用一個型別會讓「新增時
+// 多了某個欄位」不知不覺地也出現在修改路徑上。
+type updateForumCommentRequest struct {
+	Content string `json:"content"`
+}
+
+// updateForumPostRequest 是 PUT /api/forum/posts/{id} 的請求主體。
+//
+//	Content 去除前後空白後必須為 1 至 10000 個 rune，驗證規則與 createForumPost
+//	         相同（見 handleForumPostUpdate）。
+//
+// 刻意只有 Content，沒有 ImageURL：替換附圖不只是改一個欄位 —— 舊檔會變成
+// 沒有任何資料列指向的孤兒檔，而本站沒有「使用者刪除自己圖片」的端點
+// （/api/forum/image-tokens/release 只作廢存取權杖，不刪檔）。在沒有那條路徑
+// 的情況下接受 imageUrl 參數，只會讓人送出「新網址 + 舊圖變成孤兒」而以為
+// 舊圖被清掉了。寧可讓這件事明確不在這個端點的語意裡。
+type updateForumPostRequest struct {
 	Content string `json:"content"`
 }
 
@@ -227,7 +266,13 @@ func (s *Server) handleForumPosts(w http.ResponseWriter, r *http.Request) {
 // 追蹤狀態刻意不在這裡：它是「頁面層的一次查詢結果」（見 forum_follow_handlers.go
 // 的 handleForumFollows），不是每篇貼文的屬性。放進這個投影會讓三個查詢各多一
 // 個相關子查詢，卻換不來任何好處 —— 同一頁的追蹤清單只讀一次就夠了。
-const forumPostProjection = `fp.id, fp.author_email, fp.content, fp.created_at, fp.image_url, fp.pinned,
+//
+// updated_at 也刻意在這個投影裡，理由是它屬於同一類辯論的反面：它是**貼文的
+// 屬性**，而且「三種來源回同一種欄位」正是這個常數存在的原因。若只在動態查詢
+// 帶它，症狀會是「這篇文章在首頁有『已編輯』標記、在搜尋結果裡沒有」，而那
+// 只會出現在特定頁面。scan 端因此多一個 sql.NullTime（NULL = 從未編輯，見
+// MigrateMySQL 第 28 步）。
+const forumPostProjection = `fp.id, fp.author_email, fp.content, fp.created_at, fp.image_url, fp.pinned, fp.updated_at,
 		(SELECT COUNT(*) FROM forum_post_likes WHERE post_id = fp.id) AS like_count,
 		(SELECT COUNT(*) FROM forum_post_comments WHERE post_id = fp.id) AS comment_count,
 		CASE WHEN EXISTS (
@@ -254,6 +299,39 @@ const forumPostFeedOrder = `fp.pinned DESC, fp.created_at DESC, fp.id DESC`
 // 因此以 502（Bad Gateway）表達才不會被誤讀成「本站的資料庫有問題」而讓維運
 // 查錯方向。共用流程把錯誤往上收之後，若不帶著這個區別，呼叫端就只能一律回 500。
 var errMediaTokenUnavailable = errors.New("unable to create media token")
+
+// rowScanner 是 *sql.Row 與 *sql.Rows 唯一都具備的方法。
+//
+// 存在的理由只有一個：scanForumPostRow 要能被這兩者共用，而簽一個只含 Scan
+// 的介面比讓呼叫端多寫一次類型轉換乾淨（也讓這個函式不必知道自己是哪一種）。
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanForumPostRow 依 forumPostProjection 的欄位順序讀出一篇貼文。
+//
+// 為什麼值得抽出來：投影是一個常數，但掃描目標是一串位置參數 —— 兩者不是同一
+// 件事，卻必須永遠同步。論壇有三處讀這個投影（動態、追蹤動態、依 ID 組出
+// 搜尋結果），每加一個欄位就要在三處各改一次，而漏改的那一處症狀是
+// 「runtime error: index out of range」或「欄位整欄錯位」—— 錯位更糟，因為
+// 它不會出錯，只會把 likeCount 顯示成 commentCount。
+func scanForumPostRow(row rowScanner) (forumPost, error) {
+	var post forumPost
+	// CASE WHEN EXISTS 的結果以 0/1 呈現，MySQL 沒有原生布林型別。
+	var liked, pinned int
+	// updated_at 可為 NULL（「從未被編輯」，見 MigrateMySQL 第 28 步），因此
+	// 必須用可空型別掃描：直接掃進 time.Time 會讓每一篇未編輯過的貼文都變成
+	// 掃描錯誤，而症狀是整個列表端點回 500。
+	var updatedAt sql.NullTime
+	if err := row.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL,
+		&pinned, &updatedAt, &post.LikeCount, &post.CommentCount, &liked); err != nil {
+		return forumPost{}, err
+	}
+	post.Liked = liked == 1
+	post.Pinned = pinned == 1
+	post.Edited = updatedAt.Valid
+	return post, nil
+}
 
 // loadForumPosts 執行一條公開頁的貼文查詢並把結果組成可送出的 []forumPost。
 //
@@ -293,16 +371,12 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 	// 也讓每個列表請求在 Redis 只增加一個 key。
 	mediaToken := ""
 	for rows.Next() {
-		var post forumPost
-		// CASE WHEN EXISTS 的結果以 0/1 呈現，MySQL 沒有原生布林型別。
-		var liked, pinned int
-		if err := rows.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL, &pinned, &post.LikeCount, &post.CommentCount, &liked); err != nil {
+		post, err := scanForumPostRow(rows)
+		if err != nil {
 			logger.ErrorfContext(ctx, "[FORUM] 讀取文章失敗: %v", err)
 			return nil, err
 		}
 
-		post.Liked = liked == 1
-		post.Pinned = pinned == 1
 		// 先把庫值（純檔名）取出來，並用它判斷「這頁有沒有圖」：舊資料若存的是
 		// 無法辨識的值，這裡會得到空字串，而不會為了它去簽發一個沒人用得到的
 		// token。token 延遲到真的有圖片時才簽發，純文字頁完全不碰 Redis。
@@ -822,7 +896,7 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		// id 作為次要排序鍵是必要的：created_at 是 DATETIME（秒級精度），
 		// 同秒寫入的多筆留言若沒有 id 打破平手，分頁結果會不穩定而漏讀或重複。
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT fc.id, fc.author_email, fc.content, fc.created_at
+			SELECT fc.id, fc.author_email, fc.content, fc.created_at, fc.updated_at
 			FROM forum_post_comments fc
 			WHERE fc.post_id = ?
 			ORDER BY fc.created_at ASC, fc.id ASC
@@ -837,11 +911,15 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		comments := make([]forumComment, 0)
 		for rows.Next() {
 			var comment forumComment
-			if err := rows.Scan(&comment.ID, &comment.Author, &comment.Content, &comment.CreatedAt); err != nil {
+			// updated_at 可為 NULL（「從未被編輯」，見 MigrateMySQL 第 28 步），
+			// 與貼文投影的理由相同：直接掃進 time.Time 會讓整頁留言回 500。
+			var updatedAt sql.NullTime
+			if err := rows.Scan(&comment.ID, &comment.Author, &comment.Content, &comment.CreatedAt, &updatedAt); err != nil {
 				logger.ErrorfContext(r.Context(), "[FORUM] 讀取留言失敗 post_id=%d: %v", postID, err)
 				internalError(w, "unable to read comments")
 				return
 			}
+			comment.Edited = updatedAt.Valid
 			// 與文章列表相同：Author 欄位暫存 email，轉成顯示名稱後再補上雜湊識別碼。
 			// 每筆留言各查一次暱稱，屬 N+1，但單次請求上限 12 筆故最壞情況可控。
 			authorEmail := comment.Author
@@ -947,20 +1025,37 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 //
 // 判斷順序不可調換，這是本函式最容易出錯的地方：
 //
-//	/posts/1                         → 刪除本人貼文
-//	/posts/1/comments/2/report  → comment 檢舉
-//	/posts/1/comments           → 留言
-//	/posts/1/like               → 按讚
-//	/posts/1/report             → post 檢舉
+//	/posts/1                              → GET 單篇／PUT 編輯／DELETE 刪除本人貼文
+//	/posts/1/comments/2/report            → comment 檢舉
+//	/posts/1/comments/2                   → PUT 編輯／DELETE 刪除本人留言
+//	/posts/1/comments                     → 留言
+//	/posts/1/like                         → 按讚
+//	/posts/1/report                       → post 檢舉
 //
-// 「留言檢舉」必須排在「留言列表」之前，因為兩者都以 /comments 開頭；
-// 也必須排在「post 檢舉」之前，因為它同樣以 /report 結尾。
-// 反過來，任何無法對應到上述子資源的子路徑（例如 /posts/1/abc）落到 404。
+// 三組順序各自有理由：
+//   - 「留言檢舉」必須排在「留言列表」之前，因為兩者都以 /comments 開頭；
+//     也必須排在「留言本體」之前，因為它同樣以 /comments 結尾而多一段。
+//   - 「留言本體」必須排在「post 檢舉」之前：/posts/1/comments/2 結尾是數字
+//     而非 /report，因此只要把後者的比對寫成「結尾是 /report」就不會誤觸，
+//     這個順序是為了讓「哪一條規則吃掉這個路徑」在閱讀時不必反覆推算。
+//   - 反過來，任何無法對應到上述子資源的子路徑（例如 /posts/1/abc）落到 404。
 func (s *Server) handleForumPostAction(w http.ResponseWriter, r *http.Request) {
 	trimmedPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/forum/posts/"), "/")
 	if trimmedPath != "" && !strings.Contains(trimmedPath, "/") {
 		if id, err := strconv.ParseInt(trimmedPath, 10, 64); err == nil && id > 0 {
-			s.handleForumPostDelete(w, r)
+			// 單篇資源有三種方法，各自是不同語意的三件事，因此分派在這裡做，
+			// 而不是讓同一個 handler 裡用 switch 切換（那會讓「GET 與 DELETE
+			// 的授權檢查順序」變成一段需要通讀才知道的程式碼）。
+			switch r.Method {
+			case http.MethodGet:
+				s.handleForumPostDetail(w, r)
+			case http.MethodPut:
+				s.handleForumPostUpdate(w, r)
+			case http.MethodDelete:
+				s.handleForumPostDelete(w, r)
+			default:
+				methodNotAllowed(w)
+			}
 			return
 		}
 	}
@@ -968,6 +1063,21 @@ func (s *Server) handleForumPostAction(w http.ResponseWriter, r *http.Request) {
 	// 只看後綴會把 /posts/1/report 誤判為留言檢舉。
 	if strings.HasSuffix(r.URL.Path, "/report") && strings.Contains(strings.TrimSuffix(r.URL.Path, "/report"), "/comments/") {
 		s.handleForumReport(w, r, "comment")
+		return
+	}
+	// 留言本體（/posts/1/comments/2）。刻意比對「/comments/ 之後剩下的整段
+	// 是不是數字」，而不是只看有沒有 /comments/：那會讓 /posts/1/comments/abc
+	// 掉進這個分支並在裡面才回 400，而它其實是個不存在的資源，404 才是對的
+	// 語意（分支內的 400 只會讓呼叫端分不清「網址打錯」與「參數不合法」）。
+	if commentID, ok := forumCommentIDFromPath(r.URL.Path); ok {
+		switch r.Method {
+		case http.MethodPut:
+			s.handleForumCommentUpdate(w, r, commentID)
+		case http.MethodDelete:
+			s.handleForumCommentDelete(w, r, commentID)
+		default:
+			methodNotAllowed(w)
+		}
 		return
 	}
 	if strings.HasSuffix(r.URL.Path, "/comments") {
@@ -987,10 +1097,245 @@ func (s *Server) handleForumPostAction(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// handleForumPostDetail 回傳單一篇文章，供永久連結頁（/forum/post/{id}）使用。
+//
+// 刻意走 loadForumPosts 而不是自己寫一支「SELECT 單列」：那一支函式承擔了
+// 去識別化（Author 顯示名、AuthorKey 雜湊）、標籤、按讚與留言數、圖片 token
+// 這些逐列處理，而「這三種來源必須回同一種欄位」正是它存在的理由（見
+// forumPostProjection）。自己寫一份的症狀不是編譯錯誤，而是同一篇文章在首頁
+// 與在永久連結頁長得不一样 —— 例如少了 AuthorTags 或圖片 token。
+//
+// 條件是主鍵等值，pageSize 給 1：hasMore 在這個呼叫端沒有讀取意義，因此回應
+// 刻意只帶 item、不帶 hasMore（避免前端以為還有下一頁）。
+//
+// 公開讀取且不需登入：貼文本來就是公開內容，而永久連結是給「收到連結的人」
+// 用的 —— 要求對方先登入等於讓這條連結對匿名訪客完全失效。
+func (s *Server) handleForumPostDetail(w http.ResponseWriter, r *http.Request) {
+	postID, err := forumPostIDFromPath(r.URL.Path)
+	if err != nil {
+		badRequest(w, "invalid post id")
+		return
+	}
+	posts, err := s.loadForumPosts(r, `WHERE fp.id = ?`, []interface{}{postID}, 1, 0)
+	if err != nil {
+		s.writeForumPostLoadError(w, err, "unable to load forum post")
+		return
+	}
+	// 404 而非 200 + 空物件：永久連結頁的呼叫端要能區分「這篇被刪了」
+	// 與「這篇還在」，而前者正是使用者會遇到的狀態（連結是舊的）。
+	if len(posts) == 0 {
+		writeError(w, http.StatusNotFound, "post not found")
+		return
+	}
+	writeOK(w, map[string]interface{}{"item": posts[0]})
+}
+
+// handleForumPostUpdate 讓作者修改自己的貼文本文。
+//
+// 授權與刪除完全相同：把 author_email 放進 UPDATE 的 WHERE 條件，而不是
+// 「先 SELECT 查作者、再 UPDATE」—— 後者兩步之間有窗口，攻擊者可以在那個
+// 窗口裡替換目標 id，而症狀是他剛好改到別人的文章。
+//
+// 刻意不記稽核（理由與 handleForumPostDelete 的同一處）：稽核紀錄的 actor 是
+// 管理員，而這是使用者改自己的東西。稽核要能回答「誰動了這篇文章」，而答案
+// 此刻就是 author_email —— 它被寫在那一列裡。真的需要追「這篇的原文」時，
+// 稽核表本來就答不出來（見 README 的已知問題：只存截斷後的值）。
+//
+// 回應刻意只回 ok：前端已經拿得到自己剛才送出的內容，而回一份 forumPost 會
+// 讓呼叫端多處理一種「單篇形狀」（圖片 token 是新簽的、AuthorTags 要再查一次）。
+func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
+	author := s.sessions.ResolveUser(r)
+	// 縱深防禦：中介層 requireLoginForWrite 已對 PUT 做過登入與停權檢查。
+	if author == "" {
+		unauthorized(w, "請先使用 Google 登入")
+		return
+	}
+	if !s.isTrustedOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+	postID, err := forumPostIDFromPath(r.URL.Path)
+	if err != nil {
+		badRequest(w, "invalid post id")
+		return
+	}
+	var req updateForumPostRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		badRequest(w, "invalid request")
+		return
+	}
+	// 驗證規則與 createForumPost 逐字相同（先 TrimSpace 再量字數）。刻意寫兩份
+	// 而不抽成共用函式：它們是兩條授權不同的路徑，而共用函式會讓「其中一條
+	// 改了上限、另一條沒改」變成一個看不見的差異 —— 兩份各自只有三行。
+	req.Content = strings.TrimSpace(req.Content)
+	if req.Content == "" {
+		badRequest(w, "內容不可為空")
+		return
+	}
+	if len([]rune(req.Content)) > 10000 {
+		badRequest(w, "內容最多 10000 字")
+		return
+	}
+	// 單一 UPDATE 具原子性，不需要交易（同 createForumPost 的說明）。
+	result, err := s.db.ExecContext(r.Context(),
+		`UPDATE forum_posts SET content = ?, updated_at = ? WHERE id = ? AND author_email = ?`,
+		req.Content, time.Now(), postID, author)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 編輯本人貼文失敗 post_id=%d: %v", postID, err)
+		internalError(w, "unable to update forum post")
+		return
+	}
+	// 0 列同時代表「不存在」與「不是你的」，不區分以免藉回應差異探測作者權限
+	// （與 handleForumPostDelete 同一個理由）。
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	// 索引必須跟著更新，否則搜尋結果會是舊內容 —— 而「改了字、搜尋還是舊字」
+	// 是使用者最難自己察覺的一種錯誤。刻意 best-effort：索引失敗只記日誌，
+	// 理由與 createForumPost 的同一處（使用者路徑的索引失敗不記稽核）。
+	if err := s.reindexForumPostByID(r.Context(), postID); err != nil {
+		logger.WarnfContext(r.Context(), "[FORUM] 重建編輯後的搜尋索引失敗 post_id=%d: %v", postID, err)
+	}
+	writeOK(w, map[string]bool{"ok": true})
+}
+
+// handleForumCommentUpdate 讓作者修改自己的留言。
+//
+// 授權條件刻意是三個欄位而不是一個：id + author_email（是這則留言嗎、是你的嗎）
+// 加上 post_id（它掛在那篇文章底下嗎）。少了 post_id 那一項，使用者就能拿
+// 「A 文章的留言 id」對「B 文章的留言 id 路由」送出 PUT —— 授權仍然成立
+// （他確實是那則留言的作者），但呼叫端以為自己改的是另一篇文章的留言。
+// 那不會造成越權，卻會讓「我在 B 篇底下編輯留言」的結果在 A 篇生效。
+func (s *Server) handleForumCommentUpdate(w http.ResponseWriter, r *http.Request, commentID int64) {
+	author := s.sessions.ResolveUser(r)
+	if author == "" {
+		unauthorized(w, "請先使用 Google 登入")
+		return
+	}
+	if !s.isTrustedOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+	postID, err := forumPostIDFromPath(r.URL.Path)
+	if err != nil {
+		badRequest(w, "invalid post id")
+		return
+	}
+	var req updateForumCommentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		badRequest(w, "invalid request")
+		return
+	}
+	// 與 handleForumComments 的新增分支相同：先修剪再驗證，2000 字上限與
+	// forum_post_comments.content 的業務上限一致。
+	req.Content = strings.TrimSpace(req.Content)
+	if req.Content == "" {
+		badRequest(w, "留言內容不可為空")
+		return
+	}
+	if len([]rune(req.Content)) > 2000 {
+		badRequest(w, "留言最多 2000 字")
+		return
+	}
+	result, err := s.db.ExecContext(r.Context(),
+		`UPDATE forum_post_comments SET content = ?, updated_at = ?
+		 WHERE id = ? AND author_email = ? AND post_id = ?`,
+		req.Content, time.Now(), commentID, author, postID)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 編輯本人留言失敗 post_id=%d comment_id=%d: %v", postID, commentID, err)
+		internalError(w, "unable to update comment")
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		// 與貼文編輯同一個理由：不區分「不存在」與「不是你的」。
+		http.NotFound(w, r)
+		return
+	}
+	writeOK(w, map[string]bool{"ok": true})
+}
+
+// handleForumCommentDelete 讓作者刪除自己的留言。
+//
+// 為什麼這一條是必要的（而貼文早就能刪）：一則被人檢舉或回應得不舒服的留言，
+// 使用者原本完全無法自己移除 —— 只能等管理員。而貼文的同一個動作早就存在，
+// 兩者不一致本身就是一个會被使用者當成 bug 回報的落差。
+//
+// 附帶的行為：留言消失後該貼文的 comment_count 會少 1，但那是另一支查詢的
+// 衍生子查詢（forumPostProjection 裡的 COUNT），下一次讀取自然就正確了，
+// 因此這裡刻意不做「順便把計數欄位減一」—— 這個專案沒有計數快取欄位可減。
+func (s *Server) handleForumCommentDelete(w http.ResponseWriter, r *http.Request, commentID int64) {
+	author := s.sessions.ResolveUser(r)
+	if author == "" {
+		unauthorized(w, "請先使用 Google 登入")
+		return
+	}
+	if !s.isTrustedOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+	postID, err := forumPostIDFromPath(r.URL.Path)
+	if err != nil {
+		badRequest(w, "invalid post id")
+		return
+	}
+	// 作者條件放進 DELETE 本身，理由與 handleForumPostDelete 相同。
+	result, err := s.db.ExecContext(r.Context(),
+		`DELETE FROM forum_post_comments WHERE id = ? AND author_email = ? AND post_id = ?`,
+		commentID, author, postID)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 刪除本人留言失敗 post_id=%d comment_id=%d: %v", postID, commentID, err)
+		internalError(w, "unable to delete comment")
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	writeOK(w, map[string]bool{"ok": true})
+}
+
+// forumCommentIDFromPath 嘗試從 /api/forum/posts/{postID}/comments/{commentID}
+// 取出留言 id；路徑不是這個形狀時回傳 false。
+//
+// 與 forumReportTargetID 分成兩支而不是合併：檢舉端點的路徑還多一段 /report，
+// 而它需要的「取留言 id」動作與這一支逐字相同。把兩者合併會得到一個帶
+// 「要不要剝掉 /report」參數的函式，而那個參數只對其中一個呼叫端有意義 ——
+// 另一個傳錯值時症狀是靜默地把 "2/report" 當 id 去比對。
+func forumCommentIDFromPath(path string) (int64, bool) {
+	const marker = "/comments/"
+	start := strings.Index(path, marker)
+	if start < 0 {
+		return 0, false
+	}
+	value := strings.Trim(strings.TrimPrefix(path[start+len(marker):], "/"), "/")
+	// 多餘的路段（例如 /comments/2/abc）不算這個形狀：讓它落到 404 而不是
+	// 試著解析。
+	if strings.Contains(value, "/") {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}
+
 // handleForumPostDelete 刪除登入者自己的貼文。
 func (s *Server) handleForumPostDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		methodNotAllowed(w)
+		return
+	}
+	// 縱深防禦：中介層 requireLoginForWrite 已對 DELETE 做過登入與停權檢查。
+	// 這一行的存在理由不是「沒有它會刪掉別人的文章」（WHERE 裡的 author_email
+	// 本來就擋得住空字串），而是讓本檔檔頭宣告的那條規則成真：每一個會改動
+	// 資料的 handler 都自己確認一次身分。一致性的理由是具體的 —— 這個函式
+	// 旁邊就是同樣只改本人貼文的 handleForumPostUpdate，而那支有做檢查；
+	// 沒有檢查的話，兩支的差異只能靠「其中一支剛好不需要」來解釋。
+	author := s.sessions.ResolveUser(r)
+	if author == "" {
+		unauthorized(w, "請先使用 Google 登入")
 		return
 	}
 	if !s.isTrustedOrigin(r) {
@@ -1003,7 +1348,7 @@ func (s *Server) handleForumPostDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 將作者條件放進 DELETE 本身，避免「先查作者、再刪除」之間的權限競態。
-	result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_posts WHERE id = ? AND author_email = ?`, postID, s.sessions.ResolveUser(r))
+	result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_posts WHERE id = ? AND author_email = ?`, postID, author)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 刪除本人貼文失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to delete forum post")
@@ -1743,7 +2088,7 @@ func (s *Server) handleForumLoginPage(frontendDir string) http.HandlerFunc {
 
 // handleForumPage 產生論壇前端各頁的 handler。
 //
-// 這五個頁面其實都是同一支 SPA，只是入口檔不同，送出的 HTML
+// 這些頁面其實都是同一支 SPA，只是入口檔不同，送出的 HTML
 // 會再由前端 router 依當前路徑決定渲染哪個畫面。
 func (s *Server) handleForumPage(frontendDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1766,6 +2111,21 @@ func (s *Server) handleForumPage(frontendDir string) http.HandlerFunc {
 			// 另註一條只會多一份要同步的路由規則。
 			page = "forum-following.html"
 		default:
+			/*
+			 * 永久連結頁是唯一一個「id 在路徑裡」的公開頁，因此不能用上面的
+			 * switch 逐一比對：/forum/post/ 後面是文章編號，數量等同文章數。
+			 *
+			 * 驗證 id 是必要的，而且必須在送出 HTML **之前**：否則
+			 * /forum/post/abc 與 /forum/post/ 會拿到同一份殼，前端再自己
+			 * 顯示「找不到」。讓錯誤網址得到一個明確的 404，與這一頁其餘
+			 * 未列出的子路徑（/forum/xxx）行為一致。
+			 *
+			 * 容忍結尾斜線的理由與其他頁面相同（/forum/post/1/ 等同 /forum/post/1）。
+			 */
+			if _, ok := forumPostPageID(r.URL.Path); ok {
+				page = "forum-post.html"
+				break
+			}
 			http.NotFound(w, r)
 			return
 		}
@@ -1774,4 +2134,21 @@ func (s *Server) handleForumPage(frontendDir string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-store")
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, page))
 	}
+}
+
+// forumPostPageID 解析 /forum/post/{id} 的 id；路徑不是這個形狀時回傳 false。
+//
+// 純函式（不碰檔案系統、不碰資料庫），因此它的行為可以在測試裡直接驗證 ——
+// 而這正是「未列出的子路徑必須 404」這條規則唯一可能被改壞的地方。
+func forumPostPageID(path string) (int64, bool) {
+	const prefix = "/forum/post/"
+	if !strings.HasPrefix(path, prefix) {
+		return 0, false
+	}
+	value := strings.Trim(strings.TrimPrefix(path, prefix), "/")
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
 }

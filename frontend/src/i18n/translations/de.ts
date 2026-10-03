@@ -73,6 +73,10 @@ export const de: Record<MessageKey, string> = {
     'Kommentare konnten nicht geladen werden.',
   'error.fallbackCommentPost':
     'Kommentar konnte nicht gesendet werden.',
+  'error.fallbackCommentEdit':
+    'Kommentar konnte nicht gespeichert werden',
+  'error.fallbackCommentDelete':
+    'Kommentar konnte nicht gelöscht werden',
   'error.fallbackReport':
     'Meldung konnte nicht gesendet werden.',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const de: Record<MessageKey, string> = {
     'Gefällt mir',
   'post.reply':
     'Antwort',
+  'post.permalink':
+    'Permalink',
+  'post.editedBadge':
+    'bearbeitet',
+  'post.editContentLabel':
+    'Beitragstext',
+  'post.editMax':
+    'Maximal 10.000 Zeichen',
   'comment.loading':
     'Kommentare werden geladen...',
   'comment.none':
@@ -193,6 +205,14 @@ export const de: Record<MessageKey, string> = {
     'Meldung',
   'comment.more':
     'Weitere Kommentare laden...',
+  'comment.editedBadge':
+    'bearbeitet',
+  'comment.editContentLabel':
+    'Kommentartext',
+  'comment.editFailed':
+    'Kommentar konnte nicht gespeichert werden, bitte später erneut versuchen.',
+  'comment.deleteFailed':
+    'Kommentar konnte nicht gelöscht werden, bitte später erneut versuchen.',
   'report.reasonPlaceholder':
     'Grund für die Meldung eingeben (maximal 500 Zeichen)',
   'report.note':
@@ -227,6 +247,18 @@ export const de: Record<MessageKey, string> = {
     'Bild wird hochgeladen...',
   'newPost.failed':
     'Veröffentlichung fehlgeschlagen. Bitte versuche es später erneut.',
+  'newPost.imagePreviewAlt':
+    'Vorschau des hochzuladenden Bildes',
+  'newPost.draftNote':
+    'Der Entwurf wird auf diesem Gerät automatisch gespeichert (nur Text, ein ausgewähltes Bild bleibt nicht erhalten).',
+  'postPage.loading':
+    'Beitrag wird geladen...',
+  'postPage.missing':
+    'Dieser Beitrag wurde möglicherweise gelöscht, oder der Link ist falsch.',
+  'postPage.failed':
+    'Der Beitrag konnte nicht geladen werden, bitte später erneut versuchen.',
+  'postPage.label':
+    'Beitrag',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const de: Record<MessageKey, string> = {
     'Beitrag wurde gelöscht.',
   'posts.deleteFailed':
     'Beitrag konnte nicht gelöscht werden.',
+  'posts.edited':
+    'Beitrag aktualisiert.',
+  'posts.editFailed':
+    'Der Beitrag konnte nicht gespeichert werden, bitte später erneut versuchen.',
   'posts.commentUpdated':
     'Kommentar wurde aktualisiert.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const de: Record<MessageKey, string> = {
     'Profil | {site}',
   'title.publicProfile':
     'Öffentliches Profil | {site}',
+  'title.post':
+    'Beitrag｜{site}',
   'title.following':
     'Folge | {site}',
   'title.adminUsers':

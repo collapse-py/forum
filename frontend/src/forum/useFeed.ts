@@ -194,3 +194,24 @@ export async function toggleLike(postId: number): Promise<{ liked: boolean; coun
   });
   return { liked: !!data.liked, count: data.count || 0 };
 }
+
+/**
+ * 改掉自己貼文的本文。
+ *
+ * 與 toggleLike 放在一起的理由相同：兩者都是「對某一篇貼文的寫入」，而五個
+ * 渲染 PostCard 的頁面都需要它。寫成共用函式而不是讓每個頁面各寫一次
+ * requestJSON，否則那五處的 fallback 文案與錯誤處理會各自漂移 —— 而它們
+ * 漂移之後不會出現在任何 console 裡。
+ *
+ * 回傳修剪後的內容（後端也會 TrimSpace，兩邊一致）：呼叫端要拿它去 patch
+ * 列表，而 patch 顯示的字必須與資料庫裡的字完全相同。
+ */
+export async function updateForumPost(postId: number, content: string): Promise<string> {
+  const next = content.trim();
+  await requestJSON(`/api/forum/posts/${postId}`, {
+    method: 'PUT',
+    json: { content: next },
+    fallback: tr(msg('posts.editFailed')),
+  });
+  return next;
+}

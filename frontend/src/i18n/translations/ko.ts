@@ -73,6 +73,10 @@ export const ko: Record<MessageKey, string> = {
     '댓글 로딩 실패',
   'error.fallbackCommentPost':
     '댓글 작성 실패',
+  'error.fallbackCommentEdit':
+    '댓글을 저장하지 못했습니다',
+  'error.fallbackCommentDelete':
+    '댓글을 삭제하지 못했습니다',
   'error.fallbackReport':
     '신고 실패',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const ko: Record<MessageKey, string> = {
     '좋아요',
   'post.reply':
     '답글',
+  'post.permalink':
+    '퍼머링크',
+  'post.editedBadge':
+    '수정됨',
+  'post.editContentLabel':
+    '게시글 내용',
+  'post.editMax':
+    '최대 10000자',
   'comment.loading':
     '댓글 로딩 중...',
   'comment.none':
@@ -193,6 +205,14 @@ export const ko: Record<MessageKey, string> = {
     '신고',
   'comment.more':
     '댓글 더 로딩...',
+  'comment.editedBadge':
+    '수정됨',
+  'comment.editContentLabel':
+    '댓글 내용',
+  'comment.editFailed':
+    '댓글을 저장하지 못했습니다. 나중에 다시 시도해 주세요.',
+  'comment.deleteFailed':
+    '댓글을 삭제하지 못했습니다. 나중에 다시 시도해 주세요.',
   'report.reasonPlaceholder':
     '신고 사유 입력(최대 500자)',
   'report.note':
@@ -227,6 +247,18 @@ export const ko: Record<MessageKey, string> = {
     '업로드 중...',
   'newPost.failed':
     '게시하지 못했습니다. 나중에 다시 시도해 주세요.',
+  'newPost.imagePreviewAlt':
+    '업로드할 이미지 미리보기',
+  'newPost.draftNote':
+    '초안은 이 기기에 자동으로 저장됩니다(텍스트만 저장되며, 선택한 이미지는 남지 않습니다).',
+  'postPage.loading':
+    '게시글 불러오는 중...',
+  'postPage.missing':
+    '이 게시글이 삭제되었거나 링크가 올바르지 않습니다.',
+  'postPage.failed':
+    '게시글을 불러오지 못했습니다. 나중에 다시 시도해 주세요.',
+  'postPage.label':
+    '게시글',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const ko: Record<MessageKey, string> = {
     '게시글이 삭제되었습니다.',
   'posts.deleteFailed':
     '게시글 삭제에 실패했습니다.',
+  'posts.edited':
+    '게시글이 수정되었습니다.',
+  'posts.editFailed':
+    '게시글을 저장하지 못했습니다. 나중에 다시 시도해 주세요.',
   'posts.commentUpdated':
     '댓글이 업데이트되었습니다.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const ko: Record<MessageKey, string> = {
     '프로필｜{site}',
   'title.publicProfile':
     '공개 프로필｜{site}',
+  'title.post':
+    '게시글｜{site}',
   'title.following':
     '팔로우｜{site}',
   'title.adminUsers':

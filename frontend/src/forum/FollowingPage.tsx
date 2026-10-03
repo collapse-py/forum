@@ -37,7 +37,7 @@ import { FollowButton } from './FollowButton';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
-import { useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -220,6 +220,31 @@ export function FollowingPage() {
     [patchPost, setFail],
   );
 
+  /*
+   * 追蹤動態裡的貼文也可以是「我自己的」（我追蹤了自己不可能，但別人的貼文
+   * 我是作者的情況會出現在這裡 —— 例如我自己發過文，而某位使用者追蹤了我，
+   * 我從他的頁面看見自己的舊文）。因此這一頁也需要 onUpdate，否則編輯會
+   * 在伺服器成功、畫面卻停在舊內容。
+   */
+  const handleUpdate = useCallback(
+    async (post: ForumPost, content: string) => {
+      try {
+        const next = await updateForumPost(post.id, content);
+        patchPost(post.id, { content: next, edited: true });
+        setOk(msg('posts.edited'));
+      } catch (error) {
+        if (error instanceof LoginRequiredError) {
+          goToLogin();
+          throw error;
+        }
+        setFail(errorText(error, msg('posts.editFailed')));
+        // 見 FeedPage 的 handleUpdate：丟回去讓 PostCard 保留輸入框。
+        throw error;
+      }
+    },
+    [patchPost, setFail, setOk],
+  );
+
   const renderPost = (post: ForumPost) => (
     <PostCard
       key={post.id}
@@ -229,6 +254,7 @@ export function FollowingPage() {
       report={report}
       follow={follow}
       onLike={handleLike}
+      onUpdate={handleUpdate}
       onFollowChanged={handlePostFollowChanged}
       onRequireLogin={goToLogin}
     />

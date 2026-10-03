@@ -82,7 +82,14 @@ FROM golang:1.26-alpine AS backend-builder
 # git 與 ca-certificates：go mod download 需要它們驗證 https 的 module proxy。
 # build-base（gcc）刻意**不要**：CGO_ENABLED=0 不需要編譯器，少一個相依就少
 # 一層需要更新的東西。
-RUN apk add --no-cache git ca-certificates
+#
+# tzdata 是**必要**的，而它不在 alpine 映像裡：執行階段只複製
+# /usr/share/zoneinfo/UTC 這一個檔案（見下方 stage-2 的說明），來源必須是這個
+# builder。少了這一行，建置會在 stage-2 停下並回
+# `failed to calculate checksum ... "/usr/share/zoneinfo/UTC": not found`
+# —— 症狀是「build 到最後一個複製才失敗」，離真正的原因（builder 沒有時區資料）
+# 有點距離。
+RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /src
 
@@ -104,6 +111,19 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w" \
     -o /out/forum \
     .
+
+# 執行階段的兩個掛載點目錄在**這個** stage 建立，而不是在 stage-2。
+#
+# 為什麼不能在 stage-2 用 RUN mkdir：distroless 沒有 /bin/sh（見檔頭「為什麼用
+# distroless」），因此 stage-2 的任何一條 RUN 都會以
+# "exec: /bin/sh: no such file or directory" 失敗 —— 而那行 mkdir 的存在理由
+# （讓 `docker run` 不因工作目錄不存在而失敗）恰恰只有 runtime 階段需要。
+#
+# 為什麼在這裡 chown：/app/logs 要能寫入（LOG_FILE），而 compose 掛在那裡的是
+# named volume —— named volume 第一次建立時會**繼承映像裡那個目錄的擁有者**。
+# 若它是 root:root，非 root 的行程會在啟動後第一次寫日誌時才失敗（症狀是
+# 「容器起來了、log 檔卻沒有」）。65532 是 distroless 的 nonroot UID。
+RUN mkdir -p /out/app/config /out/app/logs && chown -R 65532:65532 /out/app
 
 # ---------------------------------------------------------------------------
 # 階段 3：執行
@@ -132,12 +152,22 @@ COPY --from=frontend /src/dist /app/frontend/dist
 # PWA 圖示與 manifest 是一手來源（不是 Vite 的產物），後端以 http.Dir 直接提供
 # 它們。若 dist/ 裡沒有它們，容器的 PWA 安裝會拿到 404，而症狀是
 # 「安裝了圖示但打開是空白」。
-COPY backend/frontend/asset /app/frontend/asset
+#
+# 來源是 **frontend/asset**（倉庫根底下的那一個），不是 backend/frontend/asset：
+# 後者不存在，而 COPY 一個不存在的路徑會讓整個建置在建完前端之後才失敗 ——
+# 症狀是距離真正原因（路徑打錯）數分鐘之遠的一行 "not found"。
+#
+# 目的地與 /asset/ 路由的解析方式必須一致，見 frontendAssetRoot 的說明。
+COPY frontend/asset /app/frontend/asset
 
 # 設定檔掛載點。刻意建立這個空目錄（而不是只靠 compose 的 volume）——
 # 沒有它，`docker run`（不經過 compose）會因為工作目錄不存在而失敗，
 # 而症狀是「找不到 config/config.conf」，那不會讓人想到要先建立目錄。
-RUN mkdir -p /app/config /app/logs
+#
+# 目錄在 backend-builder 建立（distroless 沒有 shell，這裡不能 RUN mkdir），
+# 見該 stage 的說明。--chown 與 builder 的 chown 雙保險：COPY 預設建立的目錄
+# 擁有者是 root，那會讓 /app/logs 對 nonroot 不可寫。
+COPY --from=backend-builder --chown=nonroot:nonroot /out/app/ /app/
 
 # 非 root 執行。這個專案不需要任何 root 權限：它不對外 listen 80、不寫
 # /etc、不建立系統使用者。以 root 執行的唯一好處是「除錯方便」，那不值得。

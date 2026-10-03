@@ -73,6 +73,10 @@ export const fr: Record<MessageKey, string> = {
     'Échec du chargement des commentaires',
   'error.fallbackCommentPost':
     'Échec de l\'ajout d\'un commentaire',
+  'error.fallbackCommentEdit':
+    'Échec de l\'enregistrement du commentaire',
+  'error.fallbackCommentDelete':
+    'Échec de la suppression du commentaire',
   'error.fallbackReport':
     'Échec de la soumission du signalement',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const fr: Record<MessageKey, string> = {
     'J\'aime',
   'post.reply':
     'Réponse',
+  'post.permalink':
+    'Lien permanent',
+  'post.editedBadge':
+    'modifié',
+  'post.editContentLabel':
+    'Contenu de la publication',
+  'post.editMax':
+    'Maximum : 10 000 caractères',
   'comment.loading':
     'Chargement des commentaires…',
   'comment.none':
@@ -193,6 +205,14 @@ export const fr: Record<MessageKey, string> = {
     'Signaler',
   'comment.more':
     'Chargement d\'autres commentaires…',
+  'comment.editedBadge':
+    'modifié',
+  'comment.editContentLabel':
+    'Contenu du commentaire',
+  'comment.editFailed':
+    'Échec de l\'enregistrement du commentaire. Veuillez réessayer plus tard.',
+  'comment.deleteFailed':
+    'Échec de la suppression du commentaire. Veuillez réessayer plus tard.',
   'report.reasonPlaceholder':
     'Veuillez saisir le motif du signalement (maximum 500 caractères)',
   'report.note':
@@ -227,6 +247,18 @@ export const fr: Record<MessageKey, string> = {
     'Téléchargement de l’image en cours…',
   'newPost.failed':
     'La publication a échoué. Veuillez réessayer plus tard.',
+  'newPost.imagePreviewAlt':
+    'Aperçu de l\'image à envoyer',
+  'newPost.draftNote':
+    'Le brouillon est enregistré automatiquement sur cet appareil (texte uniquement, l\'image choisie n\'est pas conservée).',
+  'postPage.loading':
+    'Chargement de la publication...',
+  'postPage.missing':
+    'Cette publication a peut-être été supprimée, ou le lien est incorrect.',
+  'postPage.failed':
+    'Échec du chargement de la publication. Veuillez réessayer plus tard.',
+  'postPage.label':
+    'Publication',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const fr: Record<MessageKey, string> = {
     'Article supprimé.',
   'posts.deleteFailed':
     'Échec de la suppression de l’article.',
+  'posts.edited':
+    'Publication mise à jour.',
+  'posts.editFailed':
+    'Échec de l\'enregistrement de la publication. Veuillez réessayer plus tard.',
   'posts.commentUpdated':
     'Commentaire mis à jour.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const fr: Record<MessageKey, string> = {
     'Profil personnel | {site}',
   'title.publicProfile':
     'Profil public | {site}',
+  'title.post':
+    'Publication｜{site}',
   'title.following':
     'Abonnements | {site}',
   'title.adminUsers':

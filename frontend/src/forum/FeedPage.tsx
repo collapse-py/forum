@@ -29,7 +29,7 @@ import { AnnouncementBanner } from './AnnouncementBanner';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
-import { useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -207,6 +207,31 @@ export function FeedPage() {
     [removePost, setFail, setOk],
   );
 
+  /*
+   * 編輯自己的貼文之後就地換掉列表裡的那一份，而不是重新載入整頁：重新載入會
+   * 把使用者捲回頂端，而他們剛剛只是改了一句話。edited 一併補上，否則改完
+   * 之後「已編輯」標記要等到下一次載入才出現。
+   */
+  const handleUpdate = useCallback(
+    async (post: ForumPost, content: string) => {
+      try {
+        const next = await updateForumPost(post.id, content);
+        patchPost(post.id, { content: next, edited: true });
+        setOk(msg('posts.edited'));
+      } catch (error) {
+        if (error instanceof LoginRequiredError) {
+          goToLogin();
+          throw error;
+        }
+        setFail(errorMessage(error, tr(msg('posts.editFailed'))));
+        // 丟回去：PostCard 靠它決定要不要保留編輯框（失敗就關掉，使用者剛
+        // 打的字會消失）。這一行的作用與回報訊息並存，兩者都需要。
+        throw error;
+      }
+    },
+    [patchPost, setFail, setOk],
+  );
+
   /* --- 預載 --------------------------------------------------------------- */
 
   /*
@@ -253,6 +278,7 @@ export function FeedPage() {
       follow={follow}
       onLike={handleLike}
       onDelete={handleDelete}
+      onUpdate={handleUpdate}
       onRequireLogin={goToLogin}
     />
   );

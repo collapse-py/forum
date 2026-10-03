@@ -447,6 +447,35 @@ func frontendAssetsRoot(frontendDir string) string {
 	return filepath.Join(frontendDir, "assets")
 }
 
+// frontendAssetRoot 定位 /asset/ 底下的「一手素材」（PWA 圖示、logo、自製字型）。
+//
+// 為什麼需要這一組候選而不是寫死一個路徑
+// ------------------------------------------
+// 這些檔案不在 dist 裡（Vite 不打包它們），而是 dist 的**同層目錄**，因此不能
+// 只靠 frontendDir 拼出一個名字 —— 但也不能像舊版那樣寫死 `../frontend/asset`：
+// 那個路徑是相對於**工作目錄**的，而容器的工作目錄是 /app，於是它指向
+// /frontend/asset，與 Dockerfile 實際放置的 /app/frontend/asset 不一致。
+// 兩者不一致的症狀是「頁面完全正常，只有 PWA 圖示與 logo 全部 404」——
+// 沒有任何錯誤訊息，也不影響任何 API（理由見該 Dockerfile 的註解）。
+//
+// 候選順序與 frontendRoot 的語意一致：先試「dist 的同層」（已打包），
+// 再退回寫死的開發路徑（未打包時 frontendRoot 會選到原始碼目錄而不是 dist）。
+//
+// 兩個候選都不存在時回傳第一個而不是中止：http.Dir 對不存在的目錄只是讓每個
+// 請求都 404，那與「整個 API 服務因為一組圖示開不起來」是兩種失敗。
+func frontendAssetRoot(frontendDir string) string {
+	candidates := []string{
+		filepath.Join(frontendDir, "..", "asset"),
+		filepath.Join("..", "frontend", "asset"),
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return candidates[0]
+}
+
 // Handler 建立並回傳整個論壇後端的 http.Handler：先解析前端資產位置、組出
 // 完整路由表，再依序套上 session 更新與存取記錄兩個中介層。
 // 每次呼叫都會重新建立 ServeMux 與重新解析前端路徑，因此不應放在請求路徑上。
@@ -455,7 +484,7 @@ func (s *Server) Handler() http.Handler {
 	// 啟動時把實際採用的路徑寫進日誌：前端檔案 404 是本專案最常見的部署錯誤，
 	// 沒有這行只能靠猜是哪一組候選路徑沒命中。站名一併記下來：改錯設定檔時
 	// 「送出的站名是什麼」是第一個要確認的事實，而它此時只存在於設定值裡。
-	logger.Infof("[HTTP] frontend root=%s assets=%s forum=%q", frontendDir, filepath.Join(frontendDir, "assets"), s.cfg.ForumName)
+	logger.Infof("[HTTP] frontend root=%s assets=%s asset=%s forum=%q", frontendDir, filepath.Join(frontendDir, "assets"), frontendAssetRoot(frontendDir), s.cfg.ForumName)
 	mux := http.NewServeMux()
 
 	/*
@@ -475,7 +504,8 @@ func (s *Server) Handler() http.Handler {
 		  /api/forum/images               requireLogin → rateLimit(upload) → handleForumImageUpload
 		  /api/forum/image-tokens/release requireLogin → rateLimit(upload) → handleForumImageTokensRelease
 		  /api/forum/posts/{id}...        requireLoginForWrite → rateLimit(write) → handleForumPostAction
-		                                 （尾綴分派：/comments、/like、/report）
+		                                 （單篇／編輯／刪除本人貼文，以及尾綴分派：
+		                                  /comments、/comments/{cid}、/like、/report）
 		  /api/forum/profile              requireLogin → rateLimit(write) → handleForumProfile
 		  /api/forum/follows              requireLogin → rateLimit(write) → handleForumFollows
 		                                 （GET 回追蹤清單、POST 切換追蹤）
@@ -774,13 +804,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/forum", s.handleForumPage(frontendDir))
 	mux.HandleFunc("/forum/others-profile", s.handleForumPage(frontendDir))
 	mux.HandleFunc("/forum/others-profile/", s.handleForumPage(frontendDir))
+	/*
+	 * 永久連結頁（/forum/post/{id}）。刻意公開，且刻意**不**依賴下面那條
+	 * 掛 requireLogin 的 /forum/ 子樹 —— 那是這一頁存在的理由：它是一個
+	 * 分享出去的連結，而分享連結的人不會先跟收連結的人說「請先登入」。
+	 * 未登入者在這一頁仍然可以讀文、按讚、看留言，只有寫入動作會被導去登入頁
+	 * （那是各 handler 的 isTrustedOrigin／requireLoginForWrite 負責）。
+	 *
+	 * 尾斜線與不帶都註冊：帶尾斜線是子樹比對（/forum/post/1/ 也進得來），
+	 * 不帶的是完全比對。實際的路徑驗證（id 必須是正整數）在
+	 * handleForumPage 裡，與其他頁面共用同一個函式而不是另開一支。
+	 */
+	mux.HandleFunc("/forum/post", s.handleForumPage(frontendDir))
+	mux.HandleFunc("/forum/post/", s.handleForumPage(frontendDir))
 	// 其餘 /forum/* 頁面（新增文章、個人資料等）需要登入。此處掛最後只是閱讀
 	// 順序：ServeMux 取最具體的樣式，所以 "/forum/" 子樹樣式不會蓋掉上面
 	// 明確註冊的公開頁面，註冊先後並不影響結果。
 	mux.HandleFunc("/forum/", s.requireLogin(s.handleForumPage(frontendDir)))
-	// /asset/ 是給後台使用的原始素材（圖示等），路徑固定相對於 backend 的
-	// 上層目錄，不隨前端建置輸出位置變動。
-	mux.Handle("/asset/", http.StripPrefix("/asset/", http.FileServer(http.Dir(filepath.Join("..", "frontend", "asset")))))
+	// /asset/ 是給後台與 PWA 使用的一手素材（圖示等）。路徑由 frontendAssetRoot
+	// 解析而非寫死，理由見該函式：寫死 `../frontend/asset` 在容器裡會指向
+	// /frontend/asset，而映像裡的檔案在 /app/frontend/asset。
+	mux.Handle("/asset/", http.StripPrefix("/asset/", http.FileServer(http.Dir(frontendAssetRoot(frontendDir)))))
 
 	//  "/" 是 catch-all 路由。位置無關緊要（匹配只看具體程度），"/" 是最不
 	// 具體的樣式，所以前面沒被認領的路徑自然會落到這裡。

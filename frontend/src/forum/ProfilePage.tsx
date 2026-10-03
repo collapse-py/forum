@@ -33,7 +33,7 @@ import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, usePwaInstall, type AuthState } from './shell';
 import { useComments } from './useComments';
-import { useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -236,6 +236,29 @@ export function ProfilePage() {
     [removePost],
   );
 
+  /*
+   * 編輯自己的貼文之後就地換掉列表裡的那一份（理由與 FeedPage 的 handleUpdate
+   * 相同：重新載入整頁會把捲動位置打回頂端）。
+   */
+  const handleUpdate = useCallback(
+    async (post: ForumPost, content: string) => {
+      try {
+        const next = await updateForumPost(post.id, content);
+        patchPost(post.id, { content: next, edited: true });
+        setStatus({ message: msg('posts.edited'), isError: false });
+      } catch (error) {
+        if (error instanceof LoginRequiredError) {
+          goToLogin();
+          throw error;
+        }
+        setStatus({ message: errorText(error, msg('posts.editFailed')), isError: true });
+        // 見 FeedPage 的 handleUpdate：丟回去讓 PostCard 保留輸入框。
+        throw error;
+      }
+    },
+    [patchPost],
+  );
+
   /* --- 預載 --------------------------------------------------------------- */
 
   /*
@@ -276,6 +299,7 @@ export function ProfilePage() {
       follow={follow}
       onLike={handleLike}
       onDelete={handleDelete}
+      onUpdate={handleUpdate}
       onRequireLogin={goToLogin}
     />
   );

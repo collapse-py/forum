@@ -52,6 +52,8 @@ export const ja: Record<MessageKey, string> = {
   'error.fallbackLike': 'いいねに失敗しました',
   'error.fallbackComments': 'コメントの読み込みに失敗しました',
   'error.fallbackCommentPost': 'コメントの送信に失敗しました',
+  'error.fallbackCommentEdit': 'コメントの保存に失敗しました',
+  'error.fallbackCommentDelete': 'コメントの削除に失敗しました',
   'error.fallbackReport': '通報に失敗しました',
   'error.fallbackProfile': 'プロフィールの読み込みに失敗しました',
   'error.fallbackProfileSave': '保存に失敗しました',
@@ -133,6 +135,10 @@ export const ja: Record<MessageKey, string> = {
   'post.unlike': 'いいね取消',
   'post.like': 'いいね',
   'post.reply': '返信',
+  'post.permalink': '固定リンク',
+  'post.editedBadge': '編集済み',
+  'post.editContentLabel': '投稿内容',
+  'post.editMax': '最大 10000 文字',
 
   /* ==========================================================================
      comment
@@ -147,6 +153,10 @@ export const ja: Record<MessageKey, string> = {
   'comment.failed': 'コメントの送信に失敗しました。時間をおいてお試しください。',
   'comment.report': '通報',
   'comment.more': 'コメントをさらに読み込み中...',
+  'comment.editedBadge': '編集済み',
+  'comment.editContentLabel': 'コメント内容',
+  'comment.editFailed': 'コメントの保存に失敗しました。時間をおいてお試しください。',
+  'comment.deleteFailed': 'コメントの削除に失敗しました。時間をおいてお試しください。',
 
   /* ==========================================================================
      report
@@ -174,6 +184,12 @@ export const ja: Record<MessageKey, string> = {
   'newPost.publishing': '投稿中...',
   'newPost.uploading': '画像をアップロード中...',
   'newPost.failed': '投稿に失敗しました。時間をおいてお試しください。',
+  'newPost.imagePreviewAlt': 'アップロードする画像のプレビュー',
+  'newPost.draftNote': '下書きはこの端末に自動保存されます（本文のみ。選んだ画像は残りません）。',
+  'postPage.loading': '投稿を読み込んでいます...',
+  'postPage.missing': 'この投稿は削除されたか、リンクが正しくありません。',
+  'postPage.failed': '投稿の読み込みに失敗しました。時間をおいてお試しください。',
+  'postPage.label': '投稿',
 
   /* ==========================================================================
      profile
@@ -786,6 +802,8 @@ export const ja: Record<MessageKey, string> = {
   'posts.deleteConfirm': '投稿を削除',
   'posts.deleted': '投稿を削除しました。',
   'posts.deleteFailed': '投稿の削除に失敗しました。',
+  'posts.edited': '投稿を更新しました。',
+  'posts.editFailed': '投稿の保存に失敗しました。時間をおいてお試しください。',
   'posts.commentUpdated': 'コメントを更新しました。',
   'posts.commentActionFailed': 'コメントの操作に失敗しました。',
   'posts.pickPostTitle': 'コメントする投稿を選択',
@@ -912,6 +930,7 @@ export const ja: Record<MessageKey, string> = {
   'title.newPost': '新規投稿｜{site}',
   'title.profile': 'プロフィール｜{site}',
   'title.publicProfile': '公開プロフィール｜{site}',
+  'title.post': '投稿｜{site}',
   'title.following': 'フォロー｜{site}',
   'title.adminUsers': 'ユーザー管理｜{brand} 管理画面',
   'title.adminLogin': 'ログイン｜{brand} 管理画面',

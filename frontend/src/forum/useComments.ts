@@ -30,6 +30,8 @@ export interface CommentState {
   error: Message | string;
   draft: string;
   posting: boolean;
+  /** 正在執行的單則變更（編輯／刪除）的留言 id；null 代表沒有。 */
+  pendingId: number | null;
 }
 
 const CLOSED: CommentState = {
@@ -42,11 +44,14 @@ const CLOSED: CommentState = {
   error: '',
   draft: '',
   posting: false,
+  pendingId: null,
 };
 
 export interface UseCommentsOptions {
   /** 留言成功後通知呼叫端（用來把貼文的留言數 +1）。 */
   onPosted?: (postId: number) => void;
+  /** 刪除留言成功後通知呼叫端（用來把貼文的留言數 -1）。 */
+  onRemoved?: (postId: number) => void;
   /** 失敗訊息交給呼叫端呈現（頁面上的狀態列）。 */
   onError?: (message: Message | string) => void;
 }
@@ -61,9 +66,20 @@ export interface CommentsController {
   loadMore: (postId: number) => void;
   setDraft: (postId: number, value: string) => void;
   submit: (postId: number) => void;
+  /**
+   * 改掉一則留言的本文（就地替換該筆，不重抓整頁）。
+   *
+   * 回傳 Promise<boolean>，成功為 true：**失敗時保留輸入框是呼叫端的決定**，
+   * 而它只能從「有沒有成功」判斷。錯誤訊息在這裡就報給 onError（呼叫端已
+   * 翻譯好），但訊息報出去不代表呼叫端該丟掉使用者打的字 —— 回傳值才是
+   * 那個資訊的載體。
+   */
+  update: (postId: number, commentId: number, content: string) => Promise<boolean>;
+  /** 移除一則留言，並把該篇的留言數交給呼叫端減一。 */
+  remove: (postId: number, commentId: number) => void;
 }
 
-export function useComments({ onPosted, onError }: UseCommentsOptions = {}): CommentsController {
+export function useComments({ onPosted, onRemoved, onError }: UseCommentsOptions = {}): CommentsController {
   const [states, setStates] = useState<Record<number, CommentState>>({});
 
   // statesRef 是 states 的鏡像：事件處理器讀最新狀態時不必把它放進依賴陣列，
@@ -190,5 +206,87 @@ export function useComments({ onPosted, onError }: UseCommentsOptions = {}): Com
 
   const get = useCallback((postId: number) => statesRef.current[postId] ?? CLOSED, []);
 
-  return { states, get, toggle, loadMore, setDraft, submit };
+  /*
+   * 就地改一則留言。
+   *
+   * 刻意不重抓整頁：留言層是「展開才載入」的分頁列表，重抓會讓使用者看到
+   * 捲動位置跳回頂端 —— 而他剛剛只是改了一句話。成本因此全在這裡：
+   * 沒有人能替我們確認「伺服器存進去的字串就是我們送出的字串」，所以我們
+   * 採用與 handleForumComments 相同的規則（後端 TrimSpace 後才回，
+   * 而我們送出前也 TrimSpace），兩邊不會分歧。
+   */
+  const update = useCallback(
+    async (postId: number, commentId: number, content: string): Promise<boolean> => {
+      const base = statesRef.current[postId] ?? CLOSED;
+      const next = content.trim();
+      if (!next || base.pendingId !== null) return false;
+      patch(postId, { pendingId: commentId });
+      try {
+        await requestJSON(`/api/forum/posts/${postId}/comments/${commentId}`, {
+          method: 'PUT',
+          json: { content: next },
+          fallback: tr(msg('error.fallbackCommentEdit')),
+        });
+        const current = statesRef.current[postId] ?? CLOSED;
+        patch(postId, {
+          pendingId: null,
+          items: current.items.map((item) =>
+            item.id === commentId ? { ...item, content: next, edited: true } : item,
+          ),
+        });
+        return true;
+      } catch (error) {
+        patch(postId, { pendingId: null });
+        if (error instanceof LoginRequiredError) {
+          goToLogin();
+          return false;
+        }
+        onError?.(errorText(error, msg('comment.editFailed')));
+        return false;
+      }
+    },
+    [onError, patch],
+  );
+
+  /*
+   * 刪掉一則留言。
+   *
+   * 移除的是「已載入的那幾筆」，而不是重抓整頁：後端的 offset 分頁裡，從中間
+   * 抽掉一列之後畫面上會少一則，而「還有多少」這個資訊會在下一次 loadMore
+   * 用同一個 offset 讀到時自動補回（後端回的是依 created_at 排序的下一批，
+   * 少讀一列由 hasMore 的「湊滿一頁就推測還有下一頁」規則吸收）。
+   * 那個推測在這裡是安全的：它只會多載一次或一次空結果，不會漏讀。
+   */
+  const remove = useCallback(
+    (postId: number, commentId: number) => {
+      const base = statesRef.current[postId] ?? CLOSED;
+      if (base.pendingId !== null) return;
+      if (!base.items.some((item) => item.id === commentId)) return;
+      patch(postId, { pendingId: commentId });
+      void (async () => {
+        try {
+          await requestJSON(`/api/forum/posts/${postId}/comments/${commentId}`, {
+            method: 'DELETE',
+            fallback: tr(msg('error.fallbackCommentDelete')),
+          });
+          const current = statesRef.current[postId] ?? CLOSED;
+          patch(postId, {
+            pendingId: null,
+            items: current.items.filter((item) => item.id !== commentId),
+          });
+          onRemoved?.(postId);
+        } catch (error) {
+          patch(postId, { pendingId: null });
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
+          onError?.(errorText(error, msg('comment.deleteFailed')));
+        }
+      })();
+    },
+    [onError, onRemoved, patch],
+  );
+
+  return { states, get, toggle, loadMore, setDraft, submit, update, remove };
 }

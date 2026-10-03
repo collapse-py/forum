@@ -32,7 +32,7 @@ import { FollowButton } from './FollowButton';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, useAuth } from './shell';
 import { useComments } from './useComments';
-import { useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -219,6 +219,28 @@ export function OthersProfilePage() {
    * 頂部那顆面板按鈕與每張卡上的小鈕，而兩者的狀態都由同一個 follow
    * controller 與 profile.following 供應。
    */
+  /*
+   * 他人個人頁上理論上看不到自己的貼文（自己的在 /forum/profile），但這一頁
+   * 沒有「不顯示編輯鈕」的分支：isOwnPost 由 authorKey 與自己的金鑰比對決定，
+   * 而那一頁拿得到 selfKey（見上方 useFollow 的說明）。多加一個「這不是我的
+   * 頁面所以不給編輯」的條件只會是一個永遠為真的分支 —— 若真的出現自己的
+   * 貼文，讓它可編輯才是正確的行為。
+   */
+  const handleUpdate = useCallback(
+    async (post: ForumPost, content: string) => {
+      try {
+        const next = await updateForumPost(post.id, content);
+        patchPost(post.id, { content: next, edited: true });
+        setOk(msg('posts.edited'));
+      } catch (error) {
+        setFail(errorText(error, msg('posts.editFailed')));
+        // 見 FeedPage 的 handleUpdate：丟回去讓 PostCard 保留輸入框。
+        throw error;
+      }
+    },
+    [patchPost, setFail, setOk],
+  );
+
   const renderPost = (post: ForumPost) => (
     <PostCard
       key={post.id}
@@ -228,6 +250,7 @@ export function OthersProfilePage() {
       report={report}
       follow={follow}
       onLike={handleLike}
+      onUpdate={handleUpdate}
       onRequireLogin={goToLogin}
     />
   );

@@ -73,6 +73,10 @@ export const th: Record<MessageKey, string> = {
     'โหลดความคิดเห็นไม่สำเร็จ',
   'error.fallbackCommentPost':
     'ส่งความคิดเห็นไม่สำเร็จ',
+  'error.fallbackCommentEdit':
+    'บันทึกความคิดเห็นไม่สำเร็จ',
+  'error.fallbackCommentDelete':
+    'ลบความคิดเห็นไม่สำเร็จ',
   'error.fallbackReport':
     'รายงานไม่สำเร็จ',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const th: Record<MessageKey, string> = {
     'ถูกใจ',
   'post.reply':
     'ตอบกลับ',
+  'post.permalink':
+    'ลิงก์ถาวร',
+  'post.editedBadge':
+    'แก้ไขแล้ว',
+  'post.editContentLabel':
+    'เนื้อหาโพสต์',
+  'post.editMax':
+    'สูงสุด 10000 ตัวอักษร',
   'comment.loading':
     'กำลังโหลดความคิดเห็น...',
   'comment.none':
@@ -193,6 +205,14 @@ export const th: Record<MessageKey, string> = {
     'รายงาน',
   'comment.more':
     'โหลดความคิดเห็นเพิ่มเติม...',
+  'comment.editedBadge':
+    'แก้ไขแล้ว',
+  'comment.editContentLabel':
+    'เนื้อหาความคิดเห็น',
+  'comment.editFailed':
+    'บันทึกความคิดเห็นไม่สำเร็จ โปรดลองใหม่ภายหลัง',
+  'comment.deleteFailed':
+    'ลบความคิดเห็นไม่สำเร็จ โปรดลองใหม่ภายหลัง',
   'report.reasonPlaceholder':
     'กรุณากรอกเหตุผลรายงาน (สูงสุด 500 ตัวอักษร)',
   'report.note':
@@ -227,6 +247,18 @@ export const th: Record<MessageKey, string> = {
     'กำลังอัปโหลดภาพ...',
   'newPost.failed':
     'เผยแพร่ไม่สำเร็จ ให้ลองใหม่ภายหลัง',
+  'newPost.imagePreviewAlt':
+    'ตัวอย่างรูปภาพที่จะอัปโหลด',
+  'newPost.draftNote':
+    'ร่างจะถูกบันทึกอัตโนมัติในอุปกรณ์นี้ (เฉพาะข้อความ รูปภาพที่เลือกจะไม่ถูกเก็บไว้)',
+  'postPage.loading':
+    'กำลังโหลดโพสต์...',
+  'postPage.missing':
+    'โพสต์นี้อาจถูกลบไปแล้ว หรือลิงก์ไม่ถูกต้อง',
+  'postPage.failed':
+    'โหลดโพสต์ไม่สำเร็จ โปรดลองใหม่ภายหลัง',
+  'postPage.label':
+    'โพสต์',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const th: Record<MessageKey, string> = {
     'ลบโพสต์แล้ว',
   'posts.deleteFailed':
     'ลบโพสต์ไม่สำเร็จ',
+  'posts.edited':
+    'อัปเดตโพสต์แล้ว',
+  'posts.editFailed':
+    'บันทึกโพสต์ไม่สำเร็จ โปรดลองใหม่ภายหลัง',
   'posts.commentUpdated':
     'อัปเดตความเห็นแล้ว',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const th: Record<MessageKey, string> = {
     'โปรไฟล์บุคคล｜{site}',
   'title.publicProfile':
     'โปรไฟล์สาธารณะ｜{site}',
+  'title.post':
+    'โพสต์｜{site}',
   'title.following':
     'กำลังติดตาม｜{site}',
   'title.adminUsers':

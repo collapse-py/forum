@@ -52,6 +52,8 @@ export const zhCN: Record<MessageKey, string> = {
   'error.fallbackLike': '点赞失败',
   'error.fallbackComments': '评论加载失败',
   'error.fallbackCommentPost': '评论失败',
+  'error.fallbackCommentEdit': '评论保存失败',
+  'error.fallbackCommentDelete': '评论删除失败',
   'error.fallbackReport': '举报失败',
   'error.fallbackProfile': '读取个人资料失败',
   'error.fallbackProfileSave': '保存失败',
@@ -134,6 +136,10 @@ export const zhCN: Record<MessageKey, string> = {
   'post.unlike': '取消点赞',
   'post.like': '点赞',
   'post.reply': '回复',
+  'post.permalink': '永久链接',
+  'post.editedBadge': '已编辑',
+  'post.editContentLabel': '帖子内容',
+  'post.editMax': '最多 10000 字',
 
   /* ==========================================================================
      comment
@@ -148,6 +154,10 @@ export const zhCN: Record<MessageKey, string> = {
   'comment.failed': '评论失败，请稍后再试。',
   'comment.report': '举报',
   'comment.more': '加载更多评论...',
+  'comment.editedBadge': '已编辑',
+  'comment.editContentLabel': '评论内容',
+  'comment.editFailed': '评论保存失败，请稍后再试。',
+  'comment.deleteFailed': '评论删除失败，请稍后再试。',
 
   /* ==========================================================================
      report
@@ -175,6 +185,12 @@ export const zhCN: Record<MessageKey, string> = {
   'newPost.publishing': '发布中...',
   'newPost.uploading': '图片上传中...',
   'newPost.failed': '发布失败，请稍后再试。',
+  'newPost.imagePreviewAlt': '待上传的图片预览',
+  'newPost.draftNote': '草稿会自动保存在这台设备上（只有文字，选好的图片不会保留）。',
+  'postPage.loading': '帖子加载中...',
+  'postPage.missing': '这篇帖子可能已被删除，或链接不正确。',
+  'postPage.failed': '帖子加载失败，请稍后再试。',
+  'postPage.label': '帖子',
 
   /* ==========================================================================
      profile
@@ -787,6 +803,8 @@ export const zhCN: Record<MessageKey, string> = {
   'posts.deleteConfirm': '删除帖子',
   'posts.deleted': '帖子已删除。',
   'posts.deleteFailed': '删除帖子失败。',
+  'posts.edited': '帖子已更新。',
+  'posts.editFailed': '帖子保存失败，请稍后再试。',
   'posts.commentUpdated': '评论已更新。',
   'posts.commentActionFailed': '评论操作失败。',
   'posts.pickPostTitle': '选择评论所属的帖子',
@@ -915,6 +933,7 @@ export const zhCN: Record<MessageKey, string> = {
   'title.newPost': '新增帖子｜{site}',
   'title.profile': '个人资料｜{site}',
   'title.publicProfile': '公开个人资料｜{site}',
+  'title.post': '帖子｜{site}',
   'title.following': '关注｜{site}',
   'title.adminUsers': '用户管理｜{brand} 后台',
   'title.adminLogin': '登录｜{brand} 后台',

@@ -372,6 +372,24 @@ body {
 }
 
 /*
+ * 「已編輯」標記（src/forum/PostCard.tsx，貼文與留言共用）。
+ *
+ * 刻意比 .pinned 更弱：它沒有框線、只用 muted 色。理由是兩者的嚴重程度
+ * 不同 —— 置頂是站方對這篇文章的處置，而「已編輯」是作者自己做的更正。
+ * 讓更正看起來像一個需要被注意的狀態，只會鼓勵人把「作者修正了錯字」誤讀成
+ * 「這篇文章有問題」。
+ *
+ * 位置在 <time> 之後（見 PostCard 的 .post-meta）：時間說的是「這段話什麼時候
+ * 說的」，已編輯說的是「它之後被改過」，後者發生在前者之後。
+ */
+.edited-badge {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/*
  * 個人資料頁的外框。這一組同時出現在 /forum/profile（自己的資料，可編輯）與
  * /forum/others-profile（公開資料，唯讀），因此是共用樣式；只有「編輯」與
  * 「唯讀內容」本身分別寫在那兩頁的 <style> 裡。
@@ -810,6 +828,10 @@ body {
   font-size: 14px;
   text-align: left;
   cursor: pointer;
+  /* 同時服務 <button> 與 <a>：選單裡的「永久連結」是一個連結而不是一個
+     動作（它導向 /forum/post/{id}，那裡的網址就是可分享的位址）。沒有這行時
+     它的底線會與其他選單項看起來不是同一套東西。 */
+  text-decoration: none;
 }
 
 .post-menu__item:hover {
@@ -820,8 +842,34 @@ body {
   color: #b42318;
 }
 
-.comment-report-button:hover {
+.comment-report-button:hover,
+.comment-action-button:hover {
   color: var(--text);
+}
+
+/*
+ * 留言列右側的動作群組（編輯／刪除／檢舉）。
+ *
+ * 存在的理由：.comment-report-button 原本自己帶 margin-left:auto，把整列
+ * 推到右側。加入第二、第三顆按鈕之後那個 auto 會讓第一顆被推出去，因此把
+ * 「靠右」這件事交給群組，按鈕自己只負責外觀。
+ *
+ * 三顆按鈕共用 .comment-action-button 的外觀（沿用 .comment-report-button 的
+ * 那一組規則），因為它們在這裡是同一種東西：一列裡的細部動作。危險動作
+ * （刪除）另外加 --danger 換成紅色，與貼文 ⋯ 選單裡的 .post-menu__item--danger
+ * 是同一套語意 —— 不可復原的動作不該看起來和可復原的一樣。
+ */
+.comment-actions {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* 群組內把按鈕自己的靠右抵消掉（選擇器權重 0,2,0 贏過 .comment-report-button
+   的 0,1,0），否則第一顆按鈕會被推離群組。 */
+.comment-actions .comment-report-button {
+  margin-left: 0;
 }
 
 .post h2 {
@@ -1034,7 +1082,8 @@ body {
   font-size: 11px;
 }
 
-.comment-report-button {
+.comment-report-button,
+.comment-action-button {
   margin-left: auto;
   padding: 0;
   border: 0;
@@ -1043,6 +1092,10 @@ body {
   font: inherit;
   font-size: 11px;
   cursor: pointer;
+}
+
+.comment-action-button--danger {
+  color: #b42318;
 }
 
 .comment p {
@@ -1097,6 +1150,24 @@ body {
   align-items: center;
   justify-content: space-between;
   margin-top: 8px;
+}
+
+/*
+ * 貼文的就地編輯表單（src/forum/PostCard.tsx）。
+ *
+ * 底層沿用 .comment-form 的那組規則（方角輸入框、頁尾一列），因此這裡只宣告
+ * 差異：左邊界要對齊貼文本文（.post p 用的是 margin-inline: 50px 0），而輸入
+ * 框要有一篇文章的高度。刻意不另寫一整套外觀 —— 同一個站台裡「一個文字框
+ * 加取消／儲存」有三個位置（留言、檢舉、貼文編輯），它們看起來必須一樣。
+ */
+.post-edit-form {
+  margin: 0 0 12px 50px;
+}
+
+.post-edit-form textarea {
+  min-height: 140px;
+  font-size: 15px;
+  line-height: 1.65;
 }
 
 /* --- 列表狀態 ----------------------------------------------------------- */

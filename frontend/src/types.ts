@@ -672,6 +672,8 @@ export interface ForumPost {
   liked?: boolean;
   /** 管理員是否置頂這一篇。省略未置頂的（見後端 forumPost 的說明）。 */
   pinned?: boolean;
+  /** 作者是否編輯過這一篇。省略未編輯的（後端同樣用 omitempty）。 */
+  edited?: boolean;
   likeCount?: number;
   commentCount?: number;
   [key: string]: unknown;
@@ -683,7 +685,22 @@ export interface ForumComment {
   authorKey?: string;
   content: string;
   createdAt?: string;
+  /** 作者是否編輯過這一則。省略未編輯的。 */
+  edited?: boolean;
   [key: string]: unknown;
+}
+
+/**
+ * GET /api/forum/posts/{id}（永久連結頁的唯一資料來源）。
+ *
+ * 刻意包在 item 裡而不是直接回傳貼文物件：那樣一來「這篇不存在」就只能回 404
+ * 或空物件，而兩者在呼叫端會變成兩條錯誤路徑。包起來之後 404 有自己的意義
+ * （連結是舊的），而成功路徑的形狀也和其他列表端點的 items[] 一致。
+ *
+ * 沒有 hasMore：單篇沒有下一頁。
+ */
+export interface PostDetailResponse {
+  item?: ForumPost;
 }
 
 /** GET /api/forum/profile、GET /api/forum/public-profile */

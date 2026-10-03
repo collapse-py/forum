@@ -73,6 +73,10 @@ export const vi: Record<MessageKey, string> = {
     'Tải bình luận không thành công',
   'error.fallbackCommentPost':
     'Gửi bình luận không thành công',
+  'error.fallbackCommentEdit':
+    'Lưu bình luận không thành công',
+  'error.fallbackCommentDelete':
+    'Xóa bình luận không thành công',
   'error.fallbackReport':
     'Báo cáo không thành công',
   'error.fallbackProfile':
@@ -175,6 +179,14 @@ export const vi: Record<MessageKey, string> = {
     'Thích',
   'post.reply':
     'Trả lời',
+  'post.permalink':
+    'Liên kết cố định',
+  'post.editedBadge':
+    'đã sửa',
+  'post.editContentLabel':
+    'Nội dung bài viết',
+  'post.editMax':
+    'Tối đa 10000 ký tự',
   'comment.loading':
     'Đang tải bình luận...',
   'comment.none':
@@ -193,6 +205,14 @@ export const vi: Record<MessageKey, string> = {
     'Báo cáo',
   'comment.more':
     'Tải thêm bình luận...',
+  'comment.editedBadge':
+    'đã sửa',
+  'comment.editContentLabel':
+    'Nội dung bình luận',
+  'comment.editFailed':
+    'Lưu bình luận không thành công, vui lòng thử lại sau.',
+  'comment.deleteFailed':
+    'Xóa bình luận không thành công, vui lòng thử lại sau.',
   'report.reasonPlaceholder':
     'Nhập lý do báo cáo (đa 500 ký tự)',
   'report.note':
@@ -227,6 +247,18 @@ export const vi: Record<MessageKey, string> = {
     'Đang tải ảnh lên...',
   'newPost.failed':
     'Đăng bài không thành công, vui lòng thử lại sau.',
+  'newPost.imagePreviewAlt':
+    'Xem trước hình ảnh sẽ tải lên',
+  'newPost.draftNote':
+    'Bản nháp được lưu tự động trên thiết bị này (chỉ văn bản; hình ảnh đã chọn không được giữ lại).',
+  'postPage.loading':
+    'Đang tải bài viết...',
+  'postPage.missing':
+    'Bài viết này có thể đã bị xóa, hoặc liên kết không đúng.',
+  'postPage.failed':
+    'Tải bài viết không thành công, vui lòng thử lại sau.',
+  'postPage.label':
+    'Bài viết',
   'profile.eyebrow':
     'YOUR PROFILE',
   'profile.title':
@@ -1006,6 +1038,10 @@ export const vi: Record<MessageKey, string> = {
     'Bài viết đã bị xóa.',
   'posts.deleteFailed':
     'Xóa bài viết thất bại.',
+  'posts.edited':
+    'Đã cập nhật bài viết.',
+  'posts.editFailed':
+    'Lưu bài viết không thành công, vui lòng thử lại sau.',
   'posts.commentUpdated':
     'Bình luận đã được cập nhật.',
   'posts.commentActionFailed':
@@ -1229,6 +1265,8 @@ export const vi: Record<MessageKey, string> = {
     'Hồ sơ cá nhân｜{site}',
   'title.publicProfile':
     'Hồ sơ cá nhân công khai｜{site}',
+  'title.post':
+    'Bài viết｜{site}',
   'title.following':
     'Đang theo dõi｜{site}',
   'title.adminUsers':

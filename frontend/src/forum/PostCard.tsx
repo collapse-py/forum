@@ -29,6 +29,18 @@ function authorURL(authorKey: string | undefined): string {
   return `/forum/others-profile?user=${encodeURIComponent(authorKey || '')}`;
 }
 
+/**
+ * 這篇文章的永久連結。
+ *
+ * 絕對網址（含目前來源）而不是相對路徑：這一頁的分享動作（貼到別處）拿到
+ * 的應該是可以直接點的完整位址。index.html 那一頁沒有可用的 id，因此這裡
+ * 不用 location.origin 組字串 —— 直接讀 window.location.origin，它在 PWA
+ * 的 standalone 模式下同樣正確。
+ */
+export function postPermalink(postId: number): string {
+  return `${window.location.origin}/forum/post/${postId}`;
+}
+
 export interface PostCardProps {
   post: ForumPost;
   canInteract: boolean;
@@ -37,6 +49,18 @@ export interface PostCardProps {
   follow: FollowController;
   onLike: (post: ForumPost) => void;
   onDelete?: ((post: ForumPost) => Promise<void>) | undefined;
+  /**
+   * 儲存編輯後的貼文本文（必填，理由見 PostCard 檔內「就地編輯」的說明）。
+   *
+   * 刻意不像 onDelete 那樣是選填：改完之後畫面上必須換成新內容，而那一筆
+   * 資料住在頁面的列表狀態裡。讓它可選會得到一個「編輯成功但畫面還是舊的」
+   * 的型別允許的缺陷，而那種缺陷不會出現在任何 console 或狀態碼裡。
+   *
+   * 與 onDelete 相反的一條契約：**失敗時必須丟出例外**（成功時 resolve）。
+   * PostCard 用它決定要不要關掉編輯框 —— 失敗就關掉的話，使用者剛打的字就
+   * 消失了，而伺服器上仍然是舊內容，也就是一次「白打」。
+   */
+  onUpdate: (post: ForumPost, content: string) => Promise<void>;
   onRequireLogin: () => void;
   /**
    * 切換追蹤成功後的頁面層副作用（可選）。
@@ -49,13 +73,17 @@ export interface PostCardProps {
   onFollowChanged?: ((userKey: string, following: boolean) => void) | undefined;
 }
 
-export function PostCard({ post, canInteract, comments, report, follow, onLike, onDelete, onRequireLogin, onFollowChanged }: PostCardProps) {
+export function PostCard({ post, canInteract, comments, report, follow, onLike, onDelete, onUpdate, onRequireLogin, onFollowChanged }: PostCardProps) {
   const state = comments.get(post.id);
   const listRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
   const [deleting, setDeleting] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
 
   /*
    * useComments() 回傳的 controller 每次渲染都是新的物件字面值，因此不能整包
@@ -126,12 +154,71 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
   const followable = authorKey !== '' && !follow.isSelf(authorKey);
   const isOwnPost = authorKey !== '' && follow.isSelf(authorKey);
 
+  /*
+   * 就地編輯。
+   *
+   * 兩段狀態分開是刻意的：editing 代表「畫面上有沒有一個輸入框」，draft 代表
+   * 「輸入框裡有什麼」。合併成一個布林會讓「開始編輯」必須同時把 draft 設成
+   * 原文 —— 而原文是 post.content，一份會隨列表更新而變動的資料；使用者打到
+   *一半時若有任何一項 patch（別人按讚）觸發重繪，draft 就會被原文蓋掉。
+   *
+   * 焦點交給輸入框：編輯是一個要打字的動作，不給焦點等於使用者還要再按一次
+   * 才開始。maxLength 與後端的 10000 字上限一致（後端仍會再驗一次 —— 前端
+   * 的限制是給使用者的提示，不是授權）。
+   */
+  const startEditing = () => {
+    setDraft(text(post.content));
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setEditing(false);
+    setDraft('');
+  };
+
+  useEffect(() => {
+    if (editing) editRef.current?.focus();
+  }, [editing]);
+
+  /*
+   * 儲存自己的貼文。
+   *
+   * 失敗時**不關掉輸入框**，而成功時才換回純文字。這是 onUpdate 必須回報
+   * 成功與否的原因：關掉失敗的編輯框等於讓使用者剛打的字消失，而他很可能
+   * 只是遇到一次網路失敗、想按重試。
+   */
+  const saveEditing = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const content = draft.trim();
+    if (!content || saving) return;
+    void (async () => {
+      setSaving(true);
+      try {
+        await onUpdate(post, content);
+        setEditing(false);
+        setDraft('');
+      } catch {
+        /* 失敗訊息由頁面層的狀態列呈現（每一頁都已把錯誤翻譯好）。 */
+      } finally {
+        setSaving(false);
+      }
+    })();
+  };
+
   const handlePostAction = (value: string) => {
     setMenuOpen(false);
     menuButtonRef.current?.focus();
     if (value === 'report') {
       if (canInteract) report.start(postTarget);
       else onRequireLogin();
+      return;
+    }
+    if (value === 'edit') {
+      if (!canInteract) {
+        onRequireLogin();
+        return;
+      }
+      startEditing();
       return;
     }
     if (value !== 'delete' || !onDelete || !isOwnPost) return;
@@ -150,6 +237,27 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
       }
     })();
   };
+
+  /*
+   * ⋯ 選單裡有哪幾項，是「這張卡現在能做什麼」的直接呈現，因此清單在這裡
+   * 組出來而不是散在 JSX 的條件裡：三個條件（能不能互動、是不是自己的、
+   * 有沒有 onDelete）會讓選單的長度隨這張卡的狀態變化，而那正是使用者要靠
+   * 「我現在能做什麼」來理解的。
+   *
+   * aria-label 因此不能只寫「檢舉」：它是這顆按鈕唯一的可讀名稱，螢幕閱讀器
+   * 使用者不會看到畫面上的清單。刻意用逗號串接而不是加一句「選單」兩字 ——
+   * 後者不告訴他們會有什麼動作。
+   */
+  const menuActions: { value: string; label: string; danger?: boolean }[] = [
+    { value: 'report', label: t('post.report') },
+  ];
+  if (isOwnPost) {
+    menuActions.push({ value: 'edit', label: t('common.edit') });
+  }
+  if (isOwnPost && onDelete) {
+    menuActions.push({ value: 'delete', label: t('posts.deleteConfirm'), danger: true });
+  }
+  const menuLabel = menuActions.map((action) => action.label).join(', ');
 
   return (
     <article className="post">
@@ -218,13 +326,19 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
           <span className="post-meta">
             {post.pinned ? <span className="pinned">{t('announce.pinnedBadge')}</span> : null}
             <time>{formatDateTime(post.createdAt)}</time>
+            {/*
+              「已編輯」只在後端真的回傳 edited 時出現：那是「這段話被改過」的
+              事實，不是推測。刻意放在時間之後（時間是發表時間，編輯發生在其後），
+              而且不用徽章外框 —— 理由見 style.css 的 .edited-badge 說明。
+            */}
+            {post.edited ? <span className="edited-badge">{t('post.editedBadge')}</span> : null}
           </span>
         </div>
         <div className="post-menu" ref={menuRef}>
           <button
             className="more-button"
             type="button"
-            aria-label={isOwnPost && onDelete ? `${t('post.report')}, ${t('posts.deleteConfirm')}` : t('post.report')}
+            aria-label={menuLabel}
             aria-expanded={menuOpen}
             aria-controls={`post-actions-${post.id}`}
             disabled={deleting}
@@ -235,24 +349,60 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
           </button>
           {menuOpen ? (
             <div className="post-menu__panel" id={`post-actions-${post.id}`}>
-              <button className="post-menu__item" type="button" onClick={() => handlePostAction('report')}>
-                {t('post.report')}
-              </button>
-              {isOwnPost && onDelete ? (
+              {/*
+                「永久連結」是一個 <a> 而不是一個按鈕：它的行為是導向
+                /forum/post/{id}，而那個頁面的網址就是可以直接分享的位址。
+                刻意不做「複製到剪貼簿」—— 那需要 clipboard 權限、在不支援的
+                瀏覽器上要再 fallback，而這一頁的存在已經讓「取得連結」變成
+                兩次點擊（⋯ → 永久連結，然後複製網址列）且沒有任何失敗狀態。
+              */}
+              <a className="post-menu__item" href={postPermalink(post.id)}>
+                {t('post.permalink')}
+              </a>
+              {menuActions.map((action) => (
                 <button
-                  className="post-menu__item post-menu__item--danger"
+                  key={action.value}
+                  className={`post-menu__item${action.danger ? ' post-menu__item--danger' : ''}`}
                   type="button"
-                  onClick={() => handlePostAction('delete')}
+                  onClick={() => handlePostAction(action.value)}
                 >
-                  {t('posts.deleteConfirm')}
+                  {action.label}
                 </button>
-              ) : null}
+              ))}
             </div>
           ) : null}
         </div>
       </div>
 
-      <p>{text(post.content)}</p>
+      {/*
+        本文與編輯表單是同一個位置的兩種狀態，切換用條件渲染而不是 CSS：
+        兩者的 DOM 差異大到（一個是 <p>、一個是 <form> + <textarea>）共用的
+        class 無法把它們收斂成同一組規則，而 DOM 裡同時存在兩份內容會讓
+        螢幕閱讀器讀到重複的段落。
+      */}
+      {editing ? (
+        <form className="comment-form post-edit-form" onSubmit={saveEditing}>
+          <textarea
+            ref={editRef}
+            maxLength={10000}
+            required
+            value={draft}
+            aria-label={t('post.editContentLabel')}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <div className="comment-form-footer">
+            <span className="composer-note">{t('post.editMax')}</span>
+            <button className="ghost-button" type="button" onClick={cancelEditing}>
+              {t('common.cancel')}
+            </button>
+            <button className="submit-button" type="submit" disabled={saving}>
+              {saving ? t('common.submitting') : t('common.save')}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <p>{text(post.content)}</p>
+      )}
 
       {post.imageUrl ? (
         <img className="post-image" src={post.imageUrl} alt={t('post.imageAlt')} loading="lazy" />
@@ -304,6 +454,17 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
               postId={post.id}
               canInteract={canInteract}
               report={report}
+              /*
+                「是不是我的留言」用 follow.isSelf 判斷，與上面判斷自己的貼文
+                用的是同一個函式 —— 它比對的是後端 publicForumKey(email) 算出來
+                的 authorKey，而這裡的 comment.authorKey 是同一個值。
+                （posts.editable 一類的旗標不存在：公開 API 不會回「這則留言
+                是你的」，因為那等於把「這個金鑰等於我」送到每一個讀取端點。）
+              */
+              isOwn={follow.isSelf(text(comment.authorKey))}
+              pending={state.pendingId === comment.id}
+              onUpdate={(commentId, content) => comments.update(post.id, commentId, content)}
+              onRemove={(commentId) => comments.remove(post.id, commentId)}
               onRequireLogin={onRequireLogin}
             />
           ))}
@@ -348,15 +509,57 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
 
 interface CommentProps {
   comment: ForumComment;
-  /** 檢舉留言的端點是 /api/forum/posts/{postId}/comments/report，因此需要父層的 id。 */
+  /** 檢舉、編輯與刪除留言的端點都在 /api/forum/posts/{postId}/comments/{cid} 之下，因此需要父層的 id。 */
   postId: number;
   canInteract: boolean;
   report: ReportController;
+  /** 「是不是我的留言」由頁面層決定：PostCard 自己沒有帳號資訊。 */
+  isOwn: boolean;
+  pending: boolean;
+  /** 改掉一則留言；回傳是否成功（見 useComments 的 update 說明）。 */
+  onUpdate: (commentId: number, content: string) => Promise<boolean>;
+  onRemove: (commentId: number) => void;
   onRequireLogin: () => void;
 }
 
-function Comment({ comment, postId, canInteract, report, onRequireLogin }: CommentProps) {
+function Comment({ comment, postId, canInteract, report, isOwn, pending, onUpdate, onRemove, onRequireLogin }: CommentProps) {
   const target: ReportTarget = { kind: 'comment', postId, commentId: comment.id };
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const editRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (editing) editRef.current?.focus();
+  }, [editing]);
+
+  /*
+   * 只有真的存成才關掉編輯框（理由與貼文的 saveEditing 相同）：失敗時關掉的話，
+   * 使用者剛打的字就消失了，而伺服器上仍是舊的留言 —— 那是一次白打。
+   * useComments.update 回傳的 boolean 就是這件事的唯一資訊來源。
+   */
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const content = draft.trim();
+    if (!content || pending) return;
+    void onUpdate(comment.id, content).then((saved) => {
+      if (!saved) return;
+      setEditing(false);
+      setDraft('');
+    });
+  };
+
+  /*
+   * 刪除留言不可復原，因此沿用貼文刪除的同一個確認框。刻意共用同一組文案
+   * 鍵（posts.deleteCommentTitle / deleteCommentMessage）而不是各自寫一份：
+   * 「這會永久消失」這句話在兩個地方出現，只會有其中一個被日後改掉。
+   */
+  const confirmDelete = () => {
+    const ok = window.confirm(
+      `${t('posts.deleteCommentTitle', { id: comment.id })}\n\n${t('posts.deleteCommentMessage')}`,
+    );
+    if (ok) onRemove(comment.id);
+  };
+
   return (
     <div className="comment">
       <div className="comment-head">
@@ -364,15 +567,62 @@ function Comment({ comment, postId, canInteract, report, onRequireLogin }: Comme
           {text(comment.author)}
         </a>
         <time>{formatDateTime(comment.createdAt)}</time>
-        <button
-          className="comment-report-button"
-          type="button"
-          onClick={() => (canInteract ? report.start(target) : onRequireLogin())}
-        >
-          {t('comment.report')}
-        </button>
+        {comment.edited ? <span className="edited-badge">{t('comment.editedBadge')}</span> : null}
+        <div className="comment-actions">
+          {isOwn ? (
+            <button
+              className="comment-action-button"
+              type="button"
+              onClick={() => {
+                setDraft(text(comment.content));
+                setEditing(true);
+              }}
+            >
+              {t('common.edit')}
+            </button>
+          ) : null}
+          {isOwn ? (
+            <button
+              className="comment-action-button comment-action-button--danger"
+              type="button"
+              disabled={pending}
+              onClick={confirmDelete}
+            >
+              {t('common.delete')}
+            </button>
+          ) : null}
+          <button
+            className="comment-report-button"
+            type="button"
+            onClick={() => (canInteract ? report.start(target) : onRequireLogin())}
+          >
+            {t('comment.report')}
+          </button>
+        </div>
       </div>
-      <p>{text(comment.content)}</p>
+      {editing ? (
+        <form className="comment-form" onSubmit={submit}>
+          <textarea
+            ref={editRef}
+            maxLength={2000}
+            required
+            value={draft}
+            aria-label={t('comment.editContentLabel')}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <div className="comment-form-footer">
+            <span className="composer-note">{t('comment.max')}</span>
+            <button className="ghost-button" type="button" onClick={() => setEditing(false)}>
+              {t('common.cancel')}
+            </button>
+            <button className="submit-button" type="submit" disabled={pending}>
+              {pending ? t('common.submitting') : t('common.save')}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <p>{text(comment.content)}</p>
+      )}
       {report.isTarget(target) ? <ReportComposer report={report} /> : null}
     </div>
   );

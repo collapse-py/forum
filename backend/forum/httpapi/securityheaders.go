@@ -121,6 +121,7 @@ var frontendShellFiles = []string{
 	"forum-profile.html",
 	"forum-others-profile.html",
 	"forum-following.html",
+	"forum-post.html",
 	"admin.html",
 	"forum-admin.html",
 	"forum-report.html",
