@@ -27,9 +27,9 @@ package httpapi
 
   依賴這個決定的是一條不變條件：**每一條會改變資料的路徑都必須呼叫它**。
   稽核端點也要寫入（稽核紀錄本身是資料），因此同樣要求來源檢查。目前全站共
-  29 處 `!s.isTrustedOrigin(r)` 守衛（27 處獨立成行的 `if !s.isTrustedOrigin(r) {`，
+  30 處 `!s.isTrustedOrigin(r)` 守衛（28 處獨立成行的 `if !s.isTrustedOrigin(r) {`，
   另有 2 處與 method 檢查合併成同一個條件），涵蓋公告、置頂、IP 封鎖、session
-  撤銷、批次操作、關注與後臺 CRUD。
+  撤銷、批次操作、關注、圖片 token 釋放與後臺 CRUD。
   新增寫入端點時漏掉這一行的症狀是「CSRF 防護失效但沒有任何錯誤」—— 因此
   這個清單靠程式碼審查維持，而不是靠型別。
 

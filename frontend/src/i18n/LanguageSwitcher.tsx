@@ -107,7 +107,7 @@ export function LanguageSwitcher({ variant }: LanguageSwitcherProps) {
    *
    * 這裡有一個容易漏掉的例外：選單本身在語言變多之後會變高（十七種語言 × 每項
    * 34px ≈ 578px，遠超過小螢幕），因此 max-height + overflow-y 讓它自己會捲動。
-   * 而 scroll 監聽掛在 window 上且用 capture 階段，選單內部的捲動事件也會被收��
+   * 而 scroll 監聽掛在 window 上且用 capture 階段，選單內部的捲動事件也會被收到
    * —— 沒有這個判斷，使用者想看完清單底部就會發現選單自己關了。
    * 判斷 event.target 是最直接的：自己捲自己不算「頁面在動」。
    */

@@ -579,6 +579,13 @@ func (s *Server) handleForumImageTokensRelease(w http.ResponseWriter, r *http.Re
 		methodNotAllowed(w)
 		return
 	}
+	// 這條路徑也會改變狀態（下面對 mediaRedis 執行 DEL），因此依 csrf.go 的不變
+	// 條件必須驗來源。sendBeacon 與 fetch 送出的 POST 都帶 Origin，因此這個
+	// 檢查擋不到前端自己的正常使用，只擋得掉跨站呼叫。
+	if !s.isTrustedOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
 	if s.mediaRedis == nil {
 		// 沒有 Redis 就無從談釋放，語意等同全部過期，不該報錯打斷前端流程。
 		internalError(w, "media token service unavailable")

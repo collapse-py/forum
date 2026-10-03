@@ -464,7 +464,7 @@ export interface ForumAnnouncementResponse {
  * 而這個專案的多語系是介面層的（見 src/i18n）。圍著它的那些文字（標題、
  * 關閉鈕、發佈時間）才走 i18n。
  *
- * 新��以 \n 分隔（本站沒有富文字編輯器，textarea 的換行會原樣送出）。
+ * 新聞以 \n 分隔（本站沒有富文字編輯器，textarea 的換行會原樣送出）。
  */
 export interface ForumAnnouncement {
   body: string;
@@ -534,7 +534,7 @@ export interface BatchResult {
  * 「現在是什麼」（總數、清單、待裁決的佇列），這裡是「變成這樣多久了」。
  *
  * `series` 的三個數字陣列與 `dates` **等長且同序**：連沒有資料的日子都在
- * 陣列裡（值為 0）。刻意不做成稀疏 —��� 圖上缺一格和「那天真的是零」是兩件
+ * 陣列裡（值為 0）。刻意不做成稀疏 —— 圖上缺一格和「那天真的是零」是兩件
  * 不同的事，而稀疏的表示會讓前者看起來像後者。
  */
 export interface ContentStatsResponse {

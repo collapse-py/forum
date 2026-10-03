@@ -396,7 +396,7 @@ func TestGetUserEmailRequiresCode(t *testing.T) {
 		if email != "" {
 			t.Errorf("query=%q 時回傳 email=%q，want 空字串（失敗時不可回傳身分）", query, email)
 		}
-		// 錯誤訊息刻意不帶上游內容，因此不可���包含 Google 的錯誤字串。
+		// 錯誤訊息刻意不帶上游內容，因此不可能包含 Google 的錯誤字串。
 		if strings.Contains(err.Error(), "access_denied") {
 			t.Errorf("錯誤訊息洩漏了上游內容: %v", err)
 		}

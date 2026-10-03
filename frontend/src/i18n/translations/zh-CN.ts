@@ -613,7 +613,7 @@ export const zhCN: Record<MessageKey, string> = {
   'announce.pinnedBadge': '置顶',
   'announce.title': '站内公告',
   'announce.eyebrow': 'ANNOUNCEMENTS',
-  'announce.copy': '在���站最上方显示一条公告。同一时间只有一条生效 —— 发布新公告会自动停用旧的。',
+  'announce.copy': '在网站最上方显示一条公告。同一时间只有一条生效 —— 发布新公告会自动停用旧的。',
   'announce.refresh': '刷新',
   'announce.loadFailed': '公告清单加载失败。',
   'announce.new': '发布新公告',

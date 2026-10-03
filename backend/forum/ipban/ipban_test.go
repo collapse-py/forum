@@ -39,7 +39,7 @@ import (
 
 // newTestStore 建立一個有假時鐘的 Store，回傳可推進的時鐘。
 //
-// 假時鐘是必��的：過期判定的正確性完全取決於 score 與「現在」的比較，而用
+// 假時鐘是必須的：過期判定的正確性完全取決於 score 與「現在」的比較，而用
 // 真實時鐘就只能靠 sleep 去等一個邊界 —— 那是這個測試最不能接受的慢。
 func newTestStore(t *testing.T) (*Store, *time.Time, *miniredis.Miniredis) {
 	t.Helper()

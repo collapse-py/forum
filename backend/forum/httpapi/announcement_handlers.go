@@ -257,7 +257,7 @@ type announcementRequest struct {
 // normalizeAnnouncement 修剪並驗證一則公告，回傳整理後的值與到期時間。
 //
 // expires 用「幾小時後」而不是絕對時間戳：管理員在後臺填的是「這個公告
-// 三天後失效」而不是精確到分鐘的時���，而絕對時間戳在跨時區的後臺與
+// 三天後失效」而不是精確到分鐘的時間，而絕對時間戳在跨時區的後臺與
 // 絕大多數瀏覽者之間是一個容易出錯的單位轉換。
 func normalizeAnnouncement(body string, hours int) (string, sql.NullTime, error) {
 	trimmed := strings.TrimSpace(body)
@@ -474,7 +474,7 @@ func (s *Server) handleAdminPostOrPin(w http.ResponseWriter, r *http.Request) {
 // handleAdminPostPin 置頂或取消置頂一篇文章。
 //
 // POST（而非 PATCH）搭配 body 裡的 pinned 布林：它與「切換」語意一致 ——
-// 前端送的是「我要它變成這個狀態」，而���是一個「翻轉」指令。翻轉指令在
+// 前端送的是「我要它變成這個狀態」，而這是一個「翻轉」指令。翻轉指令在
 // 連點兩下時會得到相反的結果（而那正是使用者會做的事：再按一次取消）。
 func (s *Server) handleAdminPostPin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminForum(w, r) {

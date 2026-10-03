@@ -455,7 +455,7 @@ func TestRateLimiterCountsPerClient(t *testing.T) {
 
 	// 另一個 IP 不受影響。
 	if allowed, _ := rl.Allow("203.0.113.2"); !allowed {
-		t.Error("另一個 IP 被前一��� IP 的用量影響了 —— " +
+		t.Error("另一個 IP 被前一個 IP 的用量影響了 —— " +
 			"一個使用者就能讓所有人被擋，而症狀非常難診斷")
 	}
 }

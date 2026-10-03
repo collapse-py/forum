@@ -284,7 +284,7 @@ func TestValidRateLimitsAreAccepted(t *testing.T) {
 	}
 }
 
-// TestTimeoutsRejectNonPositive 守住兩���逾時設定不能被設成 0。
+// TestTimeoutsRejectNonPositive 守住兩個逾時設定不能被設成 0。
 //
 // 0 語意是「不設期限」或「立即強制關閉」。前者是 Slowloris 的解藥被關掉，
 // 後者等於把「優雅停止」整個關掉卻又不會有任何提示 —— 兩個都是靜默的。

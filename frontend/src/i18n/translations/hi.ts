@@ -629,7 +629,7 @@ export const hi: Record<MessageKey, string> = {
   'export.noSelection': 'पहले उपयोगकर्ता पृष्ठ पर खाते चुनें।',
   'export.selected': '{count} खाते चुने गए',
   'export.clearSelection': 'चयन हटाएँ',
-  'export.selectionHint': 'चयन केवल इस पृष्ठ पर रहता है और पृष्ठ बंद कर��े पर मिट जाता है।',
+  'export.selectionHint': 'चयन केवल इस पृष्ठ पर रहता है और पृष्ठ बंद करने पर मिट जाता है।',
 
   'session.title': 'साइन-इन और सत्र',
   'session.eyebrow': 'SESSIONS',

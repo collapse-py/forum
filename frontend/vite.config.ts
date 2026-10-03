@@ -184,10 +184,10 @@ export default defineConfig({
       apply: 'build',
       include: isAppSourceModule,
       options: {
-        stringArray: true,
-        rotateStringArray: true,
+        stringArray: false,//部署要開
+        rotateStringArray: false,//部署要開
         stringArrayThreshold: 0.75,
-        controlFlowFlattening: true,
+        controlFlowFlattening: false,//部署要開
         deadCodeInjection: false,
         debugProtection: false,
         selfDefending: false,

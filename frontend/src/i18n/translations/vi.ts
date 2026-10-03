@@ -615,7 +615,7 @@ export const vi: Record<MessageKey, string> = {
   'export.batchSuspend': 'Khóa tài khoản đã chọn',
   'export.batchReinstate': 'Mở khóa tài khoản đã chọn',
   'export.batchTags': 'Gắn thẻ hàng loạt',
-  'export.batchTagsNote': 'Ngữ nghĩa ghi đè: danh sách gửi đi chính là kết quả. Gửi danh sách r��ng nghĩa là xóa hết thẻ.',
+  'export.batchTagsNote': 'Ngữ nghĩa ghi đè: danh sách gửi đi chính là kết quả. Gửi danh sách rỗng nghĩa là xóa hết thẻ.',
   'export.batchConfirm': 'Áp dụng “{action}” cho {count} tài khoản?',
   'export.batchConfirmTags': 'Ghi đè thẻ của {count} tài khoản bằng {tags}?',
   'export.batchTagsPicker': 'Chọn thẻ',
