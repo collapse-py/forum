@@ -177,8 +177,8 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 **`backend/config/config.conf`**
 
 ```ini
-FORUM_NAME=SB 論壇
-FORUM_SHORT_NAME=SB
+FORUM_NAME=論壇
+FORUM_SHORT_NAME=FORUM
 SERVER_PORT=:8088
 PUBLIC_BASE_URL=http://localhost:8088
 TRUSTED_ORIGINS=http://localhost:8088
