@@ -32,6 +32,9 @@ deploy/settings.conf
 # 為什麼連 settings.conf 也要擋：它含 MYSQL_ROOT_PASSWORD 與 REDIS_PASSWORD。
 # 它**不需要**出現在映像裡（compose 是在執行時讀它的，不是在建置時），
 # 而把它送進建置情境會讓那兩個密碼進到每一層的 blob 裡。
+deploy/build-images.ps1
+# 打包腳本同理：它是主機上執行的工具，映像裡沒有任何東西需要它。擋掉它還有
+# 一個副作用是好的 —— 改腳本不會讓後端與前端的每一層快取失效。
 
 # --- 版本控與 CI ---
 .git

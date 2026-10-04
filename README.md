@@ -1139,6 +1139,12 @@ cd ../backend && go build -o forum .
 **沒有「前端」服務** —— 那是這個架構最刻意的一個決定，理由見下。
 
 ```bash
+# 0. 打包兩個服務映像（Windows：./deploy/build-images.ps1）
+#    這支腳本會在建置之後驗證映像的檔案配置 —— 前端產物有沒有進去、
+#    /asset/ 的素材在不在、掛載點的擁有權是不是 nonroot。這三件事壞掉時
+#    容器照樣會起來，而症狀是全站 404 或「安裝了圖示但打開是空白」。
+./deploy/build-images.ps1
+
 # 1. 準備三份設定檔
 cp deploy/settings.conf.example deploy/settings.conf       # 容器編排的環境變數
 cp backend/config/config.conf.example backend/config/config.conf
@@ -1146,13 +1152,24 @@ cp files_server/config.conf.example files_server/config.conf
 # 三份都改成自己的值
 
 # 2. 部署前先驗證設定 —— 這是整份 compose 裡最值得做的一步
-docker compose run --rm backend -check
+docker compose --env-file deploy/settings.conf run --rm backend /app/forum -check
 
 # 3. 起服務
-docker compose up -d
+docker compose --env-file deploy/settings.conf up -d
 docker compose ps
 docker compose logs -f backend
 ```
+
+**為什麼每一步都帶 `--env-file deploy/settings.conf`**：compose 檔裡的密碼寫成
+`${MYSQL_ROOT_PASSWORD:?…}`，而 compose 只會自動讀專案根目錄的 `.env`。
+`deploy/settings.conf` 不是 `.env`，因此不傳 `--env-file` 就會在**開始建置之前**
+結束，並回一句 `MYSQL_ROOT_PASSWORD 必須在 settings.conf 設定`。
+（`docker compose build` 也一樣，所以打包腳本改用 `docker build` 加上與 compose
+相同的映像名稱 —— 見 `deploy/build-images.ps1` 的說明。）
+
+**兩個 config.conf 掛載到不同位置**：`backend` 讀 `/app/config/config.conf`，
+`files_server` 讀 `/app/config.conf`（後者是工作目錄下的檔名，見
+`files_server/config.go`）。compose 檔裡已經分開寫好，不要照抄成同一個。
 
 #### 為什麼前端沒有獨立服務
 
