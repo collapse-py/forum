@@ -1,4 +1,4 @@
-# SB 論壇
+# 論壇
 
 一個免註冊、以 Google 帳號登入的匿名論壇。後端是只用標準函式庫寫的 Go HTTP 服務
 （`net/http` + `database/sql`，沒有 web framework、沒有 ORM），前端是 Vite + React 19 +
