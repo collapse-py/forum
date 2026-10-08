@@ -139,8 +139,8 @@ func (s *Server) handleAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 	...
 ```
 
-這不是靠自覺 —— `adminauth` analyzer 會在**編譯期**報出漏掉的呼叫點（見 README 的
-「不變條件 analyzer」）。
+這不是靠自覺 —— `adminauth` analyzer 會在**編譯期**報出漏掉的呼叫點（見
+[`DEVELOPMENT.md`](DEVELOPMENT.md#不變條件-analyzer)）。
 
 身分不符回 **401 而非 403**，因為前端依賴這個狀態碼。
 

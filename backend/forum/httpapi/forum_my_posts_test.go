@@ -13,7 +13,7 @@ handleForumMyPosts 與 handleForumPublicPosts 的差別只在「條件用哪一�
      跨站表單打到的目標，而症狀同樣是無聲的。
 
 刻意沒有測的：分頁與 hasMore 推測。它需要真的資料庫（這個專案沒有 MySQL 替身，
-見 README 的已知問題），而那部分由 loadForumPosts 與 listForumPosts 共用同一支
+見 docs/KNOWN_ISSUES.md 的已知問題），而那部分由 loadForumPosts 與 listForumPosts 共用同一支
 查詢，已經有後者的說明與 forumPostProjection 對著 idx_forum_posts_feed 的約束。
 */
 package httpapi

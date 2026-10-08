@@ -1139,7 +1139,7 @@ func (s *Server) handleForumPostDetail(w http.ResponseWriter, r *http.Request) {
 // 刻意不記稽核（理由與 handleForumPostDelete 的同一處）：稽核紀錄的 actor 是
 // 管理員，而這是使用者改自己的東西。稽核要能回答「誰動了這篇文章」，而答案
 // 此刻就是 author_email —— 它被寫在那一列裡。真的需要追「這篇的原文」時，
-// 稽核表本來就答不出來（見 README 的已知問題：只存截斷後的值）。
+// 稽核表本來就答不出來（見 docs/KNOWN_ISSUES.md 的已知問題：只存截斷後的值）。
 //
 // 回應刻意只回 ok：前端已經拿得到自己剛才送出的內容，而回一份 forumPost 會
 // 讓呼叫端多處理一種「單篇形狀」（圖片 token 是新簽的、AuthorTags 要再查一次）。

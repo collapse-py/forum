@@ -17,7 +17,7 @@
      limit 沒有上限的話，一個 limit=1000000 的 GET 就能把整張表讀進記憶體。
 
 刻意不測的：INSERT 與 SELECT 這兩段 SQL 對資料庫的實際效果。那需要一個
-真的 MySQL，而這個專案目前的測試策略不含 MySQL 替身（理由見 README 的
+真的 MySQL，而這個專案目前的測試策略不含 MySQL 替身（理由見 docs/KNOWN_ISSUES.md 的
 已知問題）。因此這裡只測「送進驅動程式的參數」與「從掃描結果組出的結構」。
 */
 

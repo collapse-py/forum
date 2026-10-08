@@ -22,7 +22,7 @@
      原始字串。
 
 刻意沒有測的：交易內「先關舊再開新」的順序。這個專案沒有 MySQL 替身
-（見 README 的已知問題），而那需要真的資料庫才能驗證；它由程式碼結構
+（見 docs/KNOWN_ISSUES.md 的已知問題），而那需要真的資料庫才能驗證；它由程式碼結構
 保證 —— 兩道 UPDATE 與 INSERT 在同一個 tx，且 defer tx.Rollback()。
 */
 
@@ -172,7 +172,7 @@ func TestAdminAnnouncementsRequireAdmin(t *testing.T) {
 // announcement 為 null，而不是 404 —— 前端每個頁面載入都會問一次，若「沒有
 // 公告」是 404，前端就得區分「正常的沒有」與「端點壞了」兩種 404。
 //
-// 這支測試需要一個真的 *sql.DB，而這個專案沒有 MySQL 替身（見 README 的已知
+// 這支測試需要一個真的 *sql.DB，而這個專案沒有 MySQL 替身（見 docs/KNOWN_ISSUES.md 的已知
 // 問題），因此用 database/sql/driver 註冊一個最小驅動程式。它只用標準函式庫
 // —— 匯入 database/sql/driver 不是「引入新的相依」。
 var announcementDriverOnce sync.Once

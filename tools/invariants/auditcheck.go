@@ -2,7 +2,7 @@
 auditcheck.go 是第一條不變條件的檢查：稽核與操作必須同生共死。
 
 【這條規則保護什麼】
-README.md 自己說明它的脆弱程度：
+docs/ARCHITECTURE.md 的「管理員操作稽核」一節說明它的脆弱程度：
 
 	這件事很容易被無聲破壞：Go 的 database/sql 不會因為交易內某個語句失敗
 	就中止交易，所以呼叫了 recordAdminAction 卻不看回傳值，等於把稽核降級

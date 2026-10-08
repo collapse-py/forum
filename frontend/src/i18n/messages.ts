@@ -23,7 +23,7 @@
  *
  * 站名不是譯文的一部分：
  *   含站名的 13 條文案寫成 {site}（完整站名）或 {brand}（短名），值來自設定檔
- *   的 FORUM_NAME / FORUM_SHORT_NAME（見 src/site.ts 與 README 的「站名」一節）。
+ *   的 FORUM_NAME / FORUM_SHORT_NAME（見 src/site.ts 與 docs/CONFIGURATION.md 的「站名」一節）。
  *   換站名因此不必動任何語言檔，也不會讓十七種語言各自的用詞漂移。
  *   {site} 由 usePageTitle 與 login.body 的呼叫端注入，{brand} 由後臺 rail 與
  *   登入閘門注入；兩種參數都不能省略 —— 少了就是畫面上殘留字面量，而

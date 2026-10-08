@@ -251,7 +251,7 @@ func TestUploadRequiresToken(t *testing.T) {
 //
 // 設定檔沒設 upload.token 時全部放行是既有的行為（本機測試用）。把它釘成
 // 測試是為了讓「這是一個刻意的不安全預設值」有明確出處 —— 若將來有人改成
-// 拒絕，這支測試會失敗並要求更新 README 的部署章節（那份章節要求正式環境
+// 拒絕，這支測試會失敗並要求更新 docs/DEPLOYMENT.md 的部署章節（那份章節要求正式環境
 // 必須設定 upload.token）。
 func TestUploadAllowsEverythingWhenNoTokenConfigured(t *testing.T) {
 	base := t.TempDir()

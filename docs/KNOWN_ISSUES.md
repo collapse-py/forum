@@ -213,7 +213,7 @@ P95 只會落在 1/2/5/10/25/50/100/250/500ms 或 1/2/5/10s 上。介面上照�
 
 `vite.config.ts` 沒有設定 `server.proxy`，所以相對路徑的 API 請求打不到後端。
 
-要嘛照 README 補上 proxy，要嘛照正式模式走（`npm run build` + 啟動後端）。
+要嘛照 [`FRONTEND.md`](FRONTEND.md#npm-run-dev-開箱即壞) 補上 proxy，要嘛照正式模式走（`npm run build` + 啟動後端）。
 
 ### `public-profile` 與 `public-posts` 的參數名不一致
 

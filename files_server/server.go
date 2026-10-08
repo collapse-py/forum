@@ -379,7 +379,7 @@ func mediaTokenKey(cfg *Config, token string) string {
 // 慣例，而不必為這個內部端點特別組一個 X-Upload-Token。
 //
 // 設定檔沒設 token 時全部放行是既有的行為，保留它（本機測試用），但它是一個
-// 靜默的無驗證狀態 —— README 的部署章節因此要求正式環境必須設定 upload.token。
+// 靜默的無驗證狀態 —— docs/DEPLOYMENT.md 因此要求正式環境必須設定 upload.token。
 func validUploadToken(cfg *Config, r *http.Request) bool {
 	token := r.Header.Get("Authorization")
 	if token == "" {
