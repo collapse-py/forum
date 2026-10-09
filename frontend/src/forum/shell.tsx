@@ -88,7 +88,7 @@ export function authLabel(state: AuthState, labels: AuthLabels): string {
    PWA 安裝
    ========================================================================== */
 
-const SERVICE_WORKER_URL = '/service-worker.js?v=202609190349';
+const SERVICE_WORKER_URL = '/service-worker.js?v=202610100148';
 
 let serviceWorkerRegistered = false;
 

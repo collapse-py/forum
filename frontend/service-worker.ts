@@ -66,6 +66,19 @@ sw.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
+  /*
+   * 只攔 http(s)。頁面裡的請求不一定來自頁面本身：瀏覽器擴充功能的 content
+   * script 也會在分頁中發請求（chrome-extension://、moz-extension:// 等），
+   * 那些請求同樣經過這個 Service Worker。caches.put 只吃 http(s)，硬要快取
+   * 會丟 "Request scheme 'chrome-extension' is unsupported"，而我們對
+   * cache.put 的呼叫是 void 的丟進背景 —— 錯誤變成沒有 handle 的 Promise
+   * rejection，主控台一行紅字，看了卻完全不知道與自己有關。不 respondWith
+   * 就夠了：這類請求本來就該由瀏覽器自己完成。
+   */
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return;
+  }
+
   if (
     url.pathname.startsWith('/api/') ||
     url.pathname.startsWith('/auth/') ||

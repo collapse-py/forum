@@ -66,24 +66,26 @@ export function LoginPage() {
         </section>
       </main>
 
-      <button
-        className="back-link plain-link"
-        type="button"
-        onClick={() => {
-          // 有上一頁才往回走；直接開這頁的訪客（history 只有這一筆）
-          // 回退只會離開站台。
-          if (window.history.length > 1) {
-            window.history.back();
-            return;
-          }
-          window.location.assign('/forum');
-        }}
-      >
-        <span className="material-symbols-outlined" aria-hidden="true">
-          arrow_back
-        </span>
-        {t('common.backOnePage')}
-      </button>
+      <div className="login-gate-back">
+        <button
+          className="back-link plain-link"
+          type="button"
+          onClick={() => {
+            // 有上一頁才往回走；直接開這頁的訪客（history 只有這一筆）
+            // 回退只會離開站台。
+            if (window.history.length > 1) {
+              window.history.back();
+              return;
+            }
+            window.location.assign('/forum');
+          }}
+        >
+          <span className="material-symbols-outlined" aria-hidden="true">
+            arrow_back
+          </span>
+          {t('common.backOnePage')}
+        </button>
+      </div>
 
       <footer>
         <a href="/forum">{t('common.backToForumHome')}</a>
