@@ -240,8 +240,9 @@ func (s *Server) StartRateLimitCleanup(ctx context.Context, interval time.Durati
 //
 // 為什麼要這個薄包裝而不是在 Handler 裡直接呼叫 limiter.Middleware：
 //  1. nil-safe。測試常以 struct literal 構造 Server 而不填這三個欄位
-//     （見 forum_handlers_test.go），若直接呼叫 nil 指標的 Middleware 會在
-//     建構路由時就 panic，讓那些測試完全跑不起來。
+//     （見 post_edit_test.go、announcement_test.go、csrf_guard_test.go 等），
+//     若直接呼叫 nil 指標的 Middleware 會在建構路由時就 panic，讓那些測試
+//     完全跑不起來。
 //  2. 集中表達意圖：Handler 裡每一條掛限流的路由都寫成 s.rateLimit(
 //     s.writeRateLimiter, s.handleXxx)，一眼看得出「這條受哪一組額度管」。
 //
@@ -848,10 +849,13 @@ func (s *Server) Handler() http.Handler {
 	//   Refresh 必須包在 mux 外面：sliding expiration 要在「任何」回應（包含
 	//   304、302、500）被寫出之前就補上 Set-Cookie，若放進 mux 內部，它只能
 	//   看到自己那幾條路由的回應，其餘路徑的 cookie 就永遠不會被更新。
-	//   LoggingMiddleware 則必須包在 Refresh 外面，這樣它的 responseWriter 才
-	//   包住整棵樹，能記到真正寫出的最終 status code，且 duration 涵蓋了
-	//   session 存取的耗時。它同時需要 s.sessions.ResolveUser 辨識使用者，
-	//   而該函式讀的是 cookie + Redis，與 Refresh 使用的是同一份 session 狀態。
+	//   LoggingMiddleware 則包在 Refresh **內側**（由外而內的順序是
+	//   SecurityHeaders → Refresh → Logging → metrics → mux）。這個順序是刻意的：
+	//   Refresh 的最外層職責是滑動式 session 存續（上面那段），而 Logging 需要在
+	//   「session 已經被解析過」的時間點上才拿得到身分 —— 它的身分來源
+	//   s.sessions.ResolveUser 讀的是同一份 cookie + Redis，放太外層只會讓每個
+	//   請求都以 "anonymous" 記錄。代價是 duration 不含 session 續期的 Redis
+	//   往返，而那是一次固定成本，且續期的成敗另有 Refresh 自己的路徑可見。
 	//
 	// 兩個變數不可共用同一個名稱：Go 的閉包捕捉的是「變數」而不是「當下的值」，
 	// 若把 Refresh 的閉包指派回 logged 本身，閉包內的 logged.ServeHTTP 就會
@@ -865,7 +869,11 @@ func (s *Server) Handler() http.Handler {
 	//   - 在 mux 外側 → 每個請求（含靜態資產與 404）都會被計入，且計到的
 	//     狀態碼是「mux 最終寫出的那一個」，包含 catch-all 靜態檔的結果。
 	observed := s.metricsMiddleware(mux)
-	logged := logger.LoggingMiddleware(observed, s.sessions.ResolveUser)
+	// 來源位址的解析注入 logger：全站（限流、封鎖、監控、稽核、access log）
+	// 從此共用同一個 TRUSTED_PROXY_CIDRS 信任模型，同一個請求不會再因為
+	// 「哪一條程式碼問它來自哪裡」而得到兩個不同的答案。nil 會讓 logger 退回
+	// 無條件採信 X-Forwarded-For 的後備路徑 —— 那正是 H4 的形狀。
+	logged := logger.LoggingMiddleware(observed, s.sessions.ResolveUser, s.clientIP)
 	refreshed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 滑動式過期：每個請求都延長一次 session TTL，並重寫 cookie，
 		// 使用者持續使用就不會被登出。

@@ -520,7 +520,7 @@ func TestDeleteRejectsPathTraversal(t *testing.T) {
 	// 否則一個「把所有刪除都擋掉」的實作也會通過這支測試。
 	handler, backend := newTestServer(t, cfg, &fakeTokenStore{found: 1})
 	victim := "victim.jpg"
-	if _, err := backend.saveFile("files", victim, strings.NewReader("victim-bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", victim, strings.NewReader("victim-bytes")); err != nil {
 		t.Fatalf("準備受害者檔案失敗: %v", err)
 	}
 
@@ -540,6 +540,14 @@ func TestDeleteRejectsPathTraversal(t *testing.T) {
 		{"少一層", "/files"},
 		{"空的檔名", "/files/"},
 		{"沒有檔名", "/files"},
+		// 下面三筆是「捨棄目錄」而不是穿越：filepath.Base 對 "." 與 ".." 原樣
+		// 回傳，因此在 Base 那一關看不出來，但它們能讓 os.Remove 作用在
+		// files/ 目錄與儲存根本身。哨兵檔留在 base 是為了讓「基目錄被刪」這個
+		// 結果在測試裡一定被抓到。
+		{"點：files 目錄本身", "/files/."},
+		{"點：儲存根目錄", "/files/.."},
+		{"點：穿越後的目錄", "/files/x/.."},
+		{"隱藏檔", "/files/.hidden.jpg"},
 	}
 
 	for _, tc := range attacks {
@@ -581,7 +589,7 @@ func TestDeleteWorksForLegitimatePath(t *testing.T) {
 	handler, backend := newTestServer(t, cfg, &fakeTokenStore{found: 1})
 
 	const name = "to-delete.jpg"
-	if _, err := backend.saveFile("files", name, strings.NewReader("bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", name, strings.NewReader("bytes")); err != nil {
 		t.Fatalf("準備檔案失敗: %v", err)
 	}
 	path := filepath.Join(base, "files", name)
@@ -602,7 +610,7 @@ func TestDeleteWorksForLegitimatePath(t *testing.T) {
 	})
 
 	// 表單欄位那條要重新準備檔案。
-	if _, err := backend.saveFile("files", name, strings.NewReader("bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", name, strings.NewReader("bytes")); err != nil {
 		t.Fatalf("重新準備檔案失敗: %v", err)
 	}
 	t.Run("表單欄位", func(t *testing.T) {
@@ -651,7 +659,7 @@ func TestDeleteRequiresToken(t *testing.T) {
 	handler, backend := newTestServer(t, cfg, &fakeTokenStore{found: 1})
 
 	const name = "protected.jpg"
-	if _, err := backend.saveFile("files", name, strings.NewReader("bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", name, strings.NewReader("bytes")); err != nil {
 		t.Fatalf("準備檔案失敗: %v", err)
 	}
 
@@ -717,7 +725,7 @@ func TestMediaTokenMiddleware(t *testing.T) {
 		t.Fatalf("newStorageBackend 回錯誤: %v", err)
 	}
 	const name = "photo.jpg"
-	if _, err := backend.saveFile("files", name, strings.NewReader("image-bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", name, strings.NewReader("image-bytes")); err != nil {
 		t.Fatalf("準備檔案失敗: %v", err)
 	}
 
@@ -805,7 +813,7 @@ func TestMediaTokenDegradationPaths(t *testing.T) {
 		t.Fatalf("newStorageBackend 回錯誤: %v", err)
 	}
 	const name = "photo.jpg"
-	if _, err := backend.saveFile("files", name, strings.NewReader("image-bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", name, strings.NewReader("image-bytes")); err != nil {
 		t.Fatalf("準備檔案失敗: %v", err)
 	}
 
@@ -948,7 +956,7 @@ func TestNoDirectoryListingIsReachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newStorageBackend 回錯誤: %v", err)
 	}
-	if _, err := backend.saveFile("files", "photo.jpg", strings.NewReader("image-bytes")); err != nil {
+	if _, err := backend.saveFile(context.Background(), "files", "photo.jpg", strings.NewReader("image-bytes")); err != nil {
 		t.Fatalf("準備檔案失敗: %v", err)
 	}
 	// 也在儲存根目錄放一個檔案：它**不該**出現在任何列表裡，而且它根本沒有

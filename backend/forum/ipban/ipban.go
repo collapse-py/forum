@@ -255,8 +255,10 @@ func (s *Store) Unban(ctx context.Context, ip string) (bool, error) {
 // 「有效」是查詢時過濾的，而不是假設名單裡都是有效的：清理是週期性的
 // （見 Prune），因此在一個清理間隔之內，名單裡會有已過期的項目。
 //
-// limit <= 0 時列出全部。上限由呼叫端決定，因為這是一個後臺端點而不是
-// 熱路徑。
+// limit <= 0 時列出**前 200 筆**而不是全部。這個上限在這裡而不是呼叫端：
+// 「呼叫端決定」的版本依賴每一個呼叫端都記得傳一個明智的值，而漏傳時的症狀是
+// 後臺端點把整份封鎖名單拉回來 —— 那不會出錯，只會讓管理頁變慢。200 遠大於
+// 任何人為維護的封鎖名單，而真的更多的時候畫面也已經看不完了。
 func (s *Store) List(ctx context.Context, limit int) ([]Entry, error) {
 	if s == nil || s.rdb == nil {
 		return []Entry{}, ErrNoStore

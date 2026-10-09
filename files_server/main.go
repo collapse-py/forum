@@ -28,7 +28,8 @@ config.go / storage.go / server.go 的說明涵蓋各自的相依。
     這是刻意的取捨：上傳與刪除不依賴 Redis，而「圖片要帶 token 才能讀」是
     這個服務最外層的防護。停用它的後果是已發行的媒體連結不再需要 token
     就能讀取，而繼續啟動（拒絕服務）會讓後端連上傳都做不了 —— 那個故障的
-    半徑大得多。docs/DEPLOYMENT.md 因此要求正式環境必須讓 Redis 可用。
+     半徑大得多。docs/DEPLOYMENT.md 的檢查清單因此把「Redis 綁內網」列為必要項，
+     而「Redis 必須可用」是這個取捨本身—— 停用驗證仍然繼續服務。
  2. 停止流程的逾時取自 server.shutdown_timeout_seconds，預設 15 秒，
     必須大於部署端的停止上限（compose 的 stop_grace_period、systemd 的
     TimeoutStopSec）。反過來的話，「貼文存得下但圖片上傳失敗」會在每次

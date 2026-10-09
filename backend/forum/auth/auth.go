@@ -203,8 +203,9 @@ func isSafeReturnPath(returnPath string) bool {
 // 回傳值：Google 帳號的 email；失敗時回傳空字串與非 nil 的 error。
 //
 // 錯誤條件：查詢字串沒有 code、token 交換失敗、userinfo 請求失敗、回應狀態碼
-// 為 4xx/5xx、或回應內容無法解析成 JSON。錯誤訊息內含上游細節，呼叫端若要
-// 回給使用者應自行過濾（目前 httpapi 的 handleGoogleCallback 會原樣帶入回應）。
+// 為 4xx/5xx、或回應內容無法解析成 JSON。錯誤訊息內含上游細節（token 交換的
+// 失敗甚至帶著 Google 的回應本文），因此**只適合寫進日誌**：呼叫端若要回給
+// 使用者，請改成固定字串。httpapi 的 handleGoogleCallback 現在正是這麼做。
 //
 // 副作用：對 oauth2.googleapis.com 與 googleapis.com 各發出一次對外 HTTPS 請求。
 // 不寫資料庫、不設定 cookie。

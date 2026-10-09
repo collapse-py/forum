@@ -19,6 +19,19 @@ blocklist.go 的檔頭把理由寫得很清楚：
 所有 withBlocklistHandler 的呼叫必須發生在 applyRateLimit 函式本體之內。
 applyRateLimit 是「先查封鎖、再查限流」唯一的組裝點。
 
+【為什麼順序的斷言只到「函式」】
+順序由 applyRateLimit 的函式本體決定（它先呼叫 withBlocklistHandler，
+withBlocklistHandler 內部再呼叫 limiter.Middleware）。要驗證那個順序就得分析
+兩種實作之間的控制流，成本遠高於收益，而且改錯時症狀是「限流計數在解封後
+仍生效」，不是任何編譯期可察覺的東西。這個順序改由 blocklist.go 的註解與
+server.go 的 applyRateLimit 註解負責 —— 那是它唯一可能被改動的地方，而那裡
+本來就有把順序理由寫下來的註解。
+
+【認得的呼叫形狀】
+方法呼叫（s.withBlocklistHandler）與自由函式呼叫（withBlocklistHandler）兩者
+都認，見 isNamedCall：只認方法呼叫的話，把這個函式重構成自由函式就能讓整條
+規則安靜失效。
+
 【為什麼是「只能在 applyRateLimit 裡」而不是「呼叫點只能有一個」】
 實作上有兩個呼叫點，兩者都在 applyRateLimit 內（rateLimit 與
 rateLimitAllMethods 兩條路徑共用它）。要求「只有一個呼叫點」會迫使其中一條路徑
@@ -71,7 +84,7 @@ func runBlocklistMount(pass *analysis.Pass) (any, error) {
 			}
 			walkBody(fn.Body, func(_ ast.Node, n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || !isNamedMethodCall(call, withBlocklistHandlerName) {
+				if !ok || !isNamedCall(call, withBlocklistHandlerName) {
 					return true
 				}
 				pass.Reportf(call.Pos(),

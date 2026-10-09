@@ -29,7 +29,6 @@ package httpapi
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -147,7 +146,9 @@ func (s *Server) handleAdminTags(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 1 KB：單一枚文字段。上限的存在只是為了擋掉灌水（見 decodeLimitedJSON），
+	// 不需要按業務長度推算 —— name 的長度由後面的 validate 把關。
+	if err := decodeLimitedJSON(w, r, &req, 1<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -299,7 +300,8 @@ func (s *Server) handleAdminTag(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 1 KB：單一枚文字段，理由見 handleAdminUserTagsCreate。
+	if err := decodeLimitedJSON(w, r, &req, 1<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -468,7 +470,8 @@ func (s *Server) handleAdminUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 1 KB：單一枚文字段（ACTIVE / SUSPENDED）。
+	if err := decodeLimitedJSON(w, r, &req, 1<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -595,7 +598,11 @@ func (s *Server) handleAdminUserTags(w http.ResponseWriter, r *http.Request, raw
 	var req struct {
 		TagIDs []int64 `json:"tagIds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 4 KB：上限由 tagIds 的筆數決定（批次路徑同樣是 20 筆，見 batchMaxTags），
+	// 每筆一個 int64 的 JSON 表示約 20 bytes，20 筆加結構冗餘遠低於 4 KB。
+	// 沒有限上限時，一份塞了十萬個元素的陣列就能換一次完整解析（見
+	// decodeLimitedJSON 的說明）。
+	if err := decodeLimitedJSON(w, r, &req, 4<<10); err != nil {
 		logger.WarnfContext(r.Context(), "[ADMIN-TAGS] invalid JSON email=%s: %v", email, err)
 		badRequest(w, "invalid request")
 		return
@@ -604,6 +611,16 @@ func (s *Server) handleAdminUserTags(w http.ResponseWriter, r *http.Request, raw
 
 	// 格式驗證：每個 id 必須為正數，且不可重複。
 	// 重複會導致後續 INSERT 觸發 (user_email, tag_id) 複合主鍵衝突，故在寫入前就擋掉。
+	//
+	// 筆數上限與批次路徑同一個常數（batchMaxTags），理由也相同：這一條路由的
+	// 寫入是「先刪後插」的巢狀迴圈，沒有上限時一次 PUT 可以帶著任意多個 id，
+	// 而 4 KB 的 body 上限大約容得下 8,000 個。單一使用者不需要 20 個以上的
+	// 標籤，而超過時回 400 而不是靜默截斷（見 batchMaxTags 的說明）。
+	if len(req.TagIDs) > batchMaxTags {
+		logger.WarnfContext(r.Context(), "[ADMIN-TAGS] too many tags email=%s requested=%d", email, len(req.TagIDs))
+		badRequest(w, "最多 20 個標籤")
+		return
+	}
 	seen := make(map[int64]bool, len(req.TagIDs))
 	for _, tagID := range req.TagIDs {
 		if tagID <= 0 || seen[tagID] {
@@ -970,7 +987,9 @@ func (s *Server) createAdminUserPost(w http.ResponseWriter, r *http.Request, raw
 		return
 	}
 	var req adminForumPostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 64 KB：代發文的 content 上限 10000 rune，理由見 forum_admin_handlers.go
+	// 的 handleAdminForumPostCreate。
+	if err := decodeLimitedJSON(w, r, &req, 64<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -1048,7 +1067,8 @@ func (s *Server) createAdminUserComment(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var req adminForumCommentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 16 KB：content 上限 2000 rune，理由見 forum_admin_handlers.go 的註解。
+	if err := decodeLimitedJSON(w, r, &req, 16<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}

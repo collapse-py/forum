@@ -30,3 +30,14 @@ func (s *Server) rateLimitAllMethods(rl *RateLimiter, next http.HandlerFunc) htt
 func (s *Server) registerUploadRoute(rl *RateLimiter, next http.HandlerFunc) {
 	_ = s.withBlocklistHandler(rl, nil, next) // want "在 applyRateLimit 之外呼叫 withBlocklistHandler"
 }
+
+// 自由函式形狀的組裝：同樣是第二個掛載點，規則也必須看得到。少了這一筆，
+// 把 withBlocklistHandler 重構成自由函式就能讓整條規則安靜失效。
+// 自由函式與方法同名在 Go 裡是合法的（方法名不佔用套件作用域）。
+func registerAdminRoute(rl *RateLimiter, next http.HandlerFunc) {
+	_ = withBlocklistHandler(rl, nil, next) // want "在 applyRateLimit 之外呼叫 withBlocklistHandler"
+}
+
+func withBlocklistHandler(rl *RateLimiter, st *store, next http.HandlerFunc) http.HandlerFunc {
+	return next
+}

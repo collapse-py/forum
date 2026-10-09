@@ -50,6 +50,15 @@ import (
 	"forum/forum/logger"
 )
 
+// followKeyScanLimit 是 publicKey → email 退路掃描的作者數上限。
+//
+// 存在的理由：forumEmailByPublicKey 的第二段查詢（「這個 key 屬於哪個早期
+// 使用者」）只能逐個作者雜湊比對，因此必須有上界，否則一個 64 字元的隨機 key
+// 就能讓不限流的公開端點每次掃過全表作者。上限的取捨見 forumEmailByPublicKey
+// 的說明；20000 與 session_list.go 的掃描上限同一個量級（都是一次請求最多
+// 願意為「反查」付出的工作量）。
+const followKeyScanLimit = 20000
+
 // forumFollowRequest 是 POST /api/forum/follows 的請求主體。
 //
 //	Key 是被追蹤者的 publicForumKey（email 的 SHA-256，64 個十六進位字元）。
@@ -409,8 +418,16 @@ func (s *Server) writeFollowTargetError(w http.ResponseWriter, r *http.Request, 
 //	為什麼不能用「順手建檔」取代退路：forum_profiles.nickname 是 NOT NULL 且有
 //	唯一索引 uq_forum_profiles_nickname，多筆空暱稱會撞 1062，要自動建檔就必須
 //	先改那個索引 —— 那是一個影響「暱稱不得重複」語意的結構變更，不該由這個功能
-//	順手決定。因此退路保留為一段有界的掃描：SELECT DISTINCT 的結果是「曾經發過文
-//	的人數」，遠小於貼文總數，且這個端點掛在內容寫入限流（預設 10 次 / 60 秒）之下。
+//	順手決定。因此退路保留為一段**有界**的掃描：LIMIT 之後最壞情況是
+//	followKeyScanLimit 個作者，而這個端點掛在內容寫入限流（預設 10 次 / 60 秒）
+//	之下。
+//
+//	上限的取捨與 session_list.go 的 20000 個 key 同一個形狀：掃描邊界被触碰時
+//	**安靜地找不到**，而不是讓一次請求的成本沒有上界。差別在這裡更值得注意 ——
+//	/public-profile 與 /public-posts 是刻意不限流的公開端點，而它們也走這段退路；
+//	一個 64 字元的 random key 就能觸發一次全表作者掃描（每個作者一次 SHA-256）。
+//	把邊界寫下來，是為了讓「上限該是多少」變成一個可以被討論的數字，而不是一个
+//	藏在 SQL 裡的預設行為。
 //
 //	回傳 sql.ErrNoRows 表示兩段都找不到，呼叫端據此回 404。
 func (s *Server) forumEmailByPublicKey(ctx context.Context, key string) (string, error) {
@@ -426,7 +443,8 @@ func (s *Server) forumEmailByPublicKey(ctx context.Context, key string) (string,
 		return "", err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT author_email FROM forum_posts`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT author_email FROM forum_posts LIMIT ?`, followKeyScanLimit)
 	if err != nil {
 		return "", err
 	}

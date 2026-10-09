@@ -8,7 +8,8 @@
 //   1. 少寫了行或整段沒回來      → 報 missing，並輸出 -todo.tsv 讓下一輪補。
 //   2. 分隔符被寫成空格或句點    → 對照預期的鍵前綴修復（見 parseLine）。
 //   3. 佔位符被丟掉或改名        → 報錯，不修復：猜測語意比壞掉更糟。
-//   4. 整段原樣抄回中文          → 報錯（只比對漢字，全形 ｜ 與 （） 是刻意保留的）。
+//   4. 整段原樣抄回中文          → 報錯（只比對漢字，全形 ｜ 與 （） 是刻意保留的；
+//                                  中文與日文排除，因為漢字對它們是正常文字）。
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 
 const PINNED = new Map([
@@ -124,8 +125,13 @@ for (const file of parts) {
 // 未翻譯殘留：非中文語言的譯文裡不該還有漢字。整段原樣抄回去是實際發生過的失敗。
 // 只比對漢字：全形直線 ｜ 與全形括號 （） 是這個專案刻意保留的（title.* 的分隔符、
 // reports.targetGone 的括號），算進去會讓所有語言都被誤報。
+//
+// 排除清單必須與 verify-catalogs.mjs 的 HAN_IS_FOREIGN 一致：中文（本身以漢字
+// 書寫）與日文（漢字是它的正式文字之一）都不能用「還有漢字」當成未翻的訊號。
+// 曾經這裡只排除 zh-*，於是 ja 有 714/839 筆被誤判，合併永遠 exit 1 ——
+// 而那時工具給出的指引是「這些鍵還沒翻」，與事實完全相反。
 const HAN = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
-if (!/^zh-(TW|HK|MO|CN)$/.test(lang)) {
+if (!/^(zh-(TW|HK|MO|CN)|ja)$/.test(lang)) {
   for (const [key, value] of translated) {
     if (HAN.test(value)) problems.push(`${key}: still contains Chinese -> ${JSON.stringify(value.slice(0, 40))}`);
   }

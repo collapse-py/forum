@@ -15,6 +15,10 @@ NewServer：以設定與後端組出 Server。
 (*Server).Handler：組出完整的中介層鏈（尚不監聽）。
 resolveDir / isAllowedExt / originAllowed：三個純函式的決策，供測試直接驗證。
 
+（真實的匯出面已經是上面這五個 + main.go 的 loadStorageConfig／NewServer。
+其餘「函式」都在 server_test.go 裡補上，因為它們的行為必須被釘住 ——
+「exported 的只有這四個」的說法曾經是錯的，而它在測試補齊之前看起來完全合理。）
+
 【路由】
 
 	POST|PUT /upload              上傳檔案，回 {"url":"..."}
@@ -39,6 +43,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -46,6 +51,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -65,6 +71,25 @@ const mediaTokenTTL = 2 * time.Second
 // Redis 上要分別靠「不寫入 key」與「指一個壞掉的位址」才能達成，後者根本不可靠。
 type mediaTokenStore interface {
 	Exists(ctx context.Context, keys ...string) *redis.IntCmd
+}
+
+// 媒體 token 驗證失敗的計數與「上次寫日誌的時間」。
+//
+// 用 atomic 而不是 mutex：這個中介層在每個靜態檔案請求上都會碰到，而 mutex 會讓
+// 所有圖片請求序列化。兩個值是分開的兩個變數而非一個 struct，為的是讓「讀時間」
+// 與「加計數」不會有半更新的狀態。
+var (
+	mediaTokenFailures    atomic.Int64
+	lastMediaTokenFailure atomic.Value // time.Time
+)
+
+// initLastFailure 讓 lastMediaTokenFailure 一開始就持有正確的型別。
+//
+// atomic.Value.Store 要求型別一致，而零值的 atomic.Value 第一次 Store 會固定型別。
+// 若把這個初始化刪掉，第一次 Store 時的 time.Time 就成為固定的型別，看似可行 ——
+// 但任何「先 Load 再 Store」的寫法都會panic。讓它一開始就正確。
+func init() {
+	lastMediaTokenFailure.Store(time.Time{})
 }
 
 // Server 持有這個服務處理請求所需的全部相依。
@@ -88,11 +113,24 @@ func NewServer(cfg *Config, store storageBackend, redis mediaTokenStore) *Server
 }
 
 // Handler 組出完整的中介層鏈。執行順序由外而內是：
-// CORS → ServeMux 路由比對 → 路由上的中介層 → 處理函式。
+// CORS → 限流 → ServeMux 路由比對 → 路由上的中介層 → 處理函式。
+//
+// 限流刻意是每條路由自己掛的（而不是包在 mux 外面）：這樣各端點可以有不同的
+// 上限 —— 媒體與寫入的成本差了一個數量級（見 ratelimit.go 的檔頭）。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/upload", s.handleUpload)
-	mux.HandleFunc("/delete", s.handleDelete)
+
+	// 寫入端點（上傳／刪除）共用同一個嚴格的限制，因為它們的成本同一個數量級
+	// （一次 50 MiB 的解析、一次檔案系統移除）。
+	// /upload 與 /delete 在這裡各建一個計價器而不是共用一個：兩種濫用模式不同
+	// （上傳吃滿 50 MB，刪除吃檔案系統），共用會讓其中一種的量掩蓋另一種。
+	uploadLimiter := newRateLimiter(s.cfg.RateLimit.WriteRate, s.cfg.RateLimit.WriteBurst, maxRateBuckets)
+	deleteLimiter := newRateLimiter(s.cfg.RateLimit.WriteRate, s.cfg.RateLimit.WriteBurst, maxRateBuckets)
+	// handleUpload / handleDelete 是 http.HandlerFunc（不是 http.Handler），因此多一層
+	// 轉換。這裡刻意不把它們改成 ServeHTTP 方法：那個形狀會讓 handler 測試必須
+	// 透過介面呼叫，而這個檔的測試全是直接呼叫方法。
+	mux.Handle("/upload", uploadLimiter.middleware(http.HandlerFunc(s.handleUpload)))
+	mux.Handle("/delete", deleteLimiter.middleware(http.HandlerFunc(s.handleDelete)))
 
 	// 靜態檔案只在本機模式掛載，而且「是否本機模式」由後端自己回答
 	// （staticRoot），不是這裡比對設定檔的字串。S3 模式的檔案由前端直接連 S3
@@ -102,16 +140,27 @@ func (s *Server) Handler() http.Handler {
 	// 只掛 /files/ 而不是 "/"，是因為上傳產生的 URL 形狀是 /files/<uuid>.<ext>，
 	// 而 http.FileServer 在收到目錄請求時會**回傳一份 HTML 目錄列表**。若把
 	// 檔案伺服器掛在 "/"，那麼 GET / 會列出儲存根目錄下的所有項目 —— 而且因為
-	// mediaTokenMiddleware 只擋 /files/ 前綴，那份列表是**不需要 token** 的。
+	// mediaTokenMiddleware 只擋 /files/ 前綴，那份列表是**不需要 token**的。
 	// 那不讀得到檔案內容（內容仍然需要 token），但它洩漏了儲存結構與全部檔名。
 	// 把路由收斂到 /files/ 之後，儲存根目錄根本沒有任何路由可以列出。
 	if root, ok := s.store.staticRoot(); ok {
 		static := http.StripPrefix("/", http.FileServer(http.Dir(root)))
-		mux.Handle("/files/", s.mediaTokenMiddleware(rejectDirectoryListing(static)))
+		// 媒體的限制遠比寫入寬鬆：一篇貼文一張圖，一頁動態十來張，而每一次都
+		// 是一次 Redis EXISTS。上限的用途是擋掉「用隨機 token 打 /files/」，
+		// 不是擋掉真人載入頁面。
+		mediaLimiter := newRateLimiter(s.cfg.RateLimit.MediaRate, s.cfg.RateLimit.MediaBurst, maxRateBuckets)
+		mux.Handle("/files/", mediaLimiter.middleware(s.mediaTokenMiddleware(rejectDirectoryListing(static))))
 	}
 
 	return corsMiddleware(s.cfg)(mux)
 }
+
+// maxRateBuckets 是計價器的記憶體上界。
+//
+// 到達時做一次惰性清除（見 rateLimiter.sweepLocked）。刻意不用背景 goroutine
+// 定期清理：這個程式不在建構子裡啟動任何背景工作，而「等下一次請求順便清」對
+// 一個保護性元件已經足夠。
+const maxRateBuckets = 65536
 
 // rejectDirectoryListing 拒絕任何指向目錄的請求。
 //
@@ -185,7 +234,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rel, err := s.store.saveFile(dir, filename, file)
+	rel, err := s.store.saveFile(r.Context(), dir, filename, file)
 	if err != nil {
 		log.Printf("儲存檔案失敗: %v", err)
 		http.Error(w, "Unable to save file", http.StatusInternalServerError)
@@ -239,6 +288,19 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	// "/files/../../etc/passwd" 這種形狀必須在這裡就被拆掉，而不是留給
 	// filepath.Join 去處理（它會照樣解析出 baseDir 之外的路徑）。
 	filename := filepath.Base(parts[len(parts)-1])
+	// "." 與 ".." 也是合法的 filepath.Base 結果（"/files/." 與 "/files/.."），
+	// 而它們不是檔名：path.Base(".") == "."，送到 deleteFile 之後會被 Join 成
+	// <base>/files/. 與 <base> —— 也就是「把 files 目錄刪掉」與「把儲存根目錄
+	// 刪掉」。目錄為空時 os.Remove 會成功，而整個儲存就此失效（每個上傳開始回
+	// 500），直到有人重新建立目錄。這不是理論問題：逐檔刪除是這個端點的日常
+	// 用途，而把最後一個檔刪掉之後 files/ 就空了。
+	//
+	// 前導 "." 一併拒絕：這同時擋掉隱藏檔與以 "." 開頭的相對路徑片段，
+	// 與 upload 端點的副檔名白名單同一個方向（見 validExt）。
+	if filename == "." || filename == ".." || strings.HasPrefix(filename, ".") {
+		http.Error(w, "Invalid file name in URL", http.StatusBadRequest)
+		return
+	}
 
 	if dir != "files" {
 		http.Error(w, "Invalid directory in URL", http.StatusBadRequest)
@@ -246,7 +308,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rel := "/" + dir + "/" + filename
-	if err := s.store.deleteFile(rel); err != nil {
+	if err := s.store.deleteFile(r.Context(), rel); err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 			return
@@ -299,7 +361,17 @@ func (s *Server) mediaTokenMiddleware(next http.Handler) http.Handler {
 			// 與「token 不存在」分開：503 讓呼叫端知道可以重試，401 會讓它
 			// 重新登入 —— 而正確的處置是等 Redis 恢復。混為一談的症狀是
 			// Redis 短暫故障讓所有使用者被踢出登入狀態。
-			log.Printf("Redis token check failed: %v", err)
+			//
+			// 日誌做取樣：過去每一次失敗都寫一行，因此 Redis 故障時的輸出量等於
+			// 「請求數」—— 而那時候最不需要的就是把磁碟也一起填滿。第一筆一定
+			// 記（否則故障的第一個訊號會消失），之後每分鐘最多一筆摘要。
+			mediaTokenFailures.Add(1)
+			last, _ := lastMediaTokenFailure.Load().(time.Time)
+			if first := mediaTokenFailures.Load() == 1; first || time.Since(last) >= time.Minute {
+				lastMediaTokenFailure.Store(time.Now())
+				log.Printf("Redis token check failed（第 %d 次，此後每分鐘至多一筆）: %v",
+					mediaTokenFailures.Load(), err)
+			}
 			writeJSONError(w, http.StatusServiceUnavailable, "media token service unavailable")
 			return
 		}
@@ -378,14 +450,23 @@ func mediaTokenKey(cfg *Config, token string) string {
 // 形式。最後一種是為了讓呼叫端可以直接沿用它對外服務的 Authorization 標頭
 // 慣例，而不必為這個內部端點特別組一個 X-Upload-Token。
 //
+// 用 subtle.ConstantTimeCompare 而不是 ==：== 會在第一個不同的位元組就返回，
+// 因此回應時間洩漏「前綴對了幾個字元」。這個 token 是長隨機字串，實務上難以
+// 逐位元組重建，但比對本身沒有理由洩漏任何資訊 —— 而函式庫已經提供免費的常數
+// 時間比對。
+//
 // 設定檔沒設 token 時全部放行是既有的行為，保留它（本機測試用），但它是一個
-// 靜默的無驗證狀態 —— docs/DEPLOYMENT.md 因此要求正式環境必須設定 upload.token。
+// 靜默的無驗證狀態 —— 那正是下面這個註解要留給部署者的提醒：
+// 留空等於任何人只要找得到這個服務就能上傳與刪除，而沒有任何錯誤訊息會告訴你。
 func validUploadToken(cfg *Config, r *http.Request) bool {
 	token := r.Header.Get("Authorization")
 	if token == "" {
 		token = r.Header.Get("X-Upload-Token")
 	}
-	return cfg.Upload.Token == "" || token == cfg.Upload.Token || token == "Bearer "+cfg.Upload.Token
+	want := []byte(cfg.Upload.Token)
+	return cfg.Upload.Token == "" ||
+		subtle.ConstantTimeCompare([]byte(token), want) == 1 ||
+		subtle.ConstantTimeCompare([]byte(token), []byte("Bearer "+cfg.Upload.Token)) == 1
 }
 
 // originAllowed 判斷來源是否在允許清單內；清單含 "*" 時全部放行。
@@ -402,10 +483,16 @@ func originAllowed(origin string, allowed []string) bool {
 //
 // 刻意「不」在來源被拒絕時也回 204：那會讓瀏覽器認為預檢通過，然後在真正的
 // 請求上失敗。讓它落到路由比對，得到的 405／404 才是能指認問題的訊息。
+//
+// Vary: Origin 是必要的：下面回應的是「呼叫端自己送來的那個 Origin」，而快取
+// 不區分 Origin 時，前一個來源拿到的 ACAO 會被送給下一個來源 —— 那等於把
+// 一個被允許的來源名單快取成全部放行。預設設定是 AllowedOrigins = ["*"]，
+// 更需要這一行讓收緊設定之後的行為可預期。
 func addCORSHeaders(w http.ResponseWriter, r *http.Request, cfg *Config) {
 	origin := r.Header.Get("Origin")
 	if originAllowed(origin, cfg.CORS.AllowedOrigins) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Add("Vary", "Origin")
 		if len(cfg.CORS.AllowedMethods) > 0 {
 			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.AllowedMethods, ", "))
 		}

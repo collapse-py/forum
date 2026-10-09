@@ -471,6 +471,23 @@ func (s *Server) handleAdminPostOrPin(w http.ResponseWriter, r *http.Request) {
 	s.handleAdminForumPost(w, r)
 }
 
+// adminPostPinIDFromPath 從 /api/admin/forum/posts/{id}/pin 取出貼文編號。
+//
+// 為什麼抽成純函式：它是這條路由唯一決定「操作哪一篇文章」的環節，而它的失敗
+// 完全安靜 —— 解析出一個合法的 id 只會讓請求繼續往下，沒有任何訊息告訴管理員
+// 「你操作的其實是另一篇」。抽出來才能被表格測試直接釘住（見 announcement_test.go
+// 的 TestAdminPostPinIDFromPath）。
+//
+// TrimSuffix 而不是 Trim：後者的第二個參數是**字元集合**而不是尾綴，因此
+// "/api/admin/forum/posts/pin1/pin" 會被吃掉前導的 "pin" 而解析成 id 1 ——
+// 操作的貼文與網址指的不是同一篇，稽核紀錄也會記下一顆操作者沒選的貼文。
+// 兩個 Trim 各自的失敗模式都必須保留：前綴對不上時整個字串原樣留下來，
+// ParseInt 自然失敗；尾綴對不上時也一樣。
+func adminPostPinIDFromPath(path string) (int64, error) {
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(path, "/api/admin/forum/posts/"), "/pin")
+	return strconv.ParseInt(trimmed, 10, 64)
+}
+
 // handleAdminPostPin 置頂或取消置頂一篇文章。
 //
 // POST（而非 PATCH）搭配 body 裡的 pinned 布林：它與「切換」語意一致 ——
@@ -489,7 +506,7 @@ func (s *Server) handleAdminPostPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/forum/posts/"), "/pin"), 10, 64)
+	id, err := adminPostPinIDFromPath(r.URL.Path)
 	if err != nil || id < 1 {
 		badRequest(w, "invalid post id")
 		return

@@ -83,6 +83,25 @@ type LoggerConfig struct {
 	EnableColors bool   `toml:"enable_colors"`
 }
 
+// RateLimitConfig 是每 IP 的計價設定。
+//
+// 兩個獨立的限制而不是一個：這三類端點的成本差了一個數量級（一次 50 MiB 的
+// multipart 解析 vs 一次 Redis EXISTS）。共用一個上限的結果是要嘛保護不到寫入，
+// 要嘛把正常載入圖片的頁面一起擋掉。理由見 ratelimit.go 的檔頭。
+type RateLimitConfig struct {
+	// Enabled 為 false 時完全不限制。留這個開關是為了「這個服務被放在另一個
+	// 已經有限流的反向代理之後」的部署 —— 兩層限制疊加會讓上限難以推理。
+	Enabled bool `toml:"enabled"`
+	// MediaRate 是 /files/ 每秒放行的請求數（每 IP）。
+	MediaRate float64 `toml:"media_requests_per_sec"`
+	// MediaBurst 是 /files/ 的連發容量。
+	MediaBurst int `toml:"media_burst"`
+	// WriteRate 是 /upload 與 /delete 每秒放行的請求數（每 IP）。
+	WriteRate float64 `toml:"write_requests_per_sec"`
+	// WriteBurst 是 /upload 與 /delete 的連發容量。
+	WriteBurst int `toml:"write_burst"`
+}
+
 type RedisConfig struct {
 	Addr           string `toml:"addr"`
 	Password       string `toml:"password"`
@@ -93,12 +112,13 @@ type RedisConfig struct {
 }
 
 type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	Storage StorageConfig `toml:"storage"`
-	Upload  UploadConfig  `toml:"upload"`
-	CORS    CORSPolicy    `toml:"cors"`
-	Logger  LoggerConfig  `toml:"logger"`
-	Redis   RedisConfig   `toml:"redis"`
+	Server    ServerConfig    `toml:"server"`
+	Storage   StorageConfig   `toml:"storage"`
+	Upload    UploadConfig    `toml:"upload"`
+	CORS      CORSPolicy      `toml:"cors"`
+	Logger    LoggerConfig    `toml:"logger"`
+	Redis     RedisConfig     `toml:"redis"`
+	RateLimit RateLimitConfig `toml:"ratelimit"`
 }
 
 // loadConfig 讀取並解析 path 指向的 TOML 設定檔，回傳套用兜底值後的設定。
@@ -165,6 +185,26 @@ func (c *Config) applyDefaults() {
 	if c.Storage.Local.FilePerm == 0 {
 		c.Storage.Local.FilePerm = 0644
 	}
+
+	// 限流預設是「開」，而且刻意用「無法用 0 關掉」的形式：這個欄位的零值不是
+	// 「關掉」，而是「沒設定」（見 applyDefaults 的說明）。真的想關掉請把
+	// enabled 明確寫成 false —— 那是一次需要被看見的決定。
+	//
+	// 50/s + burst 200：一篇論壇貼文最多一張圖，而一頁動態大約 10 篇；一個 IP
+	// 在頁面載入時發出的圖片請求遠低於此。寫入 2/s + burst 20：後端上傳是人的
+	// 動作觸發的，一個人不可能每秒發兩次貼文。
+	if c.RateLimit.MediaRate == 0 {
+		c.RateLimit.MediaRate = 50
+	}
+	if c.RateLimit.MediaBurst == 0 {
+		c.RateLimit.MediaBurst = 200
+	}
+	if c.RateLimit.WriteRate == 0 {
+		c.RateLimit.WriteRate = 2
+	}
+	if c.RateLimit.WriteBurst == 0 {
+		c.RateLimit.WriteBurst = 20
+	}
 	if c.Storage.S3.PresignExpireSec == 0 {
 		c.Storage.S3.PresignExpireSec = 3600
 	}
@@ -192,12 +232,22 @@ func (c *Config) applyDefaults() {
 		c.CORS.AllowedOrigins = []string{"*"}
 	}
 	if len(c.CORS.AllowedMethods) == 0 {
-		c.CORS.AllowedMethods = []string{"GET", "HEAD", "OPTIONS"}
+		// 刻意包含寫入方法：上傳與刪除是這個服務存在的主要理由，而它們都是
+		// 跨來源的瀏覽器請求（後端轉传 FormData、後台刪圖）。只放行 GET/HEAD 會
+		// 讓預檢在 204 上「看起來成功」，真正的請求才失敗 —— 那是最難診斷的一種。
+		c.CORS.AllowedMethods = []string{"GET", "HEAD", "OPTIONS", "PUT", "POST", "DELETE"}
 	}
 	if len(c.CORS.AllowedHeaders) == 0 {
 		// 刻意包含 Range：論壇的音檔靠它做拖曳定位，少了它音訊播放器會退化成
 		// 「整個檔案下載完才能播」。
-		c.CORS.AllowedHeaders = []string{"Origin", "Range", "Accept", "Accept-Language"}
+		//
+		// 另三項是上傳與刪除的實際標頭：multipart 的 Content-Type、後端的
+		// X-Upload-Token，以及部分呼叫端沿用的 Authorization。少了任何一個，
+		// 預檢一樣是 204 而真正的請求失敗。
+		c.CORS.AllowedHeaders = []string{
+			"Origin", "Range", "Accept", "Accept-Language",
+			"Content-Type", "X-Upload-Token", "Authorization",
+		}
 	}
 	if c.Redis.Addr == "" {
 		c.Redis.Addr = "localhost:6379"
@@ -210,7 +260,12 @@ func (c *Config) applyDefaults() {
 		// 必須與後端的 MEDIA_TOKEN_KEY_PREFIX 相同，且都要與 session 的
 		// "forum:session:" 前綴區隔。不一致的症狀是「上傳成功、貼文也存得下，
 		// 但圖片一律 401/403」—— 而那正是難以診斷的形狀。
-		c.Redis.TokenKeyPrefix = "media:token:"
+		//
+		// 兜底值刻意與 backend/forum/config 的 applyDefaults 用同一個字面值
+		// "forum:token:"：兩邊都「沒設定」時仍然一致，而「一邊漏設」這個最常見
+		// 的部署失誤就不會再產生上述症狀。故意不選一個只有本服務會用的前綴
+		// —— 那等於把「漏設」從設定錯誤升級成「所有圖片永遠 401」。
+		c.Redis.TokenKeyPrefix = "forum:token:"
 	}
 	if c.Redis.TokenTTLSec == 0 {
 		// 300 秒。

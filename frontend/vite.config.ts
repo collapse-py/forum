@@ -153,7 +153,9 @@ function copyForumRuntimeAssets(): Plugin {
 export default defineConfig({
   base: '/',
   /*
-   * 開發模式的後端代理。少了這一組，npm run dev 是開箱即壞的狀態。
+   * 開發模式的後端代理。少了這一組，npm run dev 會回到「開箱即壞」的狀態 ——
+   * 那一度是真的（KNOWN_ISSUES.md 的 D 節曾經記著這件事），設定補上之後才不再是
+   * 問題，因此這段說明留著，讓下一個想刪掉它的人看得出來自己刪了什麼。
    *
    * 原因：dev server 只服務 5173，而前端的 API 呼叫全部是相對路徑（/api/*、
    * /auth/*、/healthz）。這些請求因此會打到 Vite 自己 —— 拿到的是 HTML 或

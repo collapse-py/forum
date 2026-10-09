@@ -94,6 +94,26 @@ max_size = 52428800
 allowed_files = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
 
 # ------------------------------------------------------------
+#  限流（每 IP 的 token bucket）
+# ------------------------------------------------------------
+# 這個服務在很長一段時間裡完全沒有限流，而它有三類成本差異極大的端點：
+# 一次 50 MiB 的 multipart 解析、一次檔案系統移除、以及每個靜態檔案請求一次的
+# Redis EXISTS。後端的限流器保護不到這個程序。
+#
+# 兩個獨立的限制（媒體 vs 寫入）而不是一個：成本差了一個數量級，共用一個上限
+# 的結果是要嘛保護不到寫入、要嘛把正常載入圖片的頁面一起擋掉。
+#
+# 記憶體實作、不做跨實例共享，因此放到 N 個實例後面時總上限是 N 倍 ——
+# 它仍然是一個上限，而那正是這段設定的目的。要關掉請把 enabled 明確寫 false
+# （例如前面已經有一個有限流的反向代理），但那一是一次需要被看見的決定。
+[ratelimit]
+enabled = true
+media_requests_per_sec = 50
+media_burst = 200
+write_requests_per_sec = 2
+write_burst = 20
+
+# ------------------------------------------------------------
 #  日誌
 # ------------------------------------------------------------
 [logger]
@@ -109,8 +129,13 @@ enable_colors = true
 # 就可以收緊成具體來源。
 [cors]
 allowed_origins = ["*"]
-allowed_methods = ["GET", "HEAD", "OPTIONS"]
-allowed_headers = ["Origin", "Range", "Accept", "Accept-Language", "X-File-Token"]
+# 留空 = 使用程式內建預設（GET/HEAD/OPTIONS/PUT/POST/DELETE +
+# Origin/Range/Accept/Accept-Language/Content-Type/X-Upload-Token/Authorization）。
+# 預設值刻意涵蓋寫入方法與上傳標頭：少了它們，瀏覽器的預檢會回 204 而真正的
+# 請求失敗 —— 那正是最難診斷的形狀。X-File-Token 是本服務**不讀取**的標頭，
+# 曾經出現在範本裡，只會讓人誤以為它是驗證通道（真正的通道是 upload.token）。
+allowed_methods = []
+allowed_headers = []
 
 # ------------------------------------------------------------
 #  Redis（靜態檔案存取權杖驗證）

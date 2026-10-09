@@ -114,14 +114,11 @@ export function PostPage() {
   }, [postID]);
 
   /*
-   * 圖片 token 在離開這一頁時釋放（與其他頁面同一支 hook）。
-   *
-   * 這裡刻意用 useMemo 讓清單的身分穩定：useMediaTokenRelease 的 effect 依賴
-   * 就是傳進去的陣列，而 `post ? [post] : []` 每次 render 都是新的參考，
-   * 症狀是那支 hook 的 effect 每次 render 都重掛（它自己的註解裡寫了這件事）。
+   * 貼文清單用 useMemo 讓身分穩定：useMediaTokenRelease 的 effect 依賴就是
+   * 傳進去的陣列，而 `post ? [post] : []` 每次 render 都是新的參考，症狀是那支
+   * hook 的 effect 每次 render 都重掛（它自己的註解裡寫了這件事）。
    */
   const postList = useMemo(() => (post ? [post] : []), [post]);
-  useMediaTokenRelease(postList);
 
   /* --- 互動 --------------------------------------------------------------- */
 
@@ -138,6 +135,16 @@ export function PostPage() {
     },
     onError: setFail,
   });
+
+  /*
+   * 圖片 token 在離開這一頁時釋放（與其他頁面同一支 hook）。
+   *
+   * 第二批是這一篇的留言：它們的作者頭像來自 GET /comments 自己簽發的 token，
+   * 與貼文那把不是同一把（見 useMediaTokenRelease 檔頭第 6 點）。少了它，
+   * 每展開一次留言就留下一把沒人刪的 key。
+   */
+  const commentList = useMemo(() => (post ? comments.get(postID).items : []), [post, postID, comments]);
+  useMediaTokenRelease(postList, commentList);
 
   const report = useReport({ onSent: setOk, onError: setFail });
 

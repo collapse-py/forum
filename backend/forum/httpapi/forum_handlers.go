@@ -971,8 +971,15 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		 *
 		 * LEFT JOIN 的理由見 forumPostFrom：一位從未建過個人資料的作者仍然有
 		 * 留言，INNER JOIN 會讓那些留言整筆消失。
+		 *
+		 * 簽發失敗刻意是 best-effort：退回「這一頁全部沒有頭像」，而不是讓整支
+		 * 端點回 502。Redis 故障時留言仍然讀得到，而頭像只是辨識度下降 ——
+		 * 與 listForumFollows、handleForumPublicProfile、handleForumProfile
+		 * 對同一件事的處理一致（也與 forumAuthor 對 DB 錯誤退化成匿名代號同源）。
+		 // 一次失敗等於整頁都沒有頭像，也比「前三則有、後五則沒有」一致。
 		 */
 		mediaToken := ""
+		avatarTokenFailed := false
 		comments := make([]forumComment, 0)
 		for rows.Next() {
 			var comment forumComment
@@ -996,14 +1003,19 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 			// 頭像走的是與貼文附圖同一個函式與同一把 token：呼叫端因此不必分辨
 			// 「這張圖是頭像還是附圖」，釋放時也只需交出那一把 token。
 			avatarName := s.forumImageFileName(comment.AuthorAvatar)
-			if avatarName != "" && mediaToken == "" {
-				token, err := s.createMediaToken(r.Context())
-				if err != nil {
-					logger.ErrorfContext(r.Context(), "[FORUM] 建立圖片 token 失敗: %v", err)
-					writeError(w, http.StatusBadGateway, "unable to create media token")
-					return
+			if avatarName != "" && mediaToken == "" && !avatarTokenFailed {
+				token, tokenErr := s.createMediaToken(r.Context())
+				if tokenErr != nil {
+					avatarTokenFailed = true
+					logger.WarnfContext(r.Context(), "[FORUM] 建立留言頭像 token 失敗: %v", tokenErr)
+				} else {
+					mediaToken = token
 				}
-				mediaToken = token
+			}
+			// 拿不到 token 的網址在瀏覽器裡是一張破圖，而「不顯示頭像」比破圖好。
+			// 因此簽發失敗時把 avatarName 一併清掉，其餘欄位不受影響。
+			if avatarName != "" && mediaToken == "" {
+				avatarName = ""
 			}
 			comment.AuthorAvatar = s.forumImageURL(avatarName, mediaToken)
 			comments = append(comments, comment)
@@ -1030,9 +1042,10 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createForumCommentRequest
-	// 此處刻意不套 MaxBytesReader：留言有 2000 字的業務上限擋在後面，
-	// 而限制 body 大小會讓「超長」以 400／413 的另一種形式出現，兩道限制語意重疊。
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 16 KB：2000 rune × 最多 4 bytes + JSON 冗餘的上界。沒有這個上限時，
+	// 「2000 字」只是在**讀完整個 body 之後**才執行的檢查（見 decodeLimitedJSON
+	// 的說明）—— 一個數百 MB 的本文會先完整進到記憶體裡。
+	if err := decodeLimitedJSON(w, r, &req, 16<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -1250,7 +1263,8 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req updateForumPostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 64 KB：內容上限 10000 rune（× 4 bytes 最壞 40 KB）加 JSON 冗餘。
+	if err := decodeLimitedJSON(w, r, &req, 64<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -1313,7 +1327,8 @@ func (s *Server) handleForumCommentUpdate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req updateForumCommentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 16 KB：留言上限 2000 rune，理由見 createForumCommentRequest 那一處。
+	if err := decodeLimitedJSON(w, r, &req, 16<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -1832,7 +1847,9 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req forumProfileRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// 4 KB：暱稱 30 rune + 簡介 500 rune + 頭像網址（純檔名，上限 128
+		// 字元）。三者都遠遠低於這個上限，因此它不是業務校驗而是灌水防線。
+		if err := decodeLimitedJSON(w, r, &req, 4<<10); err != nil {
 			badRequest(w, "invalid request")
 			return
 		}
@@ -2019,7 +2036,8 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createForumPostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 64 KB：內容上限 10000 rune（× 4 bytes 最壞 40 KB）+ 圖片網址 + JSON 冗餘。
+	if err := decodeLimitedJSON(w, r, &req, 64<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}

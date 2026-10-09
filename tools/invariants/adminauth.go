@@ -24,8 +24,10 @@ server.go 全部 24 條後台路由都是 mux.HandleFunc("/api/admin/…", s.han
 【誤報怎麼處理】
 若註冊的 handler 不是一個方法值（例如是個閉包或中介層呼叫），本檢查會跳過它。
 這是刻意的漏報：報一個無法理解的註冊會讓人用 //nolint 把它關掉，那比不報更糟。
-這類形狀的存在與否由 analyzer_test.go 的 TestAdminRoutesAreDirectMethodValues
-釘住 —— 那條測試會直接數 server.go 裡的註冊總數，兩者合起來就不留漏洞。
+這個缺口由 repo_test.go 的 TestAdminRoutesAreDirectMethodValues 釘住 —— 它解析
+真實的 backend/forum/httpapi/server.go，斷言每一條 /api/admin/ 註冊都是
+「接收者叫 mux + 直接方法值」這個形狀。把任一條路由改成閉包的那一天，那支測試
+會紅燈；沒有它的話，那條路由會安靜地不再被檢查。
 */
 package main
 
@@ -222,7 +224,7 @@ func requireAdminGuardPos(fn *ast.FuncDecl) (token.Pos, bool) {
 		if found.IsValid() {
 			return false
 		}
-		if call, ok := n.(*ast.CallExpr); ok && isNamedMethodCall(call, requireAdminName) {
+		if call, ok := n.(*ast.CallExpr); ok && isNamedCall(call, requireAdminName) {
 			found = call.Pos()
 			return false
 		}

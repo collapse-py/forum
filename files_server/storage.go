@@ -31,6 +31,7 @@ AWS SDK：那會讓這個模組多出一個體積可觀的相依樹，而實際�
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -42,8 +43,12 @@ import (
 )
 
 type storageBackend interface {
-	saveFile(dir, filename string, data io.Reader) (string, error)
-	deleteFile(path string) error
+	// saveFile 與 deleteFile 都收一個 context：S3 模式的 PUT／DELETE 對它用
+	// http.NewRequestWithContext，因此「使用者中斷」與「關機」會取消在途的
+	// 上傳／刪除，而不是讓它在背景跑完。本機模式用不到它，但介面必須一致
+	// （兩邊簽名不同的話，呼叫端就得自己記「這個後端要不要 context」）。
+	saveFile(ctx context.Context, dir, filename string, data io.Reader) (string, error)
+	deleteFile(ctx context.Context, path string) error
 	getBaseURL() string
 	// staticRoot 回報「本機磁碟上可以直接以 HTTP 送出檔案的根目錄」。
 	//
@@ -95,7 +100,10 @@ func (l *localStorage) resolveDir(dir string) string {
 	return l.baseDir
 }
 
-func (l *localStorage) saveFile(dir, filename string, data io.Reader) (string, error) {
+// saveFile 寫入本機磁碟。ctx 目前只為介面一致性而收（os.Create／os.Copy 沒有
+// 取消點），保留它是為了讓呼叫端不必分辨後端 —— 見 storageBackend 的說明。
+func (l *localStorage) saveFile(ctx context.Context, dir, filename string, data io.Reader) (string, error) {
+	_ = ctx
 	destDir := l.resolveDir(dir)
 	dstPath := filepath.Join(destDir, filename)
 	dst, err := os.Create(dstPath)
@@ -123,11 +131,38 @@ func (l *localStorage) saveFile(dir, filename string, data io.Reader) (string, e
 	return rel, nil
 }
 
-func (l *localStorage) deleteFile(path string) error {
+// deleteFile 只接受「<filesDir>/<單一檔名>」這個形狀。ctx 的理由同 saveFile。
+func (l *localStorage) deleteFile(ctx context.Context, path string) error {
+	_ = ctx
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	abs := filepath.Join(l.baseDir, strings.TrimPrefix(path, "/"))
+	// 只接受「<filesDir>/<單一檔名>」這個形狀。
+	//
+	// handleDelete 已經拆過一輪，這裡是縱深防禦：deleteFile 是儲存層的公開入口，
+	// 而「捨棄目錄」是一個不可逆且沒有備份途徑的操作。checks 逐條對應一種
+	// 曾經可行、或將來可能因為重構而再次可行的形狀：
+	//
+	//   一段分隔符      —— 多層路徑（"/files/a/b.png"）不在儲存契約裡；
+	//   目錄不是 filesDir —— "/other/x.png" 會落在儲存根而不是 files/；
+	//   檔名是 . 或 ..   —— path.Base 對它們原樣回傳，而 Join 之後就是
+	//                       <base>/files/. 與 <base> 本身（見 server.go 的註解）；
+	//   前導 "."         —— 隱藏檔與相對路徑片段，與 upload 的副檔名白名單同方向。
+	segments := strings.Split(filepath.ToSlash(path), "/")
+	if len(segments) != 3 || segments[1] != l.filesDir {
+		return fmt.Errorf("拒絕刪除儲存契約之外的路徑: %q", path)
+	}
+	name := segments[2]
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, ".") {
+		return fmt.Errorf("拒絕刪除非檔案名稱: %q", path)
+	}
+	abs := filepath.Join(l.baseDir, l.filesDir, name)
+	// 最後一道：解析後的路徑必須嚴格位於 filesDir 之內。上面的形狀檢查已經
+	// 保證了這件事，這一則是為了讓「將來多一種形狀」也不會静默離開 filesDir。
+	root := filepath.Join(l.baseDir, l.filesDir)
+	if !strings.HasPrefix(abs+string(filepath.Separator), root+string(filepath.Separator)) || abs == root {
+		return fmt.Errorf("刪除目標不在 %s 之內: %q", l.filesDir, path)
+	}
 	return os.Remove(abs)
 }
 
@@ -170,7 +205,12 @@ func newS3Storage(cfg *Config) (*s3Storage, error) {
 	}, nil
 }
 
-func (s *s3Storage) saveFile(dir, filename string, data io.Reader) (string, error) {
+// saveFile 以單一段 PUT 寫入 S3。
+//
+// ctx 掛在 HTTP 請求上（http.NewRequestWithContext）：使用者中途關閉分頁會取消
+// 那個在途的 PUT，docker stop 會一起取消剩下的。沒有它時，關機過程中已經發出
+// 的 PUT 會在背景繼續寫入 —— 而那正是「為什麼重啟後多了半個檔案」的來源。
+func (s *s3Storage) saveFile(ctx context.Context, dir, filename string, data io.Reader) (string, error) {
 	objectKey := s.filesPrefix + filename
 
 	var b strings.Builder
@@ -178,7 +218,7 @@ func (s *s3Storage) saveFile(dir, filename string, data io.Reader) (string, erro
 		return "", err
 	}
 
-	req, err := http.NewRequest(http.MethodPut, s.endpoint+"/"+s.bucket+"/"+objectKey, strings.NewReader(b.String()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.endpoint+"/"+s.bucket+"/"+objectKey, strings.NewReader(b.String()))
 	if err != nil {
 		return "", err
 	}
@@ -203,7 +243,8 @@ func (s *s3Storage) saveFile(dir, filename string, data io.Reader) (string, erro
 	return "/" + dir + "/" + filename, nil
 }
 
-func (s *s3Storage) deleteFile(path string) error {
+// deleteFile 以單一段 DELETE 移除 S3 物件。ctx 的理由同 saveFile。
+func (s *s3Storage) deleteFile(ctx context.Context, path string) error {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -215,7 +256,7 @@ func (s *s3Storage) deleteFile(path string) error {
 
 	objectKey := s.filesPrefix + filename
 
-	req, err := http.NewRequest(http.MethodDelete, s.endpoint+"/"+s.bucket+"/"+objectKey, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.endpoint+"/"+s.bucket+"/"+objectKey, nil)
 	if err != nil {
 		return err
 	}

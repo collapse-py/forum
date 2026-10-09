@@ -16,6 +16,7 @@ Package logger 的 HTTP 存取記錄中介層與請求中繼資料管理。
 	SetUserEmail/GetUserEmail  以 context 為媒介單獨傳遞使用者 email
 	Metadata             中繼資料的值型別
 	UserResolver         由呼叫端注入的「身分解析函式」型別
+	ClientIPResolver     由呼叫端注入的「來源位址解析函式」型別
 	LoggingMiddleware     產生存取記錄中介層的進入點
 	UserEmailKey/MetadataKey/RequestIDKey  三個 context key
 
@@ -30,9 +31,12 @@ Package logger 的 HTTP 存取記錄中介層與請求中繼資料管理。
   - 為什麼包一層 StatusWriter：為了在 handler 回應之後仍能知道實際狀態碼。
     直接包 http.ResponseWriter 會讓實作失去 http.Hijacker / http.Flusher 等選用介面，
     因此這裡逐一轉發 Hijack 與 Flush，確保串流／長連線與即時回應仍可運作。
-  - 中介層在 Handler() 中被放在 session Refresh 之外側、mux 之內側：
-    因此存取記錄的 duration 不含 Redis 的 session 續期時間，反映的是實際處理耗時；
-    反過來說，若把 LoggingMiddleware 放到最外層，續期延遲會被算進每筆 API 的耗時。
+   - 中介層在 Handler() 中被放在 Refresh 之內側、mux 之外側：身分解析發生在
+     session 已經被解析過的時間點上，因此拿得到 user_email；代價是存取記錄的
+     duration 不含 Redis 的 session 續期時間，反映的是實際處理耗時。
+     反過來說，若把 LoggingMiddleware 放到 Refresh 外側，身分會全部變成
+     "anonymous"，而續期延遲會被算進每筆 API 的耗時 —— 前者是這個順序的
+     真正理由（見 server.go 的鏈結說明）。
 
 敏感資訊
 
@@ -82,7 +86,9 @@ const RequestIDKey contextKey = "request_id"
 Metadata 為單一請求的日誌中繼資料。欄位皆為字串，且一律以值型別（value type）存放：
 寫入 context 後即使呼叫端再修改本地變數，context 內的內容也不受影響。
 
-	IP         請求來源位址，取自 X-Forwarded-For / X-Real-IP / RemoteAddr。
+	IP         請求來源位址，取自呼叫端注入的 ClientIPResolver（本專案是
+	           httpapi 的 resolveClientIP，即 TRUSTED_PROXY_CIDRS 信任模型）；
+	           未注入時退回 getClientIP 的 X-Forwarded-For → X-Real-IP → RemoteAddr。
 	           屬於外部可控輸入，輸出前仍會再過一次 sanitizeLogValue。
 	UserEmail  已登入使用者的 email；未登入時 LoggingMiddleware 會填 "anonymous"
 	           而非空字串，使日誌中「有訪客但未登入」的情況不會與「完全沒有 metadata」混淆。
@@ -217,6 +223,19 @@ func (sw *StatusWriter) WriteHeader(code int) {
 // 也讓測試可以塞入假的解析邏輯。
 type UserResolver func(r *http.Request) string
 
+// ClientIPResolver 為「這個請求的來源位址」解析函式的型別，由呼叫端注入。
+//
+// 為什麼必須注入而不是繼續用本檔的 getClientIP：來源位址在本專案有兩種互相
+// 矛盾的真相 —— 限流、IP 封鎖、監控與稽核紀錄都走 httpapi 的信任模型
+// （TRUSTED_PROXY_CIDRS：只有當 TCP 對端本身是受信任的代理時，X-Forwarded-For
+// 才有資格發言），而存取記錄過去是「無條件採信 XFF」。同一個請求因此在稽核列
+// 得到一個不可偽造的位址、在 access log 得到一個攻擊者自選的位址，兩者無法互相
+// 對照。把解析函式交給呼叫端（httpapi 傳入 s.clientIP）之後，全站只有一個真相。
+//
+// 允許為 nil：此時退回 getClientIP 的標頭優先順序，供不具備代理拓扑的測試與
+// 內部工具使用。nil 的語意是「沒有信任模型」，不是「安全」。
+type ClientIPResolver func(r *http.Request) string
+
 /*
 isNoisyRequest 判斷該請求是否屬於「不值得寫存取記錄」的雜訊型別。
 
@@ -271,6 +290,10 @@ func isNoisyRequest(r *http.Request) bool {
 //   - next：實際處理請求的 handler（實務上為 http.ServeMux）。
 //   - resolveUser：身分解析函式，由呼叫端注入（本專案傳入 session.Manager.ResolveUser）。
 //     允許為 nil，此時所有請求都以 "anonymous" 記錄，適合測試或不需身分的場景。
+//   - resolveIP：來源位址解析函式，由呼叫端注入（本專案傳入 (*httpapi.Server).clientIP，
+//     即 resolveClientIP + TRUSTED_PROXY_CIDRS。httpapi 不能直接依賴本套件，因此由
+//     server.go 以方法值傳入）。允許為 nil，此時退回 getClientIP 的標頭優先順序 ——
+//     那個路徑無條件採信 X-Forwarded-For，只用於測試與不具備代理拓樸的場合。
 //
 // 處理流程：
 //  1. 記錄起始時間，解析來源 IP 與使用者身分。
@@ -289,12 +312,17 @@ func isNoisyRequest(r *http.Request) bool {
 //
 // 敏感資訊：記錄中不含 cookie、token 或請求本文，只含 request ID、方法、路徑、協定、
 // 狀態碼、耗時，以及由中繼欄位提供的 IP 與 email。
-func LoggingMiddleware(next http.Handler, resolveUser UserResolver) http.Handler {
+func LoggingMiddleware(next http.Handler, resolveUser UserResolver, resolveIP ClientIPResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 在做任何額外工作前取時間基準，讓 duration 涵蓋整個處理過程。
 		start := time.Now()
 
-		ip := getClientIP(r)
+		ip := ""
+		if resolveIP != nil {
+			ip = resolveIP(r)
+		} else {
+			ip = getClientIP(r)
+		}
 		// 先給一個明確的非空預設值，讓 metadata 永遠帶得出欄位（見 MetadataFromContext 的說明）。
 		user := "anonymous"
 		if resolveUser != nil {
@@ -353,13 +381,14 @@ func newRequestID() string {
 
 // getClientIP 取得請求來源 IP，判斷順序為 X-Forwarded-For → X-Real-IP → RemoteAddr。
 //
-// 信任 X-Forwarded-For 的理由：本專案部署在反向代理之後，RemoteAddr 只會拿到代理的位址。
-// 取 XFF 的第一段是「最靠近用戶端」的那個位址。
+// 這只是**沒有信任模型時**的後備路徑（呼叫端沒有注入 ClientIPResolver）。信任
+// X-Forwarded-For 的理由：本專案部署在反向代理之後，RemoteAddr 只會拿到代理的位址。
 //
 // 安全提醒（重要）：此實作「無條件信任」X-Forwarded-For。當服務可被直接連線
 // （未經過可信代理、或代理未清洗此標頭）時，呼叫端可以任意偽造 IP，使日誌中的 IP
-// 欄位不可作為稽核依據。理論上應只信任已知代理的 IP 段，但本專案未實作該白名單。
-// 同一段理由也適用於 X-Real-IP。
+// 欄位不可作為稽核依據。正式環境請透過 LoggingMiddleware 的第三個參數注入
+// httpapi 的信任模型（resolveClientIP + TRUSTED_PROXY_CIDRS），那才是本專案的
+// 正確答案；留空（nil）表示「這裡沒有代理拓樸」，僅供測試與內部工具使用。
 //
 // 邊界處理：RemoteAddr 的格式為 "IP:Port"，以「最後一個冒號」切分以同時支援
 // IPv4 與 [IPv6]:Port 兩種形式（IPv6 的位址本身含冒號，故必須取最後一個）。

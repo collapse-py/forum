@@ -32,12 +32,16 @@ import (
 // 錯誤路徑一律以 JSON 錯誤回應（4xx/5xx）而非重導向：此時使用者手上沒有
 // 有效的 session 狀態，導回登入頁只會造成重新觸發 OAuth 的無意義迴圈。
 func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
-	// err 的文字確實會回傳給瀏覽器；可控的原因是 auth.GetUserEmail 回傳的是
-	// 自己包裝的固定格式字串（如 "code exchange failed: ..."），而不是直接
-	// 轉貼 Google 的原始回應內容。
+	// 細節只進日誌，不對外：auth.GetUserEmail 的錯誤字串會帶著 oauth2 的
+	// RetrieveError，而它的格式是 "oauth2: cannot fetch token: …\nResponse:
+	// <Google 回傳的 body>" —— 原樣送回等於把上游的失敗內容反映給任何能打到
+	// 這個端點的人（redirect_uri 不符、client 被停用、code 重播，每一種都會
+	// 吐出一段可讀的差異）。那是免費的探測介面，而它對排查沒有額外價值：
+	// 同一份細節在下一行就已經寫進日誌。
 	email, err := auth.GetUserEmail(r)
 	if err != nil {
-		internalError(w, "Google login failed: "+err.Error())
+		logger.ErrorfContext(r.Context(), "[AUTH] Google 回呼失敗: %v", err)
+		internalError(w, "unable to complete Google login")
 		return
 	}
 

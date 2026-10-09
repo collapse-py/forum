@@ -838,7 +838,7 @@ func TestLoggingMiddlewareAssignsRequestID(t *testing.T) {
 	var seenInHandler string
 	h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenInHandler = MetadataFromContext(r.Context()).RequestID
-	}), nil)
+	}), nil, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/forum/posts", nil))
@@ -852,6 +852,33 @@ func TestLoggingMiddlewareAssignsRequestID(t *testing.T) {
 	}
 	if len(header) != 16 {
 		t.Errorf("X-Request-ID 長度 = %d, want 16", len(header))
+	}
+}
+
+// TestLoggingMiddlewareUsesInjectedClientIP 守住「來源位址由呼叫端決定」。
+//
+// 這支測試釘的是 H4 修好後的形狀：存取記錄過去自己呼叫 getClientIP，而那個
+// 函式無條件採信 X-Forwarded-For。於是同一個請求在稽核紀錄（httpapi 的
+// resolveClientIP，走 TRUSTED_PROXY_CIDRS）得到一個不可偽造的位址，在這裡
+// 得到一個攻擊者自選的位址 —— 兩份記錄永遠對不起來，而沒有任何錯誤訊息。
+//
+// 注入的解析器必須真的被使用，而不是只是在參數列表裡：因此這裡給一個與
+// getClientIP 結果截然不同的實作，任何「還是走自己的邏輯」的實作都會被抓到。
+func TestLoggingMiddlewareUsesInjectedClientIP(t *testing.T) {
+	var seen string
+	resolveIP := func(*http.Request) string { return "203.0.113.9" }
+	h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = MetadataFromContext(r.Context()).IP
+	}), nil, resolveIP)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/forum/posts", nil)
+	// 讓兩條路徑的結果確定不同：getClientIP 會拿到這個偽造的標頭值。
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	req.RemoteAddr = "10.0.0.1:44321"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if seen != "203.0.113.9" {
+		t.Errorf("IP = %q，want 203.0.113.9（注入的解析器沒有被使用，XFF 又被無條件採信了）", seen)
 	}
 }
 
@@ -874,7 +901,7 @@ func TestLoggingMiddlewareAnonymousWhenNoResolver(t *testing.T) {
 			var seen string
 			h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				seen = MetadataFromContext(r.Context()).UserEmail
-			}), tc.resolver)
+			}), tc.resolver, nil)
 
 			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 			if seen != tc.want {
@@ -907,7 +934,7 @@ func TestLoggingMiddlewareSeverityByStatus(t *testing.T) {
 			buf := capture(t)
 			h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.status)
-			}), nil)
+			}), nil, nil)
 
 			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/thing", nil))
 
@@ -936,7 +963,7 @@ func TestLoggingMiddlewareSeverityByStatus(t *testing.T) {
 func TestLoggingMiddlewareRecordsPathWithoutQuery(t *testing.T) {
 	buf := capture(t)
 
-	h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), nil)
+	h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), nil, nil)
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest(http.MethodGet, "/api/forum/search?q=secret_token_abc", nil))
 

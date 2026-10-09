@@ -19,7 +19,7 @@
  * 使用者只會看到按鈕沒反應。現在首頁有一行真正的狀態列。
  */
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { LoginRequiredError, errorMessage, goToLogin, requestJSON } from '../core';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
@@ -164,8 +164,17 @@ export function FeedPage() {
   /*
    * 動態與搜尋結果的圖片都要納入：兩者是同一頁的內容，離開時一併釋放。
    * 實作見 useMediaTokenRelease（為什麼走 sendBeacon、為什麼只送一次）。
+   *
+   * 第三批是這一頁展開過的留言：每則留言的作者頭像來自 GET /comments 自己簽發
+   * 的 token，與貼文那把不是同一把（見 useMediaTokenRelease 檔頭第 6 點）。
+   * 少了它，首頁每展開一次留言就留下一把沒人刪的 key —— 而展開留言是這一頁
+   * 最常見的操作，且完全不會有任何錯誤訊息。
    */
-  useMediaTokenRelease(feedItems, search.state.items);
+  const commentItems = useMemo(
+    () => Object.values(comments.states).flatMap((state) => state.items),
+    [comments.states],
+  );
+  useMediaTokenRelease(feedItems, search.state.items, commentItems);
 
   /* --- 動作 --------------------------------------------------------------- */
 

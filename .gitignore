@@ -9,6 +9,13 @@ server.log
 # 沒有它，npm 裝的幾百 MB 會跟著進版控。
 node_modules/
 
+# Vite 的暫存轉換檔。dev/build 會在 frontend/ 底下留下
+# vite.config.ts.timestamp-<epoch>-<hash>.mjs —— 它是工具鏈的中間產物，
+# 卻曾經被提交進版控（內容是編譯過的設定檔，含本機絕對路徑）。
+# 這個樣式必須明確列出：它與版控內的 vite.config.ts 只差一個後綴，
+# 而「一個看起來像原始碼的檔案」正是最容易被下一個人當成真的那一類。
+vite.config.ts.timestamp-*.mjs
+
 # Go 編譯產物。backend/update.sh 與 files_server/start.ps1 都會重新 go build，
 # 版本控只留原始碼。（node_modules 裡的 esbuild.exe 也一併被這條蓋掉。）
 *.exe

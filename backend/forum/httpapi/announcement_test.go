@@ -239,3 +239,45 @@ func TestForumAnnouncementRejectsNonGet(t *testing.T) {
 		t.Fatalf("回應 = %d, want 405", recorder.Code)
 	}
 }
+
+/*
+置頂路由的 id 解析。
+
+這個路由的形狀是 /api/admin/forum/posts/{id}/pin，而 id 是用字串修剪從路徑上
+取下來的。修剪函式的第二個參數是**字元集合**而不是尾綴，因此
+"/api/admin/forum/posts/pin1/pin" 會被吃掉前導的 "pin" 而解析成 id 1 ——
+網址指的貼文與實際被置頂的貼文不是同一篇，而稽核紀錄記的是後者。
+
+症狀完全安靜：一個管理員照著某個畸形 URL 操作，紀錄裡出現一篇他沒有選的貼文。
+因此這一節逐條釘住「什麼路徑解析成什麼 id」。
+
+斷言直接打在純函式上而不是打 HTTP 回應：這條路由的前兩道關卡（管理員、來源）
+都還沒碰到 id 解析，從 HTTP 端進來只會看到 401／403，測不到重點。
+*/
+func TestAdminPostPinIDFromPath(t *testing.T) {
+	cases := []struct {
+		path   string
+		want   int64
+		wantOK bool
+	}{
+		{"/api/admin/forum/posts/1/pin", 1, true},
+		{"/api/admin/forum/posts/12/pin", 12, true},
+		// 尾斜線不是這個路由的形狀（分流靠 HasSuffix "/pin"），因此它必須失敗。
+		{"/api/admin/forum/posts/1/pin/", 0, false},
+		// 這三筆是修掉 Trim 之後才失敗的：舊實作會把它們解析成 1、12、與 ""（→ 錯誤）。
+		{"/api/admin/forum/posts/pin1/pin", 0, false},
+		{"/api/admin/forum/posts/12pin/pin", 0, false},
+		{"/api/admin/forum/posts/abc/pin", 0, false},
+		{"/api/admin/forum/posts//pin", 0, false},
+		// 非正值能解析出來，由 handler 的 id < 1 擋掉（兩道檢查缺一不可）。
+		{"/api/admin/forum/posts/-1/pin", -1, true},
+		{"/api/admin/forum/posts/0/pin", 0, true},
+	}
+	for _, tc := range cases {
+		got, err := adminPostPinIDFromPath(tc.path)
+		if tc.wantOK != (err == nil) || (err == nil && got != tc.want) {
+			t.Errorf("adminPostPinIDFromPath(%q) = (%d, %v), want (%d, ok=%v)",
+				tc.path, got, err, tc.want, tc.wantOK)
+		}
+	}
+}

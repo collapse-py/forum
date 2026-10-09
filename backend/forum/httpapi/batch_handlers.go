@@ -519,9 +519,14 @@ func (s *Server) handleAdminBatchStatus(w http.ResponseWriter, r *http.Request) 
 // decodeLimitedJSON 以大小上限解碼 JSON body。
 //
 // 包 MaxBytesReader 是為了擋掉灌水：這兩個端點的 body 只有 email 與幾個
-// 數字，16 KiB 遠超合理需求。錯誤一律回同一個訊息 —— 觸及上限的錯誤
-// （"http: request body too large"）不該被回給使用者，因為那洩漏了實作細節，
-// 而且對「你的請求太大」這個事實沒有任何幫助。
+// 布林值，卻曾經能被呼叫端用任意大的本文拖進記憶體 —— json.Decoder 會在
+// **驗證長度之前**就把整個 JSON value 讀完，因此「業務邏輯有 2000 字上限」
+// 並不是 body 的上限。上限到了之後 Decode 回傳錯誤，呼叫端照 400 處理。
+//
+// 上限怎麼選：業務上限的 rune 數 × 4（UTF-8 最壞每位元組數）+ JSON 結構的
+// 冗餘，然後往上取一個好記的 2 的次方。留 2～4 倍餘地是刻意的 —— 上限的用途
+// 是擋掉「比合法請求大幾個數量級」的灌水，不是精確校驗；訂得太緊會讓未來的
+// 合法擴充（例如新增一個選填欄位）以 400 的形式失敗，而那是最難診斷的形狀。
 func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
 	return json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(dst)
 }

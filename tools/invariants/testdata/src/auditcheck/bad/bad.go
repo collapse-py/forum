@@ -92,3 +92,23 @@ func (s *Server) rollsBackWithoutAudit(r *request) {
 		return
 	}
 }
+
+// 自由函式形狀的違規：beginAdminTx 被重構成自由函式之後，規則仍然要抓得到。
+//
+// 少了這一筆，把交易改用自由函式就能讓整條規則安靜失效 —— 而 CI 全綠。
+// 見 isNamedCall 的說明。自由函式與方法同名在 Go 裡是合法的（方法名不佔用
+// 套件作用域），因此這個樣本可以同時有兩種形狀。
+func discardAuditErrorWithFreeFunctions(r *request) {
+	tx, err := beginAdminTx(r)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	recordAdminAction(r, tx, "update")
+	tx.Commit() // want "以 beginAdminTx 開啟交易並提交"
+}
+
+func beginAdminTx(r *request) (*tx, error) { return &tx{}, nil }
+func recordAdminAction(r *request, t *tx, action string) error {
+	return errors.New("audit failed")
+}

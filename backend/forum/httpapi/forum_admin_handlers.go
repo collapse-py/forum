@@ -513,7 +513,10 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	// 於是空 body 的未知 method 拿到 400 而非 405。實務上前端只會送 PUT／PATCH／DELETE，
 	// 這個行為差異可以接受。
 	var req adminForumReportRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 16 KB：與同檔 handleAdminForumReportAction 的 16 KB 相同量級（reason 與
+	// reporterEmail 都是自由文字）。沒有限上限時，呼叫端能用任意大的 body 換一次
+	// 完整的 JSON 解析 —— 見 decodeLimitedJSON 的說明。
+	if err := decodeLimitedJSON(w, r, &req, 16<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -1154,10 +1157,11 @@ func (s *Server) createAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req adminForumPostRequest
-	// 沒有套用 MaxBytesReader：此路徑的 body 只含一個 content 欄位，
-	// 且 validateAdminForumPost 會擋掉超過 10000 字的內容（以 rune 計；UTF-8 每字 1~4 bytes，
-	// 最壞約 40 KB），足以限制實際寫入量，額外的 body 上限對這個單欄位表單屬於多餘的防線。
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 64 KB：這個 body 只有一個 content 欄位，但「只有一個欄位」不等於「 body 有
+	// 上限」—— json.Decoder 會在 validateAdminForumPost 跑完之前就把整個 value
+	// 讀進記憶體（見 decodeLimitedJSON 的說明）。10000 rune × 4 bytes 最壞 40 KB，
+	// 取 64 KB 留一倍餘地。
+	if err := decodeLimitedJSON(w, r, &req, 64<<10); err != nil {
 		badRequest(w, "invalid request")
 		return
 	}
@@ -1260,7 +1264,9 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		// PUT 的語意是「整篇內容取代」，但範圍只限 content 欄位：作者與建立時間屬於
 		// 內容的來源紀錄，管理介面刻意不提供修改入口。
 		var req adminForumPostRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// 64 KB：與上面 handleAdminForumPostCreate 同一個上限與同一個理由
+		// （content 10000 rune，見 decodeLimitedJSON）。
+		if err := decodeLimitedJSON(w, r, &req, 64<<10); err != nil {
 			badRequest(w, "invalid request")
 			return
 		}
@@ -1454,7 +1460,8 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 			return
 		}
 		var req adminForumCommentRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// 16 KB：content 上限 2000 rune（× 4 bytes）+ JSON 冗餘。
+		if err := decodeLimitedJSON(w, r, &req, 16<<10); err != nil {
 			badRequest(w, "invalid request")
 			return
 		}
@@ -1560,7 +1567,8 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 		// adminForumCommentRequest 同時帶 PostID，但這裡只使用 body 的 content：
 		// 刻意不允許把留言搬到另一篇文章，避免出現 post_id 與路徑語意不一致的資料。
 		var req adminForumCommentRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// 16 KB：content 上限 2000 rune（× 4 bytes）+ JSON 冗餘。
+		if err := decodeLimitedJSON(w, r, &req, 16<<10); err != nil {
 			badRequest(w, "invalid request")
 			return
 		}

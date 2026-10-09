@@ -311,7 +311,13 @@ func main() {
 		logger.Infof("[SEARCH] 貼文索引重建完成，共 %d 篇", indexed)
 	}()
 
-	logger.Infof("[SERVER] Forum server started at %s", cfg.ServerPort)
+	/*
+	 * 「啟動完成」這行日誌只在最下面、真正進入監聽**之前**印一次（見下面
+	 * sigCh 附近）。這裡刻意不再印一次：兩行字樣完全相同的訊息會讓人以為
+	 * 站台被啟動了兩次，而它們的真正差異是 —— 第一行在監聽開始前，
+	 * 第二行（唯一的第二行）在訊號處理註冊完、ListenAndServe 之前。
+	 * 差別只對「啟動過程卡在後半段」的排查有意義，而那只需要一行。
+	 */
 
 	/*
 	 * 啟動監控統計的持久化。
@@ -427,6 +433,9 @@ func main() {
 	notifyOnSignal(sigCh)
 	defer signal.Stop(sigCh)
 
+	// 這是全流程唯一一行「啟動完成」。它排在訊號處理註冊之後、ListenAndServe
+	// 之前：往後每一行都不會再印（見上面搜尋索引那段之後的說明），因此「這行
+	// 出現了卻聽不到請求」可以直接指向 ListenAndServe 或埠的問題。
 	logger.Infof("[SERVER] Forum server started at %s", cfg.ServerPort)
 
 	/*

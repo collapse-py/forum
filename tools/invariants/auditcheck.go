@@ -45,13 +45,17 @@ import (
 )
 
 const (
-	// beginAdminTxName / recordAdminActionName / commitName 以方法名比對，
+	// beginAdminTxName / recordAdminActionName / commitName 以名稱比對，
 	// 而不是以「接收者是否為本專案的 *Server」比對。
 	//
 	// 為什麼不用型別資訊：這個分析器要能被 analysistest 對著 testdata 裡的
 	// 假套件跑，而那些假套件沒有本專案的 Server 型別。以名稱比對讓測試可以用
-	// 一個極小的樣本涵蓋規則；代價是「別的型別剛好也叫這個名字」，而這個
-	// 儲存庫裡 beginAdminTx 只有一個定義（見 analyzer_test.go 的斷言）。
+	// 一個極小的樣本涵蓋規則；代價是「別的型別剛好也叫這個名字」。
+	// 這個代價由 repo_test.go 的 TestBeginAdminTxHasOneDefinition 守住：
+	// 它解析真實的 backend/forum/httpapi，斷言 beginAdminTx 只有一個定義。
+	//
+	// 名稱比對的形狀則是方法呼叫與自由函式呼叫兩者都認（見 isNamedCall）——
+	// 只認其中一種會讓「重構」變成讓規則安靜失效的方法。
 	beginAdminTxName      = "beginAdminTx"
 	recordAdminActionName = "recordAdminAction"
 	commitName            = "Commit"
@@ -184,7 +188,7 @@ func beginAdminTxResultVars(fn *ast.FuncDecl) map[string]bool {
 			if stmt.Tok != token.DEFINE || len(stmt.Lhs) == 0 {
 				return true
 			}
-			if !isNamedMethodCall(stmt.Rhs[0], beginAdminTxName) {
+			if !isNamedCall(stmt.Rhs[0], beginAdminTxName) {
 				return true
 			}
 			if id, ok := stmt.Lhs[0].(*ast.Ident); ok {
@@ -194,7 +198,7 @@ func beginAdminTxResultVars(fn *ast.FuncDecl) map[string]bool {
 			if len(stmt.Names) == 0 || len(stmt.Values) == 0 {
 				return true
 			}
-			if !isNamedMethodCall(stmt.Values[0], beginAdminTxName) {
+			if !isNamedCall(stmt.Values[0], beginAdminTxName) {
 				return true
 			}
 			vars[stmt.Names[0].Name] = true
@@ -219,7 +223,7 @@ func recordAdminActionCalls(fn *ast.FuncDecl) []auditCall {
 	var calls []auditCall
 	walkBody(fn.Body, func(parent ast.Node, n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !isNamedMethodCall(call, recordAdminActionName) {
+		if !ok || !isNamedCall(call, recordAdminActionName) {
 			return true
 		}
 		// 唯一的「沒有被使用」形狀是把它當成一個獨立運算式：
@@ -235,12 +239,32 @@ func recordAdminActionCalls(fn *ast.FuncDecl) []auditCall {
 	return calls
 }
 
-// isNamedMethodCall 判斷 expr 是否為「某個接收者上的指定方法呼叫」。
-func isNamedMethodCall(expr ast.Expr, method string) bool {
+// isNamedCall 判斷 expr 是否為「指定名稱的函式或方法呼叫」。
+//
+// 兩種形狀都接受，漏掉任何一種都是一種**靜默失效**：
+//
+//	s.beginAdminTx(r)     方法呼叫（SelectorExpr）
+//	beginAdminTx(s, r)    自由函式呼叫（Ident）
+//
+// 只認方法呼叫的話，把 s.beginAdminTx 重構成自由函式 beginAdminTx(s, r) 會讓
+// auditcheck 與 blocklistmount **同時**失去檢查對象 —— 兩條規則一起安靜下來，
+// 而 CI 全綠。那正是 analyzer_test.go 檔頭說的「規則看起來在跑、實際上什麼都沒
+// 檢查」。自由函式在這個套件裡已經存在（resolveClientIP、parseTrustedProxyCIDRs），
+// 因此這不是假設性的形狀。
+//
+// 刻意不做型別比對：那需要 type info，而 analysistest 的假套件沒有真實型別
+// （見常數區的說明）。名稱比對的代價由 repo_test.go 的
+// TestBeginAdminTxHasOneDefinition 守住。
+func isNamedCall(expr ast.Expr, name string) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == method
+	switch fun := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		return fun.Sel.Name == name
+	case *ast.Ident:
+		return fun.Name == name
+	}
+	return false
 }

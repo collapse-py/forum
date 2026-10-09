@@ -33,7 +33,11 @@ flowchart LR
 5. **代理必須放行 `Service-Worker-Allowed` 與 `/service-worker.js`**，否則 PWA 不會更新。
 6. `/files/*` 若走代理並由瀏覽器直接取圖，代理**不得**吃掉 `?token=` 查詢參數。
 7. **Redis 只能綁內網** —— 它是本站的信任根（見 [SECURITY](SECURITY.md)）。
-8. **停止訊號要送得對，而且要給夠時間。** 後端收到 `SIGTERM` / `SIGINT` 後會排空在途
+8. **`files_server` 的 `upload.token` 必須設定。** 留空是程式明確允許的狀態（本機測試
+   用），而那等於「任何找得到這個埠的人都能上傳與刪除檔案」—— 沒有任何錯誤訊息會
+   提醒你。這個服務的 `/delete` 也接受 `.` 與 `..` 以外的所有檔名（見
+   `files_server/storage.go` 的 deleteFile）。
+9. **停止訊號要送得對，而且要給夠時間。** 後端收到 `SIGTERM` / `SIGINT` 後會排空在途
    請求，上限是 `SHUTDOWN_TIMEOUT_SECONDS`（預設 15 秒）。部署環境的停止上限必須
    **大於**它：
 

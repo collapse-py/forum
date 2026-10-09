@@ -87,3 +87,36 @@ func (s *Server) declaredWithVar(r *request) {
 	}
 	tx.Commit()
 }
+
+// 自由函式形狀：整個交易走自由函式而不是方法呼叫。
+//
+// 這一筆存在的理由見 isNamedCall：只認方法呼叫的話，把 beginAdminTx 重構成
+// 自由函式會讓整條規則安靜失效。好的樣本也必須涵蓋它，否則「自由函式永遠不被
+// 檢查」與「自由函式被正確檢查」兩種實作都能通過測試。
+func checkedWithFreeFunctions(r *request) {
+	tx, err := beginAdminTx(r)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if err := recordAdminAction(r, tx, "update"); err != nil {
+		return
+	}
+	tx.Commit()
+}
+
+// 自由函式的交易搭配方法的稽核呼叫（混合形狀）：兩邊都要被認出來。
+func (s *Server) mixedShapes(r *request) {
+	tx, err := beginAdminTx(r)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if err := s.recordAdminAction(r, tx, "update"); err != nil {
+		return
+	}
+	tx.Commit()
+}
+
+func beginAdminTx(r *request) (*tx, error)   { return &tx{}, nil }
+func recordAdminAction(r *request, t *tx, a string) error { return nil }

@@ -57,7 +57,7 @@ npm run preview      # 預覽 dist/
 
 - **`copyForumRuntimeAssets`**（`enforce: 'post'`）：用 esbuild 編譯 `service-worker.ts` 成 IIFE，輸出**不帶 hash** 的 `/service-worker.js` 與 `/forum-manifest.json`（service worker 必須如此），並把 HTML 裡的 manifest 連結改回未雜湊版，讓後端可以在送出時替換 `{{FORUM_NAME}}`。
 - **`vite-plugin-javascript-obfuscator`**（只在 `build`）：字串陣列旋轉 + control flow flattening。`debugProtection` / `selfDefending` 維持關閉，因為它們需要 `eval`，而 CSP 是 `script-src 'self'`。
-- **沒有設定 `server.proxy`**，見下。
+- **`server.proxy`**：`/api`、`/auth`、`/healthz`、`/files` 轉到 `http://localhost:8088`，讓 `npm run dev` 直接打得通後端。這個 proxy 曾經不存在，因此 `npm run dev` 一度「開箱即壞」—— 那段歷史寫在下面的已知問題裡，現在它已經設好了。
 
 ### `npm run dev` 開箱即壞
 

@@ -29,8 +29,9 @@
 3. 公告 —— 有「同時只有一則」這個跨請求的不變條件
 4. 統計 —— 算錯時症狀是「數字看起來不對」，不會壞掉
 
-**測試覆蓋集中在少數幾個檔**，主要 handler 沒有測試；`server.go` 的註解提到的
-`forum_handlers_test.go` 目前不存在於 repo 中。
+**測試覆蓋集中在少數幾個檔**，主要 handler 沒有測試。（`server.go` 的註解曾經
+引用一個不存在的 `forum_handlers_test.go`；那條引用已經改指真正存在的測試檔，
+而「路由總表與實際相符」現在由 `security_invariants_test.go` 真的數註冊來保證。）
 
 **`forum/data` 的遷移測試需要真實 MySQL**，本機執行時會全部跳過（未設
 `FORUM_TEST_MYSQL_DSN`）。CI 的 `migrations` job 會跑它們 —— 但那也意味著
@@ -217,12 +218,6 @@ P95 只會落在 1/2/5/10/25/50/100/250/500ms 或 1/2/5/10s 上。介面上照�
 ---
 
 ## D. 介面一致性
-
-### `npm run dev` 開箱即壞
-
-`vite.config.ts` 沒有設定 `server.proxy`，所以相對路徑的 API 請求打不到後端。
-
-要嘛照 [`FRONTEND.md`](FRONTEND.md#npm-run-dev-開箱即壞) 補上 proxy，要嘛照正式模式走（`npm run build` + 啟動後端）。
 
 ### `public-profile` 與 `public-posts` 的參數名不一致
 
