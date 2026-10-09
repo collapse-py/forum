@@ -83,6 +83,8 @@ export const zhMO: Record<MessageKey, string> = {
     '讀取個人資料失敗',
   'error.fallbackProfileSave':
     '儲存失敗',
+  'error.fallbackAvatarUpload':
+    '頭像上傳失敗',
   'error.fallbackPublish':
     '發佈回應格式錯誤',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const zhMO: Record<MessageKey, string> = {
     '輸入暱稱',
   'profile.nicknameHint':
     '暱稱會顯示在你發布的帖文上，最多 30 個字。',
+  'profile.avatarLabel':
+    '頭像',
+  'profile.avatarHint':
+    '頭像會顯示在你發布的帖文與留言上，可上傳 JPG、PNG、GIF 或 WebP。',
+  'profile.avatarChoose':
+    '選擇圖片',
+  'profile.avatarRemove':
+    '移除頭像',
+  'profile.avatarUploading':
+    '上傳中...',
+  'profile.avatarPreviewAlt':
+    '新頭像預覽',
   'profile.bioLabel':
     '個人簡介',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const zhMO: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     '公開個人資料',
-  'publicProfile.avatar':
-    '匿',
   'publicProfile.loading':
     '載入中...',
   'publicProfile.invalidLinkName':

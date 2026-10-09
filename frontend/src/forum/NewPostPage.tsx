@@ -8,12 +8,14 @@
  * 收進 core 的 requestJSON（LoginRequiredError），三個公開頁共用同一套判斷。
  */
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { LoginRequiredError, errorText, goToLogin, requestJSON } from '../core';
-import type { UploadResponse } from '../types';
+import type { ForumProfile, UploadResponse } from '../types';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import { BottomNav, ForumNav, ForumShell, useAuth, usePwaInstall } from './shell';
+import { ForumAvatar } from './ForumAvatar';
+import { useMediaTokenRelease } from './useMediaTokenRelease';
 
 /* 函式而非常數：模組層的物件會把 import 時的語言固定住，切換後就不會跟著換。 */
 function authLabels(): { loggedIn: string; loggedOut: string; error: string } {
@@ -144,8 +146,60 @@ export function NewPostPage() {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  /* --- 圖片 token --------------------------------------------------------- */
+  /* --- 「我」的公開資料 ---------------------------------------------------- */
 
+  /*
+   * composer 那顆頭像要顯示「我自己」，而 useAuth 只回答「登入了沒」—— 暱稱與
+   * 頭像住在 /api/forum/profile，因此已登入時多讀一次。
+   *
+   * 刻意只在 loggedIn 已經是 true 之後才問：未登入的請求會被 requireLogin 轉到
+   * 登入頁，requestJSON 會把它判成 LoginRequiredError 並導走整頁 —— 而那會把
+   * 「先看看這一頁長什麼樣」的訪客直接踢去登入。
+   *
+   * 讀失敗刻意不顯示任何錯誤：這一顆頭像不是發文的必要條件，退回顯示「你」
+   * 就夠了（與後端 handleForumProfile 簽不到 media token 時退回首字同一個
+   * 取捨）。也不存翻譯過的訊息 —— 那就沒有切換語言後殘留舊語言的問題。
+   */
+  const [myProfile, setMyProfile] = useState<{ nickname: string; avatarUrl: string }>({
+    nickname: '',
+    avatarUrl: '',
+  });
+
+  useEffect(() => {
+    if (!loggedIn) {
+      setMyProfile({ nickname: '', avatarUrl: '' });
+      return undefined;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const profile = await requestJSON<ForumProfile>('/api/forum/profile', {
+          fallback: t('error.fallbackProfile'),
+        });
+        if (!active) return;
+        setMyProfile({ nickname: profile.nickname ?? '', avatarUrl: profile.avatarUrl ?? '' });
+      } catch {
+        if (active) setMyProfile({ nickname: '', avatarUrl: '' });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loggedIn]);
+
+  /*
+   * 那顆頭像的 media token 也要在離開時釋放（理由見 useMediaTokenRelease）。
+   *
+   * 與下面上傳圖片那把 token 分成兩個 listener：那一把存在 ref 裡（上傳當下就要
+   * 用，不經過 state），而這一把天生就是 state —— 硬把兩者塞進同一個機制要嘛
+   * 把上傳網址改成 state（多幾次 re-render），要嘛把頭像網址改成 ref（失去這個
+   * 專用的去重與去空邏輯）。兩個 pagehide 的花費是兩次 sendBeacon，而那本來就
+   * 是兩個不同生命週期的東西。
+   */
+  const myAvatarURLs = useMemo(() => (myProfile.avatarUrl ? [myProfile.avatarUrl] : []), [myProfile.avatarUrl]);
+  useMediaTokenRelease(myAvatarURLs);
+
+  /* --- 圖片 token --------------------------------------------------------- */
   const uploadedURLRef = useRef('');
   const releasedRef = useRef(false);
 
@@ -229,7 +283,19 @@ export function NewPostPage() {
 
         <section className="new-post-panel">
           <div className="new-post-heading">
-            <div className="avatar avatar-you">{t('newPost.avatarYou')}</div>
+            {/*
+              「我」的頭像。沒有暱稱時退回顯示「你」，與 React 版之前的行為一致 ——
+              而有暱稱時的首字與貼文卡、個人頁讀同一份資料（/api/forum/profile），
+              因此同一顆頭像在各個頁面同一個長相。
+
+              alt 給空字串：旁邊的 <h1> 就是這個頁面的標題，而這顆頭像與它是
+              同一個意思（這個頁面是「以你的身分發文」）。
+            */}
+            <ForumAvatar
+              className="avatar avatar-you"
+              url={myProfile.avatarUrl}
+              name={myProfile.nickname || t('newPost.avatarYou')}
+            />
             <div>
               <div className="eyebrow">{t('newPost.eyebrow')}</div>
               <h1>{t('newPost.title')}</h1>

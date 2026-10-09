@@ -83,6 +83,8 @@ export const id: Record<MessageKey, string> = {
     'Gagal membaca profil pribadi',
   'error.fallbackProfileSave':
     'Gagal menyimpan',
+  'error.fallbackAvatarUpload':
+    'Gagal mengunggah foto profil',
   'error.fallbackPublish':
     'Format respons publikasi tidak valid',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const id: Record<MessageKey, string> = {
     'Masukkan nama tampilan',
   'profile.nicknameHint':
     'Nama tampilan akan ditampilkan pada artikel yang Anda terbitkan, maksimal 30 karakter.',
+  'profile.avatarLabel':
+    'Foto profil',
+  'profile.avatarHint':
+    'Foto profil akan ditampilkan pada artikel dan komentar yang Anda terbitkan, dapat mengunggah JPG, PNG, GIF, atau WebP.',
+  'profile.avatarChoose':
+    'Pilih gambar',
+  'profile.avatarRemove':
+    'Hapus foto profil',
+  'profile.avatarUploading':
+    'Mengunggah...',
+  'profile.avatarPreviewAlt':
+    'Pratinjau foto profil baru',
   'profile.bioLabel':
     'Tentang saya',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const id: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Profil publik',
-  'publicProfile.avatar':
-    'Avatar',
   'publicProfile.loading':
     'Sedang memuat...',
   'publicProfile.invalidLinkName':

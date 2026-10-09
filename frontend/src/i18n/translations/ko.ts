@@ -83,6 +83,8 @@ export const ko: Record<MessageKey, string> = {
     '프로필 정보를 불러오지 못했습니다.',
   'error.fallbackProfileSave':
     '저장 실패',
+  'error.fallbackAvatarUpload':
+    '프로필 이미지 업로드에 실패했습니다.',
   'error.fallbackPublish':
     '게시 응답 형식이 올바르지 않습니다',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const ko: Record<MessageKey, string> = {
     '닉네임 입력',
   'profile.nicknameHint':
     '닉네임은 게시글에 표시됩니다. 최대 30자입니다.',
+  'profile.avatarLabel':
+    '프로필 이미지',
+  'profile.avatarHint':
+    '프로필 이미지는 게시글과 댓글에 표시됩니다. JPG, PNG, GIF, WebP를 업로드할 수 있습니다.',
+  'profile.avatarChoose':
+    '이미지 선택',
+  'profile.avatarRemove':
+    '프로필 이미지 삭제',
+  'profile.avatarUploading':
+    '업로드 중...',
+  'profile.avatarPreviewAlt':
+    '새 프로필 이미지 미리보기',
   'profile.bioLabel':
     '자기소개',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const ko: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     '공개 프로필',
-  'publicProfile.avatar':
-    '익명',
   'publicProfile.loading':
     '불러오는 중...',
   'publicProfile.invalidLinkName':

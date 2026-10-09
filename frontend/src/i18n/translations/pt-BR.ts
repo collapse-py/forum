@@ -83,6 +83,8 @@ export const ptBR: Record<MessageKey, string> = {
     'Falha ao carregar o perfil',
   'error.fallbackProfileSave':
     'Falha ao salvar',
+  'error.fallbackAvatarUpload':
+    'Falha ao enviar a foto do perfil',
   'error.fallbackPublish':
     'Formato de resposta de publicação inválido',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const ptBR: Record<MessageKey, string> = {
     'Digite um apelido',
   'profile.nicknameHint':
     'O apelido será exibido nas suas publicações, com até 30 caracteres.',
+  'profile.avatarLabel':
+    'Foto do perfil',
+  'profile.avatarHint':
+    'A foto do perfil será exibida nas suas publicações e comentários. Você pode enviar JPG, PNG, GIF ou WebP.',
+  'profile.avatarChoose':
+    'Escolher imagem',
+  'profile.avatarRemove':
+    'Remover foto do perfil',
+  'profile.avatarUploading':
+    'Enviando...',
+  'profile.avatarPreviewAlt':
+    'Prévia da nova foto do perfil',
   'profile.bioLabel':
     'Biografia',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const ptBR: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Dados pessoais públicos',
-  'publicProfile.avatar':
-    'Anônimo',
   'publicProfile.loading':
     'Carregando...',
   'publicProfile.invalidLinkName':

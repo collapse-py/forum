@@ -317,7 +317,7 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 	}
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT `+forumPostProjection+`
-		FROM forum_posts fp
+		`+forumPostFrom+`
 		WHERE fp.id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -345,7 +345,11 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 			return nil, err
 		}
 		imageName := s.forumImageFileName(post.ImageURL)
-		if imageName != "" && mediaToken == "" {
+		// 頭像與附圖共用同一把 token，理由與 loadForumPosts 相同：一頁一把、
+		// 離開時一次釋放。少了 avatarName 這個判斷，搜尋結果裡的作者頭像會
+		// 全部載不出來，而那不會出現在任何錯誤訊息裡。
+		avatarName := s.forumImageFileName(post.AuthorAvatar)
+		if (imageName != "" || avatarName != "") && mediaToken == "" {
 			token, err := s.createMediaToken(r.Context())
 			if err != nil {
 				return nil, err
@@ -353,6 +357,7 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 			mediaToken = token
 		}
 		post.ImageURL = s.forumImageURL(imageName, mediaToken)
+		post.AuthorAvatar = s.forumImageURL(avatarName, mediaToken)
 		indexOf[post.ID] = len(ordered)
 		ordered = append(ordered, post)
 	}

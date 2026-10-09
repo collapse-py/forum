@@ -28,12 +28,13 @@
  * 刻意維持三格（見 shell.tsx 的 bottomTabs 說明）。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { errorText, formatDateTime, goToLogin, LoginRequiredError, text } from '../core';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import type { ForumPost } from '../types';
 import { FollowButton } from './FollowButton';
+import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
@@ -62,21 +63,6 @@ function personURL(userKey: string): string {
 /** 一列的顯示名。沒有暱稱的人顯示「匿名使用者」，而不是後端給的空字串。 */
 function personName(nickname: string | undefined): string {
   return text(nickname) || t('publicProfile.anonymous');
-}
-
-/**
- * 頭像裡的字：顯示名的第一個字元。
- *
- * 取自「實際會顯示的那個名字」而不是原始 nickname：沒有暱稱者後端回空字串，
- * 若直接對空字串取 charAt(0) 會得到空頭像，而畫面上的名字其實是「匿名使用者」。
- * 因此直接對 personName() 的結果取首字 —— 與貼文卡 PostCard 的
- * `(text(post.author) || t('post.authorAnonymous')).charAt(0)` 同一個做法。
- *
- * 沒設暱稱者會顯示「匿」的首字，與他人公開個人頁那顆 `.profile-avatar` 的
- * t('publicProfile.avatar') 一致。
- */
-function personInitial(nickname: string | undefined): string {
-  return personName(nickname).charAt(0);
 }
 
 export function FollowingPage() {
@@ -115,7 +101,22 @@ export function FollowingPage() {
 
   /* --- 圖片 token 釋放 ---------------------------------------------------- */
 
-  useMediaTokenRelease(postItems);
+  /*
+   * 圖片 token 釋放。
+   *
+   * 兩個來源：追蹤動態的貼文（含每篇的作者頭像），以及左邊「追蹤中的人」清單
+   * 的頭像 —— 後者是 GET /api/forum/follows 簽發的 token，不屬於任何貼文，
+   * 而它與貼文附圖共用同一種 token、同一個釋放端點。
+   *
+   * 用 useMemo 而不是每次 render 現組：這個陣列每次 render 都是新物件，而
+   * useMediaTokenRelease 的 effect 依賴它 —— 每次都換身份會讓 effect 反覆
+   * 重掛（重掛只釋放一次，但白做一次 add/removeEventListener）。
+   */
+  const personAvatarURLs = useMemo(
+    () => follow.state.items.map((person) => person.avatarUrl ?? ''),
+    [follow.state.items],
+  );
+  useMediaTokenRelease(postItems, personAvatarURLs);
 
   /* --- 預載 --------------------------------------------------------------- */
 
@@ -297,13 +298,13 @@ export function FollowingPage() {
               <li className="following-person" key={person.key}>
                 {/*
                   頭像與名稱共用一個 <a>（見 forum-following.html 的 .following-person__link
-                  說明）。頭像標成 aria-hidden：它只是名字的視覺重複，留著會讓讀屏
-                  把連結念成「匿 匿名使用者」—— 而這個連結的可及名稱就應該只有名字。
+                  說明）。有頭像時 ForumAvatar 畫圖片、沒有時畫首字 —— 那個判斷只有
+                  一份（見 ForumAvatar 的檔頭）。頭像本身標成 aria-hidden 由 ForumAvatar
+                  的 alt="" 負責：它只是名字的視覺重複，留著會讓讀屏把連結念成
+                  「匿 匿名使用者」，而這個連結的可及名稱就應該只有名字。
                 */}
                 <a className="following-person__link" href={personURL(person.key)}>
-                  <span className="avatar" aria-hidden="true">
-                    {personInitial(person.nickname)}
-                  </span>
+                  <ForumAvatar className="avatar" url={person.avatarUrl} name={personName(person.nickname)} />
                   <span className="following-person__name">{personName(person.nickname)}</span>
                 </a>
                 {person.followedAt ? (

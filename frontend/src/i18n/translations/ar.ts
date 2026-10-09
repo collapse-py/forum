@@ -83,6 +83,8 @@ export const ar: Record<MessageKey, string> = {
     'فشل قراءة البيانات الشخصية',
   'error.fallbackProfileSave':
     'فشل الحفظ',
+  'error.fallbackAvatarUpload':
+    'فشل تحميل الصورة الرمزية',
   'error.fallbackPublish':
     'صيغة الرد عند النشر غير صحيحة',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const ar: Record<MessageKey, string> = {
     'أدخل الاسم المستعار',
   'profile.nicknameHint':
     'سيُعرض الاسم المستعار على المنشورات التي تنشرها، بحد أقصى 30 حرفًا.',
+  'profile.avatarLabel':
+    'الصورة الرمزية',
+  'profile.avatarHint':
+    'ستظهر الصورة الرمزية على منشوراتك وتعليقاتك، ويمكنك تحميل صيغ JPG أو PNG أو GIF أو WebP.',
+  'profile.avatarChoose':
+    'اختر صورة',
+  'profile.avatarRemove':
+    'إزالة الصورة الرمزية',
+  'profile.avatarUploading':
+    'جارٍ التحميل...',
+  'profile.avatarPreviewAlt':
+    'معاينة الصورة الرمزية الجديدة',
   'profile.bioLabel':
     'نبذة',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const ar: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'الملف الشخصي العام',
-  'publicProfile.avatar':
-    'مستخدم مجهول',
   'publicProfile.loading':
     'جارٍ التحميل...',
   'publicProfile.invalidLinkName':

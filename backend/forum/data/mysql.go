@@ -14,7 +14,7 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 	forum_post_likes             按讚表，以 (post_id, author_email) 複合主鍵表示「一人一文一讚」
 	forum_post_comments          文章留言：id / post_id / author_email / content / created_at
 	forum_reports                檢舉工單（可指向文章或留言），含處理狀態與覆核者
-	forum_profiles               使用者公開資料：author_email 為主鍵，public_key 為 email 的 SHA-256
+	forum_profiles               使用者公開資料：author_email 為主鍵、public_key 為 email 的 SHA-256、avatar_url 只存檔名
 	forum_users                  使用者帳號主檔與停權狀態（status = ACTIVE / SUSPENDED）
 	forum_user_tags              標籤字典
 	forum_user_tag_assignments   使用者與標籤的多對多關聯
@@ -833,6 +833,37 @@ func MigrateMySQL(db *sql.DB) error {
 	if _, err := db.Exec(`
 		ALTER TABLE forum_post_comments
 			ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER created_at;
+	`); err != nil {
+		return err
+	}
+
+	// 29) 使用者頭像。
+	//
+	//     為什麼需要：匿名論壇的對外身分只有 SHA256(email) 與暱稱，而暱稱是自由
+	//     填寫的文字（還可能沒填）。少了頭像，「分辨這是誰」只能靠讀名字 ——
+	//     一張自選圖片讓一個人在動態裡被認出的成本遠低於讀六個中文字。
+	//
+	//     儲存契約與 forum_posts.image_url 完全一致（見第 2 步）：只存**檔名**，
+	//     完整網址由應用層以 FILES_SERVER_PUBLIC_URL 組成。這同時代表「換對外
+	//     網域不必搬資料」，以及內部位址（http://192.168.66.5:7070）不會進資料庫。
+	//     副檔名白名錄、路徑穿越與第三方主機的防線全部沿用 forumImageFileName
+	//     （寫入時收斂、讀取時驗證），這裡不另做一套。
+	//
+	//     刻意**不**建索引：這個欄位的唯一讀法是「已經拿著 author_email 或
+	//     public_key 找到那一列」，走的就是主鍵或 idx_forum_profiles_public_key，
+	//     索引沒有作用對象。而在 forum_profiles 這種一列一人的表上加一個只服務
+	//     單列讀取的索引，與第 24 步不為熱門作者排行加索引是同一個判斷。
+	//
+	//     刻意宣告 NOT NULL 而不給 DEFAULT：與第 2 步同一個理由 —— 嚴格模式下
+	//     既有列會被補上空字串，而空字串在這裡的語意就是「沒有頭像」，應用層
+	//     的 forumImageFileName 對它回傳空字串，前端因此不渲染 <img> 而退回
+	//     暱稱首字。不需要「從未設定」與「已移除」兩種表示。
+	//
+	//     選 TEXT 而非 VARCHAR：沿用 image_url 的型別決定（長度不可預期的舊契約
+	//     留下的形狀），對一個上限 128 字元的值不改欄位型別 —— 改型別是 DDL、
+	//     失去回滾機會，並不划算。
+	if _, err := db.Exec(`
+		ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL;
 	`); err != nil {
 		return err
 	}

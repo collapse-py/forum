@@ -29,6 +29,9 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
 - **留言、按讚、檢舉**：留言公開可讀，作者可自行編輯或刪除；按讚以
   `(post_id, author_email)` 複合主鍵限制每人一次；檢舉涵蓋貼文與留言
 - **追蹤與私密動態牆**：`/api/forum/following/posts` 只回傳追蹤中的人的貼文
+- **使用者頭像**：個人資料頁可上傳、更換或移除，顯示在貼文、留言、追蹤清單、
+  個人頁與新增貼文的 composer；檔案流向往貼文附圖的機制（上傳時轉送 files_server、
+  資料庫只存檔名）
 - **Google OAuth2 登入**：僅申請 `userinfo.email`，沒有密碼、沒有本機帳號
 - **Elasticsearch 全文搜尋**：`ES_URL` 留空則自動退回 MySQL `LIKE`
 - **PWA**：可安裝、有 service worker 與 manifest

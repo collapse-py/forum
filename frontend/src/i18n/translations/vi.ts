@@ -83,6 +83,8 @@ export const vi: Record<MessageKey, string> = {
     'Đã đọc hồ sơ cá nhân không thành công',
   'error.fallbackProfileSave':
     'Lưu không thành công',
+  'error.fallbackAvatarUpload':
+    'Tải lên ảnh đại diện không thành công',
   'error.fallbackPublish':
     'Định dạng phản hồi khi đăng không hợp lệ',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const vi: Record<MessageKey, string> = {
     'Nhập biệt danh',
   'profile.nicknameHint':
     'Biệt danh sẽ hiển thị trên bài viết bạn đã đăng, tối đa 30 ký tự.',
+  'profile.avatarLabel':
+    'Ảnh đại diện',
+  'profile.avatarHint':
+    'Ảnh đại diện sẽ hiển thị trên bài viết và bình luận bạn đã đăng, có thể tải lên JPG, PNG, GIF hoặc WebP.',
+  'profile.avatarChoose':
+    'Chọn ảnh',
+  'profile.avatarRemove':
+    'Xoá ảnh đại diện',
+  'profile.avatarUploading':
+    'Đang tải lên...',
+  'profile.avatarPreviewAlt':
+    'Xem trước ảnh đại diện mới',
   'profile.bioLabel':
     'Tiểu sử',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const vi: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Hồ sơ cá nhân công khai',
-  'publicProfile.avatar':
-    'Ảnh đại diện',
   'publicProfile.loading':
     'Đang tải...',
   'publicProfile.invalidLinkName':

@@ -16,7 +16,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_post_comments` | 留言 | 無外鍵，完整性靠應用層；`updated_at` 語意同上 |
 | `forum_post_likes` | 按讚 | 複合 PK `(post_id, author_email)`，天然去重 |
 | `forum_reports` | 檢舉 | `target_type`（`post`/`comment`）+ `target_id` 的多型參照，無外鍵 |
-| `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一 |
+| `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一；`avatar_url` 只存**檔名**（讀取時組網址，語意指 `forum_posts.image_url`） |
 | `forum_users` | 帳號狀態 | `status` 為 `ACTIVE` / `SUSPENDED`。**沒有 role 欄位** |
 | `forum_user_tags` | 標籤字典 | `name` 唯一 |
 | `forum_user_tag_assignments` | 標籤指派 | 複合 PK `(user_email, tag_id)` |

@@ -21,6 +21,7 @@ import { FollowButton } from './FollowButton';
 import type { CommentsController } from './useComments';
 import type { FollowController } from './useFollow';
 import type { ReportController, ReportTarget } from './useReport';
+import { ForumAvatar } from './ForumAvatar';
 
 /** 距離底部多少 px 就觸發「載入更多留言」。 */
 const NEAR_BOTTOM_PX = 80;
@@ -132,7 +133,12 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
   }, [menuOpen]);
 
   const url = authorURL(post.authorKey);
-  const initial = (text(post.author) || t('post.authorAnonymous')).charAt(0);
+  /*
+   * 作者頭像。`initial` 曾經是這裡自己算的，現在搬進 ForumAvatar —— 四個頁面
+   * 都要畫同一顆圓形，而「沒有頭像就退回首字」這個判斷只該有一份（見該檔檔頭）。
+   *
+   * alt 刻意留空：旁邊的作者名稱連結才是這個人的可及名稱，頭像唸第二次只是噪音。
+   */
   const authorTags = Array.isArray(post.authorTags) ? post.authorTags : [];
   const postTarget: ReportTarget = { kind: 'post', postId: post.id, commentId: 0 };
 
@@ -262,9 +268,7 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
   return (
     <article className="post">
       <div className="post-head">
-        <a className="avatar avatar-link" href={url}>
-          {initial}
-        </a>
+        <ForumAvatar className="avatar avatar-link" href={url} url={post.authorAvatar} name={text(post.author)} />
         <div className="post-identity">
           <div className="author-line">
             <a className="author-link" href={url}>
@@ -562,10 +566,21 @@ function Comment({ comment, postId, canInteract, report, isOwn, pending, onUpdat
 
   return (
     <div className="comment">
-      <div className="comment-head">
-        <a className="comment-author" href={authorURL(comment.authorKey)}>
-          {text(comment.author)}
-        </a>
+    <div className="comment-head">
+      {/*
+        留言的作者頭像。align-self 由 .comment-avatar 自己算，因為 .comment-head
+        是 baseline 對齊（作者名、時間、按鈕共用一條文字基線），把整列改置中會
+        讓原本對齊的文字在垂直方向位移。
+      */}
+      <ForumAvatar
+        className="avatar comment-avatar"
+        href={authorURL(comment.authorKey)}
+        url={comment.authorAvatar}
+        name={text(comment.author)}
+      />
+      <a className="comment-author" href={authorURL(comment.authorKey)}>
+        {text(comment.author)}
+      </a>
         <time>{formatDateTime(comment.createdAt)}</time>
         {comment.edited ? <span className="edited-badge">{t('comment.editedBadge')}</span> : null}
         <div className="comment-actions">

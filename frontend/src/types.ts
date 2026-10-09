@@ -666,6 +666,16 @@ export interface ForumPost {
   author?: string;
   authorKey?: string;
   authorTags?: string[];
+  /**
+   * 作者的頭像網址（含 media token）。
+   *
+   * 省略（undefined）代表這位作者沒有頭像，前端因此退回顯示暱稱首字 —— 兩者在
+   * 畫面上是同一種「沒有圖片」的狀態。與 imageUrl 同一個理由用 omitempty。
+   *
+   * token 由 /api/forum/image-tokens/release 在離開頁面時釋放，因此它與
+   * imageUrl 共用同一把 token（見 useMediaTokenRelease）。
+   */
+  authorAvatar?: string;
   content: string;
   createdAt?: string;
   imageUrl?: string;
@@ -683,6 +693,8 @@ export interface ForumComment {
   id: number;
   author?: string;
   authorKey?: string;
+  /** 作者的頭像網址；語意與 ForumPost.authorAvatar 相同（省略＝沒有頭像）。 */
+  authorAvatar?: string;
   content: string;
   createdAt?: string;
   /** 作者是否編輯過這一則。省略未編輯的。 */
@@ -707,6 +719,18 @@ export interface PostDetailResponse {
 export interface ForumProfile {
   nickname?: string;
   bio?: string;
+  /**
+   * 這位使用者的頭像網址（含 media token）。空字串代表沒有頭像。
+   *
+   * GET /api/forum/profile 與 GET /api/forum/public-profile 都會帶這個欄位；
+   * PUT /api/forum/profile 則**收**不**回**（回傳只有暱稱與簡介，理由見
+   * httpapi 的 handleForumProfile）。
+   *
+   * 它是「自己現在的頭像」在個人資料頁唯一的來源，也是「送出前先讓使用者看到
+   * 現在長什麼樣子」的那一份；換頭像時前端要把它一起送回 PUT（省略等同清空，
+   * 與 bio 同一個整份覆寫語意）。
+   */
+  avatarUrl?: string;
   /**
    * 只有 GET /api/forum/public-profile 會帶這個欄位，值是「目前的請求者是否
    * 追蹤了這個人」。
@@ -738,6 +762,13 @@ export interface ForumProfile {
 export interface FollowTarget {
   key: string;
   nickname: string;
+  /**
+   * 這個人的頭像網址（含 media token）。空字串代表沒有頭像。
+   *
+   * 與 ForumPost.authorAvatar 的差別只在命名空間：這邊的呼叫端（追蹤清單）自己
+   * 決定要不要顯示，因此用 camelCase 的欄位而不是裸值。
+   */
+  avatarUrl?: string;
   followedAt?: string;
   [key: string]: unknown;
 }

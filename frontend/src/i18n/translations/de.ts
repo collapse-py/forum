@@ -83,6 +83,8 @@ export const de: Record<MessageKey, string> = {
     'Profil konnte nicht geladen werden.',
   'error.fallbackProfileSave':
     'Speichern fehlgeschlagen.',
+  'error.fallbackAvatarUpload':
+    'Profilbild konnte nicht hochgeladen werden.',
   'error.fallbackPublish':
     'Antwortformat ist ungültig.',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const de: Record<MessageKey, string> = {
     'Anzeigename eingeben',
   'profile.nicknameHint':
     'Dein Anzeigename erscheint auf den von dir veröffentlichten Beiträgen. Maximal 30 Zeichen.',
+  'profile.avatarLabel':
+    'Profilbild',
+  'profile.avatarHint':
+    'Dein Profilbild erscheint auf deinen Beiträgen und Kommentaren. JPG, PNG, GIF oder WebP möglich.',
+  'profile.avatarChoose':
+    'Bild auswählen',
+  'profile.avatarRemove':
+    'Profilbild entfernen',
+  'profile.avatarUploading':
+    'Wird hochgeladen...',
+  'profile.avatarPreviewAlt':
+    'Vorschau des neuen Profilbilds',
   'profile.bioLabel':
     'Über mich',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const de: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Öffentliches Profil',
-  'publicProfile.avatar':
-    'Anonym',
   'publicProfile.loading':
     'Wird geladen...',
   'publicProfile.invalidLinkName':

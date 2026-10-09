@@ -47,7 +47,7 @@ Origin 檢查在 csrf.go。
 	forum_post_likes           按讚，主鍵 (post_id, author_email)，天然去重
 	forum_post_comments        留言，無外鍵，需自行檢查父文章存在
 	forum_reports              檢舉，唯一鍵 (reporter_email, target_type, target_id)
-	forum_profiles             暱稱與簡介，主鍵 author_email、public_key 有索引
+	forum_profiles             暱稱、簡介與頭像，主鍵 author_email、public_key 有索引
 	forum_follows              追蹤，主鍵 (follower_email, target_email)（在 forum_follow_handlers.go）
 	forum_user_tags /
 	forum_user_tag_assignments 使用者標籤（由管理員指派），僅在文章列表回傳
@@ -135,6 +135,9 @@ import (
 //	              避免為了顯示計數而額外請求一次留言列表。
 //	ImageURL     由庫中檔名組出的公開網址（已附加 token）；無圖時為空字串，
 //	             因 omitempty 而省略。
+//	AuthorAvatar 作者的頭像網址（同樣是「庫中檔名 + token」現組出來的值）。
+//	             沒有頭像時為空字串而省略，前端因此退回顯示暱稱首字 ——
+//	             與「這張卡沒有附圖」是同一種「省略即沒有」的契約。
 //	Pinned       是否為管理員置頂。省略未置頂的（false + omitempty）而不是恆
 //	             送出 false，讓「一般的貼文」在 JSON 裡沒有這個欄位 —— 那是
 //	             佔多數的情況，不該讓它們的每筆回應都多一個欄位。
@@ -147,6 +150,7 @@ type forumPost struct {
 	Author       string    `json:"author"`
 	AuthorKey    string    `json:"authorKey"`
 	AuthorTags   []string  `json:"authorTags,omitempty"`
+	AuthorAvatar string    `json:"authorAvatar,omitempty"`
 	Content      string    `json:"content"`
 	CreatedAt    time.Time `json:"createdAt"`
 	LikeCount    int       `json:"likeCount"`
@@ -163,16 +167,18 @@ type forumPost struct {
 //	ID        對應 forum_post_comments.id。
 //	Author    顯示名稱，語意與 forumPost.Author 相同。
 //	AuthorKey email 的雜湊值，供前端作為穩定識別碼。
+//	AuthorAvatar 作者的頭像網址；語意與 forumPost.AuthorAvatar 相同（無頭像時省略）。
 //	Content   留言本文，已 TrimSpace 且限制在 2000 個 rune 以內。
 //	CreatedAt 對應 forum_post_comments.created_at；列表以它遞增排序。
 //	Edited    作者是否曾經編輯過這一則（語意與 forumPost.Edited 相同）。
 type forumComment struct {
-	ID        int64     `json:"id"`
-	Author    string    `json:"author"`
-	AuthorKey string    `json:"authorKey"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"createdAt"`
-	Edited    bool      `json:"edited,omitempty"`
+	ID           int64    `json:"id"`
+	Author       string   `json:"author"`
+	AuthorKey    string   `json:"authorKey"`
+	AuthorAvatar string   `json:"authorAvatar,omitempty"`
+	Content      string   `json:"content"`
+	CreatedAt    time.Time `json:"createdAt"`
+	Edited       bool     `json:"edited,omitempty"`
 }
 
 // createForumCommentRequest 是 POST /api/forum/posts/{id}/comments 的請求主體。
@@ -226,12 +232,21 @@ type forumReportRequest struct {
 
 // forumProfileRequest 是 PUT /api/forum/profile 的請求主體。
 //
-//	Nickname 去除前後空白後須為 1 至 30 個 rune；
-//	         forum_profiles.nickname 有 UNIQUE 索引 uq_forum_profiles_nickname，撞名會回 409。
-//	Bio      可為空字串，非空時不得超過 500 個 rune。
+//	Nickname  去除前後空白後須為 1 至 30 個 rune；
+//	          forum_profiles.nickname 有 UNIQUE 索引 uq_forum_profiles_nickname，撞名會回 409。
+//	Bio       可為空字串，非空時不得超過 500 個 rune。
+//	AvatarURL 為 /api/forum/images 上傳後回傳的網址；可為空字串代表「移除頭像」。
+//	          與 Bio 同樣是「整份覆寫」語意 —— 省略這個欄位等同送空字串，
+//	          因此呼叫端每次都要把自己現在的頭像一起送回來（前端 ProfilePage
+//	          正是這麼做）。這與 Bio 的既有契約一致，而不是新的特殊規則。
+//
+// 換頭像的副作用：被替換掉的舊圖檔會變成沒有任何資料列指向的孤兒檔，而本站
+// 沒有「使用者刪除自己圖片」的端點（與 updateForumPostRequest 的同一個限制）。
+// 孤兒檔由 files_server 的 TTL／人工清理處理。
 type forumProfileRequest struct {
-	Nickname string `json:"nickname"`
-	Bio      string `json:"bio"`
+	Nickname  string `json:"nickname"`
+	Bio       string `json:"bio"`
+	AvatarURL string `json:"avatarUrl"`
 }
 
 // handleForumPosts 是 /api/forum/posts 的單一進入點，依 HTTP 方法分派。
@@ -263,6 +278,11 @@ func (s *Server) handleForumPosts(w http.ResponseWriter, r *http.Request) {
 // 所有 condition 佔位符之前；未登入時傳空字串，該 EXISTS 子查詢自然恆為 false，
 // 因此讀取端點不需要額外的登入判斷。
 //
+// author_avatar 是這張表唯一的例外：它不在 forum_posts 上，因此投影必須靠
+// LEFT JOIN forum_profiles 才拿得到（見下方 forumPostFrom 的說明）。把它放進
+// 投影而不是讓每個呼叫端各自補一次查詢，是「三種來源回同一種欄位」這條規則的
+// 直接延伸 —— 少了它的症狀不會是編譯錯誤，而是「搜尋結果裡的作者沒有頭像」。
+//
 // 追蹤狀態刻意不在這裡：它是「頁面層的一次查詢結果」（見 forum_follow_handlers.go
 // 的 handleForumFollows），不是每篇貼文的屬性。放進這個投影會讓三個查詢各多一
 // 個相關子查詢，卻換不來任何好處 —— 同一頁的追蹤清單只讀一次就夠了。
@@ -272,13 +292,31 @@ func (s *Server) handleForumPosts(w http.ResponseWriter, r *http.Request) {
 // 帶它，症狀會是「這篇文章在首頁有『已編輯』標記、在搜尋結果裡沒有」，而那
 // 只會出現在特定頁面。scan 端因此多一個 sql.NullTime（NULL = 從未編輯，見
 // MigrateMySQL 第 28 步）。
-const forumPostProjection = `fp.id, fp.author_email, fp.content, fp.created_at, fp.image_url, fp.pinned, fp.updated_at,
+const forumPostProjection = `fp.id, fp.author_email, pr.avatar_url AS author_avatar, fp.content, fp.created_at, fp.image_url, fp.pinned, fp.updated_at,
 		(SELECT COUNT(*) FROM forum_post_likes WHERE post_id = fp.id) AS like_count,
 		(SELECT COUNT(*) FROM forum_post_comments WHERE post_id = fp.id) AS comment_count,
 		CASE WHEN EXISTS (
 		    SELECT 1 FROM forum_post_likes
 		    WHERE post_id = fp.id AND author_email = ?
 		) THEN 1 ELSE 0 END AS liked_by_me`
+
+// forumPostFrom 是所有公開貼文查詢共用的 FROM 子句。
+//
+// 為什麼需要它而不是讓每個呼叫端寫自己的 FROM：投影裡的 author_avatar 住在
+// forum_profiles（見 MigrateMySQL 第 29 步），少了這個 JOIN，那一個欄位在 SQL
+// 層就直接不存在。而兩個讀這個投影的呼叫端（loadForumPosts、search 的
+// loadForumPostsByIDs）各寫一次 JOIN 的症狀正是這個常數存在要避免的那一件事 ——
+// 其中一處漏寫時編譯器不會說話，只有那種來源的作者永遠沒有頭像。
+//
+// LEFT JOIN 而不是 INNER JOIN：一位從未儲存過個人資料的使用者在 forum_profiles
+// 裡沒有列，而他的貼文**必須**出現在動態裡。INNER JOIN 會讓那些貼文整筆消失，
+// 而那正是這個站最常見的情況（多數人只發文、不填資料）。
+//
+// ON 的條件是 author_email 等值比對：forum_profiles 的主鍵就是 author_email，
+// 因此這是一對一查找，不會複製文章列。它也會走主鍵，不會讓這條查詢多一次全表
+// 掃描 —— 代價是三張表各多一次主鍵查找，與 forumAuthor 的 per-row 查詢同層級。
+const forumPostFrom = `FROM forum_posts fp
+		LEFT JOIN forum_profiles pr ON pr.author_email = fp.author_email `
 
 // forumPostFeedOrder 是公開動態的排序。
 //
@@ -315,6 +353,11 @@ type rowScanner interface {
 // 搜尋結果），每加一個欄位就要在三處各改一次，而漏改的那一處症狀是
 // 「runtime error: index out of range」或「欄位整欄錯位」—— 錯位更糟，因為
 // 它不會出錯，只會把 likeCount 顯示成 commentCount。
+//
+// 頭像這一次多了第二件必須同步的事：author_avatar 住在 forum_profiles，因此
+// 掃描進來的值必須是 sql.NullString —— LEFT JOIN 對「沒有個人資料列」的作者
+// 給 NULL，直接掃進 string 會讓那一篇貼文所屬的整個列表端點回 500（理由見
+// forumPostFrom）。
 func scanForumPostRow(row rowScanner) (forumPost, error) {
 	var post forumPost
 	// CASE WHEN EXISTS 的結果以 0/1 呈現，MySQL 沒有原生布林型別。
@@ -323,13 +366,19 @@ func scanForumPostRow(row rowScanner) (forumPost, error) {
 	// 必須用可空型別掃描：直接掃進 time.Time 會讓每一篇未編輯過的貼文都變成
 	// 掃描錯誤，而症狀是整個列表端點回 500。
 	var updatedAt sql.NullTime
-	if err := row.Scan(&post.ID, &post.Author, &post.Content, &post.CreatedAt, &post.ImageURL,
+	// author_avatar 的 NULL 來自 LEFT JOIN 而不是欄位本身（avatar_url 是
+	// NOT NULL，見 MigrateMySQL 第 29 步）：這位作者從未建過個人資料。
+	var authorAvatar sql.NullString
+	if err := row.Scan(&post.ID, &post.Author, &authorAvatar, &post.Content, &post.CreatedAt, &post.ImageURL,
 		&pinned, &updatedAt, &post.LikeCount, &post.CommentCount, &liked); err != nil {
 		return forumPost{}, err
 	}
 	post.Liked = liked == 1
 	post.Pinned = pinned == 1
 	post.Edited = updatedAt.Valid
+	// 此刻存的是庫值（純檔名），完整網址由呼叫端與附圖共用同一把 token 現組
+	// （見 loadForumPosts）。scan 端因此不必知道 token 的存在。
+	post.AuthorAvatar = authorAvatar.String
 	return post, nil
 }
 
@@ -354,7 +403,7 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+forumPostProjection+`
-		FROM forum_posts fp `+condition+`
+		`+forumPostFrom+` `+condition+`
 		ORDER BY `+forumPostFeedOrder+` LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		// 先記錄原始錯誤再回通用訊息：使用者不需要知道是哪一段 SQL 失敗，
@@ -381,7 +430,11 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 		// 無法辨識的值，這裡會得到空字串，而不會為了它去簽發一個沒人用得到的
 		// token。token 延遲到真的有圖片時才簽發，純文字頁完全不碰 Redis。
 		imageName := s.forumImageFileName(post.ImageURL)
-		if imageName != "" && mediaToken == "" {
+		// 頭像與附圖**共用同一把** token：一頁一把，前端離開時一次釋放全部
+		// （見 useMediaTokenRelease）。這也代表「只有作者有頭像」的純文字動態
+		// 仍然需要一把 token —— 少了這個判斷，那一頁的頭像會全部載不出來。
+		avatarName := s.forumImageFileName(post.AuthorAvatar)
+		if (imageName != "" || avatarName != "") && mediaToken == "" {
 			mediaToken, err = s.createMediaToken(ctx)
 			if err != nil {
 				logger.ErrorfContext(ctx, "[FORUM] 建立圖片 token 失敗: %v", err)
@@ -390,8 +443,9 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 		}
 		// 庫值只是檔名，給瀏覽器的完整網址在此現組：公開主機 + /files/ + 檔名
 		// + token。任何一步失敗都會得到空字串（前端因此不顯示縮圖），
-		// 絕不會把內部位址送出去。
+		// 絕不會把內部位址送出去。頭像走的是同一個函式與同一把 token。
 		post.ImageURL = s.forumImageURL(imageName, mediaToken)
+		post.AuthorAvatar = s.forumImageURL(avatarName, mediaToken)
 		// 先把原始 email 存起來再覆寫 Author：下游都需要 email 來查暱稱、
 		// 雜湊與標籤，而 Author 欄位對外只能放顯示名稱。
 		authorEmail := post.Author
@@ -896,8 +950,9 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		// id 作為次要排序鍵是必要的：created_at 是 DATETIME（秒級精度），
 		// 同秒寫入的多筆留言若沒有 id 打破平手，分頁結果會不穩定而漏讀或重複。
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT fc.id, fc.author_email, fc.content, fc.created_at, fc.updated_at
+			SELECT fc.id, fc.author_email, pr.avatar_url AS author_avatar, fc.content, fc.created_at, fc.updated_at
 			FROM forum_post_comments fc
+			LEFT JOIN forum_profiles pr ON pr.author_email = fc.author_email
 			WHERE fc.post_id = ?
 			ORDER BY fc.created_at ASC, fc.id ASC
 			LIMIT ? OFFSET ?`, postID, limit, offset)
@@ -908,23 +963,49 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 
+		/*
+		 * 整頁共用一把 media token，與貼文列表同一個判斷：同一位作者的頭像在
+		 * 一頁留言裡會重複出現，一頁一把讓前端離開時只需刪一個 Redis key。
+		 * 延遲到「這一頁真的有人有頭像」才簽發 —— 沒有人有頭像的討論串完全
+		 * 不碰 Redis。
+		 *
+		 * LEFT JOIN 的理由見 forumPostFrom：一位從未建過個人資料的作者仍然有
+		 * 留言，INNER JOIN 會讓那些留言整筆消失。
+		 */
+		mediaToken := ""
 		comments := make([]forumComment, 0)
 		for rows.Next() {
 			var comment forumComment
-			// updated_at 可為 NULL（「從未被編輯」，見 MigrateMySQL 第 28 步），
+			// updated_at 可為 NULL（「從未編輯」，見 MigrateMySQL 第 28 步），
 			// 與貼文投影的理由相同：直接掃進 time.Time 會讓整頁留言回 500。
 			var updatedAt sql.NullTime
-			if err := rows.Scan(&comment.ID, &comment.Author, &comment.Content, &comment.CreatedAt, &updatedAt); err != nil {
+			// author_avatar 的 NULL 來自 LEFT JOIN（這位作者沒有個人資料列）。
+			var authorAvatar sql.NullString
+			if err := rows.Scan(&comment.ID, &comment.Author, &authorAvatar, &comment.Content, &comment.CreatedAt, &updatedAt); err != nil {
 				logger.ErrorfContext(r.Context(), "[FORUM] 讀取留言失敗 post_id=%d: %v", postID, err)
 				internalError(w, "unable to read comments")
 				return
 			}
 			comment.Edited = updatedAt.Valid
+			comment.AuthorAvatar = authorAvatar.String
 			// 與文章列表相同：Author 欄位暫存 email，轉成顯示名稱後再補上雜湊識別碼。
 			// 每筆留言各查一次暱稱，屬 N+1，但單次請求上限 12 筆故最壞情況可控。
 			authorEmail := comment.Author
 			comment.Author = s.forumAuthor(r, authorEmail)
 			comment.AuthorKey = publicForumKey(authorEmail)
+			// 頭像走的是與貼文附圖同一個函式與同一把 token：呼叫端因此不必分辨
+			// 「這張圖是頭像還是附圖」，釋放時也只需交出那一把 token。
+			avatarName := s.forumImageFileName(comment.AuthorAvatar)
+			if avatarName != "" && mediaToken == "" {
+				token, err := s.createMediaToken(r.Context())
+				if err != nil {
+					logger.ErrorfContext(r.Context(), "[FORUM] 建立圖片 token 失敗: %v", err)
+					writeError(w, http.StatusBadGateway, "unable to create media token")
+					return
+				}
+				mediaToken = token
+			}
+			comment.AuthorAvatar = s.forumImageURL(avatarName, mediaToken)
 			comments = append(comments, comment)
 		}
 		if err := rows.Err(); err != nil {
@@ -1006,12 +1087,21 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	// 這裡再呼叫一次 ResolveUser 會多一次 Redis 往返；因為上一次的值不在作用域內，
 	// 沿用現狀以免改動行為。兩次呼叫讀的是同一個 session cookie，結果必然一致。
 	author := s.sessions.ResolveUser(r)
+	// 作者頭像也帶上：這一則會被前端插進留言列表頭端，少了它會出現「剛po的
+	// 那則沒有頭像、重新載入後就有了」（與 createForumPost 的同一個理由）。
+	authorAvatarURL, _, err := s.forumAuthorAvatarURL(r.Context(), author, "")
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 讀取新留言作者頭像失敗: %v", err)
+		internalError(w, "unable to read forum profile")
+		return
+	}
 	// 直接回傳建立好的物件，前端可插入列表頭端而不必重新載入整頁。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"ok": true,
 		"item": forumComment{
 			ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author),
-			Content: req.Content, CreatedAt: createdAt,
+			AuthorAvatar: authorAvatarURL,
+			Content:      req.Content, CreatedAt: createdAt,
 		},
 	})
 }
@@ -1609,7 +1699,9 @@ func (s *Server) handleForumPostLike(w http.ResponseWriter, r *http.Request) {
 // 這是論壇中唯一不需要登入就能查詢特定使用者的端點，因此它只接受雜湊後的
 // publicKey 而不接受 email——呼叫端手上永遠拿不到原始地址可查。
 //
-// 回應多帶一個 following（我是否追蹤了這個人）：未登入時為 false。
+// 回應多帶一個 avatarUrl（這位使用者的頭像，沒有時為空字串）：公開頁的標題列
+// 因此不必為了顯示一顆頭像再打一次請求。另帶一個 following（我是否追蹤了這個
+// 人）：未登入時為 false。
 // 它只反映「請求者」的狀態，不是這位使用者的追蹤者數 —— 追蹤關係刻意完全
 // 私有（見 forum_follow_handlers.go 的檔頭），因此這裡沒有任何聚合值。
 func (s *Server) handleForumPublicProfile(w http.ResponseWriter, r *http.Request) {
@@ -1628,11 +1720,11 @@ func (s *Server) handleForumPublicProfile(w http.ResponseWriter, r *http.Request
 	// email 只在這裡用於查追蹤狀態與現算 publicKey，不會出現在回應中。
 	me := s.sessions.ResolveUser(r)
 
-	var email, nickname, bio string
+	var email, nickname, bio, avatar string
 	// 依 public_key 而非 author_email 查詢。public_key 的值由 MigrateMySQL
 	// 以 SHA2(author_email, 256) 回填，與 publicForumKey 的算法一致，兩邊必須對齊。
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT author_email, nickname, bio FROM forum_profiles WHERE public_key = ?`, key).Scan(&email, &nickname, &bio)
+		`SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key = ?`, key).Scan(&email, &nickname, &bio, &avatar)
 	if err == sql.ErrNoRows {
 		// 找不到時回 200 加預設值而非 404：前端（/forum/others-profile）
 		// 因此不必處理錯誤分支，也不會因為狀態碼差異而洩漏
@@ -1652,7 +1744,22 @@ func (s *Server) handleForumPublicProfile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	payload := map[string]interface{}{"nickname": nickname, "bio": bio}
+	// 頭像的完整網址在這裡現組（庫中只存檔名，與貼文附圖同一個契約），因此
+	// 需要一把 media token。延遲簽發：沒有頭像的公開頁不碰 Redis。
+	avatarURL := ""
+	if name := s.forumImageFileName(avatar); name != "" {
+		token, tokenErr := s.createMediaToken(r.Context())
+		if tokenErr != nil {
+	// 頭像載入失敗不該讓整份公開資料開天窗：回空字串，前端因此退回
+	// 顯示暱稱首字，而暱稱與簡介仍然看得到（與下面追蹤狀態對 DB 錯誤
+	// 退化成 false 是同一個取捨）。
+	logger.WarnfContext(r.Context(), "[FORUM] 建立公開頭像 token 失敗: %v", tokenErr)
+		} else {
+			avatarURL = s.forumImageURL(name, token)
+		}
+	}
+
+	payload := map[string]interface{}{"nickname": nickname, "bio": bio, "avatarUrl": avatarURL}
 	// 自我追蹤被後端拒絕，因此自己的頁面顯示「追蹤中」是錯的，必須讓前端
 	// 知道要把按鈕藏起來。
 	if me != "" && me != email {
@@ -1670,11 +1777,18 @@ func (s *Server) handleForumPublicProfile(w http.ResponseWriter, r *http.Request
 	writeOK(w, payload)
 }
 
-// handleForumProfile 讀取（GET）與更新（PUT）自己的暱稱與簡介。
+// handleForumProfile 讀取（GET）與更新（PUT）自己的暱稱、簡介與頭像。
 //
 // 為什麼不用 publicKey 查詢自己的資料：server.go 的 requireLogin 已保證
 // 身分，這裡直接用 session 中的 email 當主鍵查詢，語意最單純，
 // 也不必處理「手上的 publicKey 過期」的情況。
+//
+// 頭像為什麼是這裡的一個欄位而不是獨立的 /api/forum/avatar 端點：forum_profiles
+// 的 nickname 是 NOT NULL 且帶唯一索引（uq_forum_profiles_nickname），一條
+// 「只改頭像」的路徑必須處理「這位使用者還沒有資料列」的情況，而那需要一個
+// 合法的 nickname 才能 INSERT —— 於是又要決定「用哪個昵稱」，而任何決定都比
+// 「讓頭像跟著資料表一起存」更糟。頭像與暱稱、簡介本來就是同一份公開資料的
+// 三個欄位，讓它們共用同一次寫入也讓三者在交易上不可能不一致。
 func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 	email := s.sessions.ResolveUser(r)
 	// 路由已用 requireLogin 包住（含停權檢查），此處重複確認是縱深防禦。
@@ -1685,18 +1799,33 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		var nickname, bio string
+		var nickname, bio, avatar string
 		err := s.db.QueryRowContext(r.Context(),
-			`SELECT nickname, bio FROM forum_profiles WHERE author_email = ?`, email).Scan(&nickname, &bio)
+			`SELECT nickname, bio, avatar_url FROM forum_profiles WHERE author_email = ?`, email).Scan(&nickname, &bio, &avatar)
 		if err == sql.ErrNoRows {
 			// 尚未建立資料檔時回空字串（而非預設暱稱），
 			// 讓前端可以顯示「尚未設定」並把欄位留空供使用者填寫。
-			nickname = ""
+			nickname, bio, avatar = "", "", ""
 		} else if err != nil {
 			internalError(w, "unable to load profile")
 			return
 		}
-		writeOK(w, map[string]string{"nickname": nickname, "bio": bio})
+		avatarURL := ""
+		// 頭像的完整網址在這裡現組（資料庫只存檔名，見 MigrateMySQL 第 29 步），
+		// 因此與貼文附圖一樣需要一把 media token。延遲到「真的有頭像」才簽發：
+		// 沒有頭像的這一頁不碰 Redis。
+		//
+		// 簽發失敗刻意只記日誌：暱稱與簡介仍然要能顯示，讓「看不到自己的資料」
+		// 只因為 Redis 故障是不對的取捨。頭像退回首字，與 handleForumPublicProfile
+		// 與 listForumFollows 對同一件事的處理一致。
+		if name := s.forumImageFileName(avatar); name != "" {
+			if token, tokenErr := s.createMediaToken(r.Context()); tokenErr != nil {
+				logger.WarnfContext(r.Context(), "[FORUM] 建立個人頭像 token 失敗: %v", tokenErr)
+			} else {
+				avatarURL = s.forumImageURL(name, token)
+			}
+		}
+		writeOK(w, map[string]string{"nickname": nickname, "bio": bio, "avatarUrl": avatarURL})
 	case http.MethodPut:
 		if !s.isTrustedOrigin(r) {
 			writeError(w, http.StatusForbidden, "invalid origin")
@@ -1726,15 +1855,24 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, "個人簡介最多 500 字")
 			return
 		}
+		// 頭像與貼文附圖走同一條驗證：只接受 /api/forum/images 回傳的網址，
+		// 並由 forumImageFileName 收斂成純檔名（不接受第三方網址、內部位址
+		// 或路徑穿越，副檔名白名單也一樣）。空字串代表「移除頭像」，與 Bio
+		// 可為空是同一個語意。
+		avatarName := s.forumImageFileName(req.AvatarURL)
+		if avatarName == "" && strings.TrimSpace(req.AvatarURL) != "" {
+			badRequest(w, "頭像必須是上傳到本站的圖片")
+			return
+		}
 		// 以單一 upsert 語句同時處理「首次建立」與「更新」，省掉一次
 		// 先 SELECT 判斷再分支寫入的往返。author_email 是主鍵，故
 		// ON DUPLICATE KEY 只會在「自己的資料已存在」時觸發。
 		// 順帶每次都寫入 publicForumKey，讓早期在該欄位存在前建立的資料
 		// 自動補齊公開識別碼。
 		_, err := s.db.ExecContext(r.Context(), `
-			INSERT INTO forum_profiles (author_email, public_key, nickname, bio, updated_at) VALUES (?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), bio = VALUES(bio), updated_at = VALUES(updated_at)`,
-			email, publicForumKey(email), req.Nickname, req.Bio, time.Now())
+			INSERT INTO forum_profiles (author_email, public_key, nickname, bio, avatar_url, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), bio = VALUES(bio), avatar_url = VALUES(avatar_url), updated_at = VALUES(updated_at)`,
+			email, publicForumKey(email), req.Nickname, req.Bio, avatarName, time.Now())
 		if err != nil {
 			// 用 errors.As 而非型別斷言：driver 回傳的錯誤未來若被包裝
 			// （例如加上連線重試或額外註解），errors.As 仍能穿透包裝找出
@@ -1752,6 +1890,11 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 直接回傳修剪後的實際值，前端無需再清理一次空白。
+		//
+		// 刻意不回傳 avatarUrl：那一欄要回就得現組一把新的 media token，而前端
+		// 手上已經有剛才上傳時拿到的網址（它就是送進來的值），多回一份只會讓
+		// 「回應裡的頭像」與「自己送出的頭像」有兩個可能不同的來源。真的需要
+		// 重讀時前端會重跑 GET（ProfilePage 的 load）。
 		writeOK(w, map[string]string{"nickname": req.Nickname, "bio": req.Bio})
 	default:
 		// POST／DELETE 一律不支援：語意已由 GET 與 PUT 完整覆蓋，
@@ -1789,6 +1932,39 @@ func (s *Server) forumAuthorTags(ctx context.Context, email string) ([]string, e
 	}
 	// 迭代中途出錯也必須回報，否則呼叫端會把「讀了一半」當成「就這些」。
 	return tags, rows.Err()
+}
+
+// forumAuthorAvatarURL 組成某位使用者頭像的公開網址，沒有頭像時回傳空字串。
+//
+// 與 forumAuthorTags 同一個形狀：一支給「組單一貼文物件」用的 per-row 查詢，
+// 因為那些呼叫端不走 loadForumPosts 的逐列流程（目前只有 createForumPost 新建
+// 貼文後的那一份物件）。少了它的症狀不會是錯誤，而是「剛發完的那一篇在列表裡
+// 沒有頭像，重新整理後就有了」。
+//
+// 回傳值是 (網址, 用的那把 token, 錯誤)：token 一起回傳是為了讓呼叫端沿用
+// 已經為附圖簽發的那一把，省掉一次 Redis 往返 —— 一張新貼文的附圖與作者頭像
+// 共用同一把 token，與 loadForumPosts 的判斷一致。
+func (s *Server) forumAuthorAvatarURL(ctx context.Context, email, token string) (string, string, error) {
+	var avatar string
+	err := s.db.QueryRowContext(ctx, `SELECT avatar_url FROM forum_profiles WHERE author_email = ?`, email).Scan(&avatar)
+	// 從未建過個人資料的作者沒有頭像，這不是錯誤。
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", token, nil
+	}
+	if err != nil {
+		return "", token, err
+	}
+	name := s.forumImageFileName(avatar)
+	// 空字串與無法辨識的舊值都當成沒有頭像：不為它簽發一把沒人用得到的 token。
+	if name == "" {
+		return "", token, nil
+	}
+	if token == "" {
+		if token, err = s.createMediaToken(ctx); err != nil {
+			return "", "", err
+		}
+	}
+	return s.forumImageURL(name, token), token, nil
 }
 
 // forumAuthor 決定對外顯示的作者名稱：優先用暱稱，否則給一個匿名代號。
@@ -1918,14 +2094,22 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "unable to read forum user tags")
 		return
 	}
+	// 作者頭像走同一支 per-row 查詢：這一份物件會被前端插進列表頭端，少了它
+	// 會出現「剛發完的那一篇沒有頭像、重新整理後就有了」。
+	authorAvatarURL, mediaToken, err := s.forumAuthorAvatarURL(r.Context(), author, mediaToken)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 讀取新文章作者頭像失敗: %v", err)
+		internalError(w, "unable to read forum profile")
+		return
+	}
 	// 回傳的物件其 LikeCount 與 CommentCount 為零值（新貼文必然為零），
 	// ImageURL 則是「檔名 + 剛才那支 token」組出的網址，與列表中的其他貼文
 	// 格式一致，前端不必再自己拼一次。
 	// CreatedAt 沿用實際寫入資料庫的那個時間值（createdAt），而不是另取一次
 	// time.Now()：兩者可能相差不到一秒，而列表與首頁插入的項目必須顯示同一個時間。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"ok":   true,
-		"item": forumPost{ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author), AuthorTags: authorTags, Content: req.Content, ImageURL: s.forumImageURL(imageName, mediaToken), CreatedAt: createdAt},
+		"ok":           true,
+		"item":         forumPost{ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author), AuthorTags: authorTags, AuthorAvatar: authorAvatarURL, Content: req.Content, ImageURL: s.forumImageURL(imageName, mediaToken), CreatedAt: createdAt},
 	})
 }
 

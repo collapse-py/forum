@@ -83,6 +83,8 @@ export const th: Record<MessageKey, string> = {
     'อ่านข้อมูลโปรไฟล์ไม่สำเร็จ',
   'error.fallbackProfileSave':
     'บันทึกลงไม่สำเร็จ',
+  'error.fallbackAvatarUpload':
+    'อัปโหลดรูปประจำตัวไม่สำเร็จ',
   'error.fallbackPublish':
     'รูปแบบการเผยแพร่ตอบกลับไม่ถูกต้อง',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const th: Record<MessageKey, string> = {
     'กรอกชื่อเล่น',
   'profile.nicknameHint':
     'ชื่อเล่นจะแสดงกับโพสต์ที่เผยแพร่ ขีดจำกัด 30 ตัวอักษร',
+  'profile.avatarLabel':
+    'รูปประจำตัว',
+  'profile.avatarHint':
+    'รูปประจำตัวจะแสดงกับโพสต์และความคิดเห็น ขีดจำกัดไฟล์ JPG, PNG, GIF หรือ WebP',
+  'profile.avatarChoose':
+    'เลือกรูปภาพ',
+  'profile.avatarRemove':
+    'ลบรูปประจำตัว',
+  'profile.avatarUploading':
+    'กำลังอัปโหลด...',
+  'profile.avatarPreviewAlt':
+    'ตัวอย่างรูปประจำตัวใหม่',
   'profile.bioLabel':
     'แนะนำตัว',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const th: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'ข้อมูลบุคคลสาธารณะ',
-  'publicProfile.avatar':
-    'ภาพโปรไฟล์',
   'publicProfile.loading':
     'กำลังโหลด...',
   'publicProfile.invalidLinkName':

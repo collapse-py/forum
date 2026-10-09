@@ -83,6 +83,8 @@ export const fr: Record<MessageKey, string> = {
     'Échec de la lecture du profil',
   'error.fallbackProfileSave':
     'Échec de l\'enregistrement',
+  'error.fallbackAvatarUpload':
+    'Échec de l\'envoi de la photo de profil',
   'error.fallbackPublish':
     'Format de réponse invalide lors de la publication de la réponse',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const fr: Record<MessageKey, string> = {
     'Saisissez votre pseudo',
   'profile.nicknameHint':
     'Le pseudo s’affichera sur les articles que vous publiez, jusqu’à 30 caractères.',
+  'profile.avatarLabel':
+    'Photo de profil',
+  'profile.avatarHint':
+    'Votre photo de profil s\'affiche sur les articles et les commentaires que vous publiez. Vous pouvez envoyer un fichier JPG, PNG, GIF ou WebP.',
+  'profile.avatarChoose':
+    'Choisir une image',
+  'profile.avatarRemove':
+    'Retirer la photo de profil',
+  'profile.avatarUploading':
+    'Envoi en cours...',
+  'profile.avatarPreviewAlt':
+    'Aperçu de la nouvelle photo de profil',
   'profile.bioLabel':
     'Bio',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const fr: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Profil public',
-  'publicProfile.avatar':
-    'Anonyme',
   'publicProfile.loading':
     'Chargement…',
   'publicProfile.invalidLinkName':

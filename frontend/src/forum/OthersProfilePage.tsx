@@ -29,6 +29,7 @@ import { errorMessage, errorText, goToLogin, requestJSON } from '../core';
 import type { ForumPost, ForumProfile } from '../types';
 import { msg, t, tr, usePageTitle, type Message } from '../i18n';
 import { FollowButton } from './FollowButton';
+import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, useAuth } from './shell';
 import { useComments } from './useComments';
@@ -40,6 +41,8 @@ import { useReport } from './useReport';
 interface PublicProfile {
   name: string;
   bio: string;
+  /** 這位使用者的頭像網址；空字串代表沒有頭像，退回顯示暱稱首字。 */
+  avatarUrl: string;
   /** 後端有沒有回 following：undefined 代表「沒有可追蹤的對象」。 */
   following: boolean | undefined;
   /** 網址上的金鑰。空字串代表連結不合法。 */
@@ -51,13 +54,14 @@ const PRELOAD_DISTANCE = '400px';
 
 /* 函式而非常數：name 是要顯示的字串，常數會把 import 時的語言固定住。 */
 function loading(): PublicProfile {
-  return { name: t('publicProfile.loading'), bio: '', following: undefined, selfKey: '' };
+  return { name: t('publicProfile.loading'), bio: '', avatarUrl: '', following: undefined, selfKey: '' };
 }
 
 function invalidLink(): PublicProfile {
   return {
     name: t('publicProfile.invalidLinkName'),
     bio: t('publicProfile.invalidLinkBio'),
+    avatarUrl: '',
     following: undefined,
     selfKey: '',
   };
@@ -120,7 +124,13 @@ export function OthersProfilePage() {
 
   const report = useReport({ onSent: setOk, onError: setFail });
 
-  useMediaTokenRelease(postItems);
+  /*
+   * 貼文列的圖片與作者頭像離開頁面時要釋放 token（實作見 useMediaTokenRelease）。
+   *
+   * profile.avatarUrl 是第二個來源：它是 GET /api/forum/public-profile 簽發的
+   * token，不屬於任何一篇貼文，而它與貼文附圖共用同一種 token、同一個釋放端點。
+   */
+  useMediaTokenRelease(postItems, [profile.avatarUrl]);
 
   /* --- 公開資料 ----------------------------------------------------------- */
 
@@ -136,6 +146,7 @@ export function OthersProfilePage() {
         setProfile({
           name: data.nickname || t('publicProfile.anonymous'),
           bio: data.bio || t('publicProfile.noBio'),
+          avatarUrl: data.avatarUrl ?? '',
           following: data.following,
           selfKey: userKey,
         });
@@ -146,6 +157,7 @@ export function OthersProfilePage() {
           // 這裡用 errorMessage 而非 errorText：bio 欄位是純字串（要直接顯示，
           // 不是延後翻譯的訊息），而 errorMessage 會優先取後端那句可讀訊息。
           bio: errorMessage(error, t('publicProfile.loadFailed')),
+          avatarUrl: '',
           following: undefined,
           selfKey: userKey,
         });
@@ -270,7 +282,11 @@ export function OthersProfilePage() {
 
         <section className="profile-panel">
           <div className="profile-heading">
-            <div className="profile-avatar">{t('publicProfile.avatar')}</div>
+            <ForumAvatar
+              className="profile-avatar"
+              url={profile.avatarUrl}
+              name={profile.name}
+            />
             <div>
               <div className="eyebrow">{t('publicProfile.eyebrow')}</div>
               <h1>{t('publicProfile.title')}</h1>

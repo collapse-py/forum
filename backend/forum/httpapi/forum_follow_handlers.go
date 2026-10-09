@@ -17,7 +17,7 @@
 
 	forum_follows   追蹤關聯，複合主鍵 (follower_email, target_email)
 	forum_posts     追蹤動態的資料來源（condition 由 handleForumFollowingPosts 組出）
-	forum_profiles  清單端點取暱稱用（LEFT JOIN，讓沒建檔的對象仍出現在清單裡）
+	forum_profiles  清單端點取暱稱與頭像用（LEFT JOIN，讓沒建檔的對象仍出現在清單裡）
 
 四、四條貫穿全檔的設計決策
 
@@ -68,10 +68,12 @@ type forumFollowRequest struct {
 //	            forumAuthor()：那個函式對沒有暱稱的人回的是「每次請求都不同」的
 //	            匿名代號，會讓這份清單在重新載入時整列跳動。空字串交給前端顯示
 //	            t('publicProfile.anonymous')，那才是穩定的呈現。
+//	AvatarURL   這位使用者的頭像網址（已附加 token）；沒有頭像時為空字串。
 //	FollowedAt  追蹤建立的時間，供前端顯示「加入追蹤於…」。
 type forumFollowTarget struct {
 	Key        string    `json:"key"`
 	Nickname   string    `json:"nickname"`
+	AvatarURL  string    `json:"avatarUrl,omitempty"`
 	FollowedAt time.Time `json:"followedAt"`
 }
 
@@ -128,8 +130,12 @@ func (s *Server) listForumFollows(w http.ResponseWriter, r *http.Request, follow
 	// 但他的貼文仍然出現在追蹤動態裡 —— 清單與動態的對象集合必須一致。
 	// 排序以 created_at 為主、target_email 為次：同一毫秒內追蹤兩個人時
 	// 仍然有確定順序，避免重新載入後順序跳動。
+	//
+	// avatar_url 走的是與貼文附圖相同的契約（只存檔名、回應時現組網址，見
+	// MigrateMySQL 第 29 步），因此這一份查詢順手把它一起 JOIN 出來 —— 它與
+	// nickname 住在同一列，沒有理由多打一次。
 	rows, err := s.db.QueryContext(r.Context(), `
-		SELECT f.target_email, COALESCE(p.nickname, ''), f.created_at
+		SELECT f.target_email, COALESCE(p.nickname, ''), COALESCE(p.avatar_url, ''), f.created_at
 		FROM forum_follows f
 		LEFT JOIN forum_profiles p ON p.author_email = f.target_email
 		WHERE f.follower_email = ?
@@ -142,14 +148,41 @@ func (s *Server) listForumFollows(w http.ResponseWriter, r *http.Request, follow
 	}
 	defer rows.Close()
 
+	// 頭像網址含 media token，因此整頁共用一把（單頁 50 人，多數人的頭像只在
+	// 這一頁出現一次，但同一把 token 讓釋放端點只需刪一個 key）。
+	//
+	// 刻意 best-effort：簽發失敗只記日誌，讓這份清單退化成「全部沒有頭像」而不是
+	// 整支端點回 502。追蹤清單的功能是「我要去哪裡看誰的貼文」，頭像消失只是辨識
+	// 度下降，不該因此把人擋在這裡（與 forumAuthor 對 DB 錯誤退化成匿名代號是
+	// 同一個取捨）。
+	//
+	// avatarTokenFailed 讓「放棄」成為一次性決定：一次簽發失敗通常代表 Redis
+	// 不可用，而每列都重試只會讓這支端點多等幾次連線逾時（單頁最多 50 列）。
+	// 一次失敗等於整頁都沒有頭像，也比「前三個有、後 47 個沒有」一致。
+	mediaToken := ""
+	avatarTokenFailed := false
 	items := make([]forumFollowTarget, 0)
 	for rows.Next() {
-		var targetEmail, nickname string
+		var targetEmail, nickname, avatar string
 		var followedAt time.Time
-		if err := rows.Scan(&targetEmail, &nickname, &followedAt); err != nil {
+		if err := rows.Scan(&targetEmail, &nickname, &avatar, &followedAt); err != nil {
 			logger.ErrorfContext(r.Context(), "[FORUM] 讀取追蹤清單失敗: %v", err)
 			internalError(w, "unable to read forum follows")
 			return
+		}
+		if avatar != "" && mediaToken == "" && !avatarTokenFailed {
+			token, tokenErr := s.createMediaToken(r.Context())
+			if tokenErr != nil {
+				avatarTokenFailed = true
+				logger.WarnfContext(r.Context(), "[FORUM] 建立追蹤清單頭像 token 失敗: %v", tokenErr)
+			} else {
+				mediaToken = token
+			}
+		}
+		// 沒有 token 的網址在瀏覽器裡是一張破圖，而「不顯示頭像」比破圖好，
+		// 因此拿不到 token 時就當這個人沒有頭像，其餘欄位不受影響。
+		if avatar != "" && mediaToken == "" {
+			avatar = ""
 		}
 		// key 在應用層現算：publicForumKey 是 email 的確定性雜湊，
 		// 因此這個值與貼文卡上的 authorKey 必然一致（那是同一個函式算出來的）。
@@ -157,6 +190,7 @@ func (s *Server) listForumFollows(w http.ResponseWriter, r *http.Request, follow
 		items = append(items, forumFollowTarget{
 			Key:        publicForumKey(targetEmail),
 			Nickname:   nickname,
+			AvatarURL:  s.forumImageURL(avatar, mediaToken),
 			FollowedAt: followedAt,
 		})
 	}

@@ -39,7 +39,7 @@
 | POST | `/api/forum/posts/{id}/comments/{cid}/report` | 檢舉留言 |
 | POST | `/api/forum/images` | 上傳圖片，轉送 files_server |
 | POST | `/api/forum/image-tokens/release` | 釋放媒體存取權杖 |
-| GET / PUT | `/api/forum/profile` | 自己的資料 |
+| GET / PUT | `/api/forum/profile` | 自己的資料（暱稱、簡介、頭像；PUT 為整份覆寫） |
 | GET / POST | `/api/forum/follows` | 追蹤名單 / 切換追蹤 |
 | GET | `/api/forum/following/posts` | 私密動態牆（需登入，不限流） |
 | GET | `/api/forum/my-posts` | 自己的貼文（需登入；未發過文回空清單而非 404） |
@@ -48,6 +48,21 @@
 | GET | `/api/forum/search?q=&offset=&limit=` | 全文搜尋；ES 不可用時退回 `LIKE` |
 
 > 兩個 `public-*` 端點的參數名**不一致**（`key` vs `user`），這是現況不是筆誤。
+
+### 頭像
+
+上傳沒有獨立端點：頭像沿用 `/api/forum/images`，寫入走 `PUT /api/forum/profile`。
+
+| 用途 | 怎麼做 |
+| --- | --- |
+| 換頭像 | `POST /api/forum/images` 上傳取得網址 → `PUT /api/forum/profile` 帶 `{nickname, bio, avatarUrl}` |
+| 移除頭像 | `PUT /api/forum/profile` 帶 `avatarUrl: ""` |
+
+- `avatarUrl` 與 `bio` 同一個語意：**整份覆寫**。省略等同送空字串，因此呼叫端每次都要把自己現在的值一起送回來。
+- 回應欄位：`GET /api/forum/profile`、`GET /api/forum/public-profile` 回 `avatarUrl`（已附加 media token）；貼文與留言多帶 `authorAvatar`；追蹤清單的每一項多帶 `avatarUrl`。三處都省略空值。
+- 讀取端點一共有四個讀者：`/forum/profile`（編輯自己的頭像）、`/forum/others-profile`（看別人的）、`/forum/following`（追蹤清單），以及 `/forum/new` 的 composer 那一顆「我」。因此 `GET /api/forum/profile` 在已登入的頁面上會被重複呼叫 —— 這是有意的：四個頁面各只需要自己那一份，而共用一個快取會讓「剛改了頭像」在某一頁還是舊的。
+ - `PUT /api/forum/profile` **不回** `avatarUrl` —— 呼叫端送進去的值就是寫入的值，多回一份只會讓它有第二個來源。
+- 被替換掉的舊檔沒有刪除端點，會成為孤兒檔（與貼文附圖相同，見 `forumProfileRequest` 的說明）。
 
 ---
 

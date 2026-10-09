@@ -83,6 +83,8 @@ export const ru: Record<MessageKey, string> = {
     'Не удалось прочитать профиль',
   'error.fallbackProfileSave':
     'Не удалось сохранить',
+  'error.fallbackAvatarUpload':
+    'Не удалось загрузить аватар',
   'error.fallbackPublish':
     'Неверный формат публикации',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const ru: Record<MessageKey, string> = {
     'Введите псевдоним',
   'profile.nicknameHint':
     'Псевдоним будет отображаться в ваших публикациях на форуме. Максимум 30 символов.',
+  'profile.avatarLabel':
+    'Аватар',
+  'profile.avatarHint':
+    'Аватар отображается на ваших публикациях и комментариях. Можно загрузить JPG, PNG, GIF или WebP.',
+  'profile.avatarChoose':
+    'Выбрать изображение',
+  'profile.avatarRemove':
+    'Удалить аватар',
+  'profile.avatarUploading':
+    'Загрузка...',
+  'profile.avatarPreviewAlt':
+    'Предпросмотр нового аватара',
   'profile.bioLabel':
     'Описание профиля',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const ru: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Открытый профиль',
-  'publicProfile.avatar':
-    'Аватар',
   'publicProfile.loading':
     'Загрузка...',
   'publicProfile.invalidLinkName':

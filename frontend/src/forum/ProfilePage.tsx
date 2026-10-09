@@ -28,8 +28,9 @@ import {
   readJSONObject,
   requestJSON,
 } from '../core';
-import type { ForumPost, ForumProfile } from '../types';
+import type { ForumPost, ForumProfile, UploadResponse } from '../types';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
+import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, usePwaInstall, type AuthState } from './shell';
 import { useComments } from './useComments';
@@ -37,6 +38,20 @@ import { updateForumPost, useFeed, toggleLike } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
+
+/**
+ * 「這次編輯對頭像做了什麼」。
+ *
+ * 三種狀態必須能分開，而一個字串辦不到：
+ *
+ *   - null  還沒碰頭像 → 儲存時送回「現在這一張」，取消時什麼都不發生。
+ *   - ''    按了移除   → 儲存時送回空字串，資料庫清掉 avatar_url。
+ *   - 網址  選了新圖   → 儲存時送回 /api/forum/images 給的那一份。
+ *
+ * 少了 null 的症狀很具體：讀取資料時把 avatarUrl 初始化進這個 state，取消編輯
+ * 就會把頭像清空（因為「取消」只能把它設回空字串，而那正好是「移除」的語意）。
+ */
+type AvatarEdit = string | null;
 
 /** 單頁筆數與另外三個貼文列表一致（後端 handleForumMyPosts 的 pageSize）。 */
 const PAGE_SIZE = 25;
@@ -61,6 +76,12 @@ export function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [nickname, setNickname] = useState('');
   const [bio, setBio] = useState('');
+  /** 「現在存在資料庫裡」的頭像網址。唯讀畫面與編輯中的預設值都用它。 */
+  const [avatarUrl, setAvatarUrl] = useState('');
+  /** 這次編輯對頭像的決議；null = 還沒碰（見 AvatarEdit）。 */
+  const [avatarEdit, setAvatarEdit] = useState<AvatarEdit>(null);
+  /** 頭像上傳中。與 saving 分開：上傳發生在按「儲存」之前，兩者不會同時為真。 */
+  const [avatarUploading, setAvatarUploading] = useState(false);
   // 存 key+參數或後端回的字串，render 時才翻譯（見 runtime.ts 的「延後翻譯的訊息」）。
   const [status, setStatus] = useState<{ message: Message | string | null; isError: boolean }>({
     message: null,
@@ -125,8 +146,14 @@ export function ProfilePage() {
     onError: (message) => setStatus({ message, isError: true }),
   });
 
-  // 貼文列的圖片離開頁面時要釋放 token（實作見 useMediaTokenRelease）。
-  useMediaTokenRelease(postItems);
+  /*
+   * 貼文列的圖片與作者頭像離開頁面時要釋放 token（實作見 useMediaTokenRelease）。
+   *
+   * avatarUrl 是第二個來源：它是 GET /api/forum/profile 簽發的 token，不屬於
+   * 任何一篇貼文，而它與貼文附圖共用同一種 token、同一個釋放端點。少了它，每一
+   * 次進出個人資料頁都留下一把沒人刪的 key。
+   */
+  useMediaTokenRelease(postItems, [avatarUrl]);
 
   const load = useCallback(async () => {
     try {
@@ -138,6 +165,8 @@ export function ProfilePage() {
       const profile = await requestJSON<ForumProfile>('/api/forum/profile', { fallback: t('error.fallbackProfile') });
       setNickname(profile.nickname ?? '');
       setBio(profile.bio ?? '');
+      setAvatarUrl(profile.avatarUrl ?? '');
+      setAvatarEdit(null);
       setPhase('ready');
       setEditing(false);
     } catch (error) {
@@ -157,28 +186,98 @@ export function ProfilePage() {
   const startEditing = () => {
     setStatus({ message: '', isError: false });
     setEditing(true);
+    // 表單的第一顆控件是暱稱，而頭像的決議從「未改動」開始：帶著上一次編輯
+    // 留下來的決議進表單，會讓使用者看到一張自己不記得選過的頭像。
+    setAvatarEdit(null);
     // 等 React 提交完這次 render：此刻輸入框還不存在，直接 focus 會落在 body。
     requestAnimationFrame(() => nicknameRef.current?.focus());
   };
 
   const cancelEditing = () => {
     setStatus({ message: '', isError: false });
+    // 丟掉這次對頭像的決議：取消就是取消全部，包括已經上傳成功的那一張。
+    // （已上傳的檔案會成為孤兒檔，與放棄一張貼文附圖相同，見後端
+    // forumProfileRequest 的說明。）
+    setAvatarEdit(null);
     setEditing(false);
+  };
+
+  /* --- 頭像 --------------------------------------------------------------- */
+
+  /*
+   * 表單裡那顆頭像顯示「即將儲存的樣子」。
+   *
+   * 上傳成功就換成伺服器那一張，而不是另建 URL.createObjectURL：後端回傳的
+   * 網址已經帶一把立即可用的 media token，因此預覽看到的就是儲存後每個人都會
+   * 看到的那一份。少了 object URL 也少一件要 revoke 的事。
+   *
+   * 名字用暱稱（與貼文卡同一個取法）：沒有頭像時首字要與其他地方一致。
+   */
+  const formAvatarURL = avatarEdit === null ? avatarUrl : avatarEdit;
+  const formAvatarName = nickname.trim() || t('newPost.avatarYou');
+  const hasFormAvatar = formAvatarURL !== '';
+
+  /*
+   * 選好圖片就立刻上傳，不等按「儲存」。
+   *
+   * 理由不是省一次點擊，而是「格式或大小不對」要在這裡就讓使用者知道 ——
+   * 等到儲存才一起失敗，錯誤訊息會長得像暱稱或簡介的問題。上傳成功後手上就有
+   * 完整網址，表單因此可以顯示真正的預覽。
+   *
+   * 它只改 avatarEdit，不寫資料庫：真正的寫入還是跟著整份資料一起（見
+   * handleSubmit）。因此按「取消」不會留下任何改變。
+   */
+  const handleAvatarFile = async (file: File) => {
+    if (avatarUploading) return;
+    setAvatarUploading(true);
+    setStatus({ message: t('profile.avatarUploading'), isError: false });
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      const uploaded = await requestJSON<UploadResponse>('/api/forum/images', {
+        method: 'POST',
+        form: body,
+        fallback: t('error.fallbackAvatarUpload'),
+      });
+      setAvatarEdit(uploaded.url ?? '');
+      setStatus({ message: '', isError: false });
+    } catch (error) {
+      if (error instanceof LoginRequiredError) {
+        goToLogin();
+        return;
+      }
+      setStatus({ message: errorText(error, msg('error.fallbackAvatarUpload')), isError: true });
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  /** 移除頭像的決議。只是把這次編輯的目標設成空字串，還沒有送出。 */
+  const removeAvatar = () => {
+    setStatus({ message: '', isError: false });
+    setAvatarEdit('');
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (saving) return;
+    if (saving || avatarUploading) return;
     setSaving(true);
     setStatus({ message: t('profile.saving'), isError: false });
     try {
+      // 頭像跟著暱稱與簡介一起送出，而不是另開一個端點：後端把三者放在同一句
+      // upsert 裡（見 handleForumProfile 的說明），因此它們不可能只成功一半。
+      const nextAvatar = formAvatarURL;
       const profile = await requestJSON<ForumProfile>('/api/forum/profile', {
         method: 'PUT',
-        json: { nickname: nickname.trim(), bio: bio.trim() },
+        json: { nickname: nickname.trim(), bio: bio.trim(), avatarUrl: nextAvatar },
         fallback: t('error.fallbackProfileSave'),
       });
       setNickname(profile.nickname ?? '');
       setBio(profile.bio ?? '');
+      // 頭像的結果以「自己送出的那一份」為準：PUT 刻意不回 avatarUrl（理由見
+      // handleForumProfile），而送出的值就是通過驗證後寫進資料庫的那一個。
+      setAvatarUrl(nextAvatar);
+      setAvatarEdit(null);
       setEditing(false);
       setStatus({ message: t('profile.updated'), isError: false });
     } catch (error) {
@@ -318,7 +417,12 @@ export function ProfilePage() {
 
         <section className="profile-panel">
           <div className="profile-heading">
-            <div className="profile-avatar">{t('newPost.avatarYou')}</div>
+            {/*
+              唯讀畫面顯示「現在這一張」（avatarUrl），不是編輯中的決議 ——
+              這個區塊在 editing 時也照樣渲染，而兩者顯示不同的圖會讓人以為
+              已經存進去了。alt 刻意給空字串：旁邊的 <h1> 就是這張圖的說明。
+            */}
+            <ForumAvatar className="profile-avatar" url={avatarUrl} name={nickname.trim() || t('newPost.avatarYou')} />
             <div>
               <div className="eyebrow" id="profile-eyebrow">
                 {t('profile.eyebrow')}
@@ -401,6 +505,67 @@ export function ProfilePage() {
                 onChange={(event) => setBio(event.target.value)}
               />
               <p className="profile-hint">{t('profile.bioHint')}</p>
+              {/*
+                頭像欄位。與暱稱、簡介不同的地方只有一個：它是「先上傳、再跟著
+                整份資料一起儲存」，因此選完圖片的當下就會有一個獨立的成功或失敗
+                （見 handleAvatarFile）。表單因此要能同時呈現兩種狀態：上傳中的
+                提示在選圖時出現，儲存中的提示在按儲存時出現，兩者不會同時發生。
+
+                 排版刻意與上面兩個「標題 + 輸入框」的欄位不同：它的「值」是一顆
+                 圓，橫向排在一起才不會把表單拉得過長。
+              */}
+              <div className="profile-avatar-field">
+                <span className="profile-avatar-field-label">{t('profile.avatarLabel')}</span>
+                <div className="profile-avatar-editor">
+                  <ForumAvatar
+                    className="profile-avatar profile-avatar--editor"
+                    url={formAvatarURL}
+                    name={formAvatarName}
+                    label={t('profile.avatarPreviewAlt')}
+                  />
+                  <div className="profile-avatar-actions">
+                    <label
+                      className={`profile-avatar-choose${avatarUploading ? ' is-uploading' : ''}`}
+                      htmlFor="profile-avatar"
+                    >
+                      {avatarUploading ? t('profile.avatarUploading') : t('profile.avatarChoose')}
+                    </label>
+                    {/*
+                      hidden 而不是 display:none：.profile-panel input（0,1,1）
+                      贏過 .profile-avatar-input（0,1,0），只有元素上的 hidden
+                      帶的 UA !important 留得住它。真正的控制項是上面的
+                      <label htmlFor>，與 /forum/new 的圖片選擇同一個寫法。
+                    */}
+                    <input
+                      id="profile-avatar"
+                      className="profile-avatar-input"
+                      type="file"
+                      accept="image/jpeg,image/png,image/gif,image/webp"
+                      disabled={avatarUploading}
+                      hidden
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        // 重設 value：同一個檔案再選一次時 onChange 不會觸發，
+                        // 而使用者「選了不喜歡的圖、想改回原本那一張」正好需要它。
+                        event.target.value = '';
+                        if (file) void handleAvatarFile(file);
+                      }}
+                    />
+                    {hasFormAvatar ? (
+                      <button
+                        className="profile-avatar-remove"
+                        id="profile-avatar-remove"
+                        type="button"
+                        disabled={avatarUploading}
+                        onClick={removeAvatar}
+                      >
+                        {t('profile.avatarRemove')}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <p className="profile-hint">{t('profile.avatarHint')}</p>
+              </div>
               <div className="profile-form-actions">
                 <button className="submit-button" type="submit" disabled={saving}>
                   {saving ? t('profile.saving') : t('common.save')}

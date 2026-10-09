@@ -461,6 +461,37 @@ body {
   background: #e9e9e9;
 }
 
+/*
+ * 有頭像時 <img> 取代首字，撐滿同一個圓形外框（.avatar、.profile-avatar、
+ * 論壇各頁的編輯器都用這一條）。
+ *
+ * width/height 用 100% 而不是各自寫死尺寸：外框的尺寸由呼叫端決定（貼文卡 40px、
+ * 個人資料頁 64px、留言 22px），圖片只需要跟著撐滿。少了它，<img> 會以自己的
+ * 固有尺寸渲染，而頭像通常遠大於外框 —— 症狀是圓形裡突出一個方角。
+ *
+ * object-fit: cover 是必要的：使用者上傳的圖多數不是正方形，不裁切會被壓成
+ * 一顆橢圓。border-radius: inherit 讓圖片跟著外框的圓角走（外框是 50%），
+ * 因為 border-radius 不會被子元素繼承。
+ */
+.avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+/* 留言的作者頭像：比貼文卡小一號。
+   align-self 自己算，因為 .comment-head 是 baseline 對齊（作者名、時間與按鈕
+   共用一條文字基線），把整列改置中會讓原本對齊的文字鉛直位移 —— 而那一列
+   本來沒有頭像也是對齊的。 */
+.comment-avatar {
+  flex: 0 0 22px;
+  align-self: center;
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
+
 .submit-button {
   padding: 7px 16px;
 }

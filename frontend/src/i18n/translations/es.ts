@@ -83,6 +83,8 @@ export const es: Record<MessageKey, string> = {
     'Error al cargar el perfil de la persona',
   'error.fallbackProfileSave':
     'Error al guardar',
+  'error.fallbackAvatarUpload':
+    'Error al subir la imagen de perfil',
   'error.fallbackPublish':
     'El formato de la respuesta al publicar la publicación es incorrecto.',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const es: Record<MessageKey, string> = {
     'Introducir alias',
   'profile.nicknameHint':
     'El alias se mostrará en las publicaciones que hagas, con un máximo de 30 caracteres.',
+  'profile.avatarLabel':
+    'Imagen de perfil',
+  'profile.avatarHint':
+    'La imagen de perfil se mostrará en las publicaciones y comentarios que hagas. Puedes subir JPG, PNG, GIF o WebP.',
+  'profile.avatarChoose':
+    'Elegir imagen',
+  'profile.avatarRemove':
+    'Quitar imagen de perfil',
+  'profile.avatarUploading':
+    'Subiendo...',
+  'profile.avatarPreviewAlt':
+    'Vista previa de la nueva imagen de perfil',
   'profile.bioLabel':
     'Biografía',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const es: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'Perfil público',
-  'publicProfile.avatar':
-    'Anónimo',
   'publicProfile.loading':
     'Cargando…',
   'publicProfile.invalidLinkName':

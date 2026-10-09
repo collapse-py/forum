@@ -15,7 +15,7 @@
     <meta name="forum-name" content="{{FORUM_NAME}}" />
     <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
     <title>個人資料｜{{FORUM_NAME}}</title>
-    <link rel="stylesheet" href="/style.css?v=202609272345" />
+    <link rel="stylesheet" href="/style.css?v=202610091755" />
     <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
     <link rel="icon" href="/asset/logo.png" type="image/png" />
     <link rel="apple-touch-icon" href="/asset/logo.png" />
@@ -231,6 +231,96 @@
         margin: 9px 0 20px;
         color: var(--muted);
         font-size: 12px;
+      }
+
+       /* --- 頭像 -----------------------------------------------------------
+        * 與上面兩個欄位不同的地方只有一個：它的「值」是一顆圓，因此橫向排布才不會
+        * 把表單拉得過長。標題用 <span> 而不是 <label>：這一格沒有單一輸入框可以
+        * 指（真正的控制項是下面那顆「選擇圖片」的 <label htmlFor>），掛一個指不到
+        * 任何東西的 for 只會讓讀屏唸出一個沒反應的欄位名稱。
+        * ------------------------------------------------------------------ */
+      .profile-avatar-field {
+        margin-top: 20px;
+      }
+
+      .profile-avatar-field-label {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .profile-avatar-editor {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      /* 編輯中的頭像比標題列那顆小一級：它旁邊還有兩個按鈕，而同一個 64px 圓在
+         兩個地方用同樣的尺寸會讓這一格看起來比暱稱與簡介都「重」。 */
+      .profile-avatar--editor {
+        width: 56px;
+        height: 56px;
+        font-size: 19px;
+      }
+
+      .profile-avatar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* 「選擇圖片」沿用 .image-upload-label 的膠囊外框（/forum/new 的同一顆），
+         選擇器在這裡重寫而不是共用 class：兩頁的 <style> 互相看不到對方。 */
+      .profile-avatar-choose {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 7px 12px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .profile-avatar-choose:hover {
+        border-color: var(--text);
+        color: var(--text);
+      }
+
+      /* 上傳中把膠囊壓暗：它此刻不可按，而看起來仍可按會讓人反覆點。
+         掛 class 而不是用 :has(.profile-avatar-input:disabled)：後者要
+         Chrome 105 / Safari 15.4 / Firefox 121 之後才認得，而這裡要的只是一個
+         上傳中的視覺提示 —— 不支援的瀏覽器會得到一顆看起來可以按但按了沒反應的
+         膠囊（input 仍然 disabled），不是壞掉。 */
+      .profile-avatar-choose.is-uploading {
+        opacity: 0.6;
+        cursor: progress;
+      }
+
+      .profile-avatar-remove {
+        border: 0;
+        border-radius: 999px;
+        padding: 7px 12px;
+        color: #d33;
+        background: transparent;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .profile-avatar-remove:hover {
+        background: #fdecec;
+      }
+
+      /* hidden 而不是 display:none：上面 .profile-panel input（0,1,1）的權重贏過
+         .profile-avatar-input（0,1,0），只有元素上的 hidden 帶的 UA !important 留得
+         住它。真正的控制項是 <label htmlFor>，與 /forum/new 同一個寫法。 */
+      .profile-avatar-input {
+        display: none;
       }
 
       .profile-form-actions {

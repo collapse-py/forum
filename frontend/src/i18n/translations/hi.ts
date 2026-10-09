@@ -83,6 +83,8 @@ export const hi: Record<MessageKey, string> = {
     'व्यक्तिगत जानकारी पढ़ने में विफलता',
   'error.fallbackProfileSave':
     'संभालने में विफलता',
+  'error.fallbackAvatarUpload':
+    'अवतार अपलोड करने में विफलता',
   'error.fallbackPublish':
     'प्रकाशित करने के लिए जवाब का स्वरूप गलत है',
   'error.fallbackUpload':
@@ -279,6 +281,18 @@ export const hi: Record<MessageKey, string> = {
     'उपनाम दर्ज करें',
   'profile.nicknameHint':
     'उपनाम आपकी पोस्ट पर प्रदरशित होगा, अधिकतम 30 अक्षर।',
+  'profile.avatarLabel':
+    'अवतार',
+  'profile.avatarHint':
+    'अवतार आपकी पोस्ट और टिप्पणियों पर प्रदर्शित होगा, JPG, PNG, GIF या WebP अपलोड किया जा सकता है।',
+  'profile.avatarChoose':
+    'चित्र चुनें',
+  'profile.avatarRemove':
+    'अवतार हटाएँ',
+  'profile.avatarUploading':
+    'अपलोड हो रहा है...',
+  'profile.avatarPreviewAlt':
+    'नए अवतार का पूर्वावलोकन',
   'profile.bioLabel':
     'परिचय',
   'profile.bioPlaceholder':
@@ -303,8 +317,6 @@ export const hi: Record<MessageKey, string> = {
     'PUBLIC PROFILE',
   'publicProfile.title':
     'सार्वजनिक प्रोफ़ाइल',
-  'publicProfile.avatar':
-    'अनोनिमस',
   'publicProfile.loading':
     'लोड हो रहा है...',
   'publicProfile.invalidLinkName':
