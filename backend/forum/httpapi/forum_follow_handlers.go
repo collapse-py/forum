@@ -443,6 +443,10 @@ func (s *Server) forumEmailByPublicKey(ctx context.Context, key string) (string,
 		return "", err
 	}
 
+	// 刻意不過濾軟刪除的貼文（forum_posts.deleted_at）：這段退路回答的是
+	// 「這個 public key 是誰」，而不是「他有哪些貼文可見」。把自己的貼文
+	// 全部刪掉的人仍然要有 public key —— 否則他的個人頁連結與既有的追蹤
+	// 關係會同時失效，而那與「刪除貼文」是兩件事。
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT author_email FROM forum_posts LIMIT ?`, followKeyScanLimit)
 	if err != nil {
@@ -496,8 +500,10 @@ func (s *Server) handleForumFollowingPosts(w http.ResponseWriter, r *http.Reques
 	// 條件走 forum_follows 的複合主鍵最左前綴（follower_email），
 	// 因此這是索引查詢而不是全表掃描。沒追蹤任何人時子查詢回空集合，
 	// 整個條件恆為 false，得到 0 筆而不是錯誤。
+	// 軟刪除過濾不在這裡：loadForumPosts 會帶上 forumPostVisible，追蹤動態
+	// 因此與首頁、個人頁看到同一批「還活著」的貼文。
 	posts, err := s.loadForumPosts(r,
-		`WHERE fp.author_email IN (
+		`fp.author_email IN (
 		     SELECT target_email FROM forum_follows WHERE follower_email = ?
 		 )`, []interface{}{follower}, pageSize, offset)
 	if err != nil {

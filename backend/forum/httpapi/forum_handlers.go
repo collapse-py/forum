@@ -12,7 +12,7 @@ Origin 檢查在 csrf.go。
 	POST /api/forum/image-tokens/release      -> handleForumImageTokensRelease 釋放圖片存取 token
 	GET  /api/forum/posts/{id}                -> handleForumPostDetail   單篇文章（永久連結頁）
 	PUT  /api/forum/posts/{id}                -> handleForumPostUpdate   編輯本人貼文本文
-	DELETE /api/forum/posts/{id}              -> handleForumPostDelete   刪除本人貼文
+	DELETE /api/forum/posts/{id}              -> handleForumPostDelete   軟刪除本人貼文（deleted_at，資料保留）
 	*    /api/forum/posts/{id}/comments       -> handleForumComments     留言列表／新增留言
 	PUT  /api/forum/posts/{id}/comments/{cid} -> handleForumCommentUpdate 編輯本人留言
 	DELETE /api/forum/posts/{id}/comments/{cid} -> handleForumCommentDelete 刪除本人留言
@@ -43,7 +43,8 @@ Origin 檢查在 csrf.go。
 
 二、資料表依賴
 
-	    forum_posts                文章主檔（image_url 只存檔名，完整網址由應用層組成）
+	    forum_posts                文章主檔（image_url 只存檔名，完整網址由應用層組成；
+	                               deleted_at 非 NULL 代表已軟刪除，任何讀取端都看不到）
 	forum_post_likes           按讚，主鍵 (post_id, author_email)，天然去重
 	forum_post_comments        留言，無外鍵，需自行檢查父文章存在
 	forum_reports              檢舉，唯一鍵 (reporter_email, target_type, target_id)
@@ -70,6 +71,13 @@ Origin 檢查在 csrf.go。
     額外開交易只增加往返次數。
  7. 所有 DB 錯誤都先寫入 logger，再對外回傳固定的通用訊息，避免把 SQL 與
     schema 細節洩漏給使用者。
+ 8. 貼文的刪除是軟刪除（UPDATE forum_posts.deleted_at，見 MigrateMySQL 第 30 步）：
+    「刪除」的對外語意是這篇不再出現，而不是這一列從資料庫消失。本檔的每一條
+    貼文讀取路徑都因此帶著 deleted_at IS NULL，而這條過濾由 loadForumPosts 統一
+    組裝（見 forumPostVisible），不讓個別呼叫端各自記得。留言的子資源（列表、
+    編輯、刪除）同樣以母文章的可見性把關（forumPostVisibleByID，或在寫入語句
+    裡以 EXISTS 帶上同一個條件）—— 否則刪除只做到「從頁面藏起來」，留言仍會
+    沿著 /comments 這個再也沒有人會去的端點繼續被讀到。
 
 四、已知限制（刻意保留，非本檔文件可自行修正）
   - 本檔文件**每一條會改動資料的端點都已掛限流**（掛載點在 server.go 的
@@ -318,6 +326,40 @@ const forumPostProjection = `fp.id, fp.author_email, pr.avatar_url AS author_ava
 const forumPostFrom = `FROM forum_posts fp
 		LEFT JOIN forum_profiles pr ON pr.author_email = fp.author_email `
 
+// forumPostVisible 是所有公開貼文查詢共用的可見性條件。
+//
+// 刪除是軟刪除（MigrateMySQL 第 30 步）：deleted_at 非 NULL 的貼文在任何
+// 讀取端都必須不存在。把條件寫在這裡而不是讓每個呼叫端各自加上，是因為它
+// 漏掉的症狀不會是錯誤 —— 只是某一個頁面（例如追蹤動態）繼續顯示一篇作者
+// 已經按了刪除的貼文，而那沒有任何人會回報。
+//
+// 用 fp. 前綴而不是裸欄位：這個條件會被拼進帶著 JOIN 的查詢，裸 deleted_at
+// 在有第二張表也有同名的可能性下是歧義的（論壇目前只有 forum_posts 有這個
+// 欄位，但條件字串不該依賴那件事）。
+const forumPostVisible = `fp.deleted_at IS NULL`
+
+// forumPostVisibleByID 回傳「這篇貼文存在，而且還沒有被軟刪除」。
+//
+// 為什麼需要一支函式而不是讓呼叫端各自寫 SELECT：刪除是軟刪除（MigrateMySQL
+// 第 30 步），因此「存在」在本站是**兩件事**—— 那一列在，而且 deleted_at 還是
+// NULL。只檢查「那一列在」的話，一篇作者已經按了刪除的貼文仍會通過檢查，然後
+// 它的留言、按讚、內容就沿著那條路繼續被讀寫。
+//
+// 用 COUNT(*) 而非 SELECT 1：兩者成本相同（都走主鍵），COUNT 的語意在這裡更直觀。
+// 回傳 bool 而不是自己寫回應：404 的文案因端點而異（留言與按讚都回
+// "post not found"，與 handleForumPostDetail 同一種措辭），由呼叫端決定。
+//
+// 只查 forum_posts 這一張表：留言子表的 post_id 沒有外鍵（見 MigrateMySQL 第 4 步
+// 的說明），因此「這篇貼文還活著嗎」只能由這裡回答。
+func (s *Server) forumPostVisibleByID(ctx context.Context, postID int64) (bool, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, postID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // forumPostFeedOrder 是公開動態的排序。
 //
 // pinned DESC 在最前面，因此「置頂」對首頁是有效的（置頂的文章永遠在第一頁，
@@ -390,6 +432,11 @@ func scanForumPostRow(row rowScanner) (forumPost, error) {
 // 是因為兩種條件的差異只在 WHERE 子句，而其餘流程（計數、去識別化、圖片 token）
 // 完全相同 —— 讓它們共用這一支，欄位與處理順序就不可能漂移。
 //
+// condition 是**不帶 WHERE 的謂詞**（`fp.id = ?`、`fp.author_email = ?`）：
+// WHERE 關鍵字與 forumPostVisible 由這裡組裝，因此呼叫端不可能忘記軟刪除
+// 過濾，也不可能寫出兩個 WHERE。若讓呼叫端連 WHERE 一起給，這裡就得判斷
+// 「它有沒有以 WHERE 開頭」——那種解析正是讓過濾條件被悄悄繞過的原因。
+//
 // 三個逐列查詢（暱稱、標籤、圖片 token）是已知的 N+1：主查詢要維持單一、可走
 // idx_forum_posts_created_at 的形態，而把標籤 join 進去會因一對多而複製文章列，
 // 反而更貴。單頁筆數由 pageSize 封頂，因此最壞情況可控。
@@ -401,9 +448,16 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 	args = append(args, conditionArgs...)
 	args = append(args, pageSize, offset)
 
+	// 可見性條件永遠在場，呼叫端的條件接在後面：兩者都是 fp. 前綴的謂詞，
+	// 因此順序不影響語意，而把可見性放前面讓「先過濾掉刪除的」先發生。
+	filters := forumPostVisible
+	if condition != "" {
+		filters += " AND " + condition
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+forumPostProjection+`
-		`+forumPostFrom+` `+condition+`
+		`+forumPostFrom+`
+		WHERE `+filters+`
 		ORDER BY `+forumPostFeedOrder+` LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		// 先記錄原始錯誤再回通用訊息：使用者不需要知道是哪一段 SQL 失敗，
@@ -922,6 +976,26 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
+		// 母文章必須「還活著」才看得見它的留言，理由見 forumPostVisibleByID。
+		//
+		// 少了這一道檢查，症狀是：貼文詳情頁對一篇已刪除的貼文回 404、動態與搜尋
+		// 都再也找不到它，而 GET /comments 仍會把整串留言（作者化名、內容、頭像、
+		// 時間）原封不動奉上。刪除於是只做到「從頁面藏起來」，沒有做到「消失」——
+		// 而那正是軟刪除要消除的那種無聲失敗：沒有任何錯誤，只是一個再也沒有人
+		// 會去的端點還在吐資料。
+		//
+		// 與 POST 分支同一個檢查、同一個措辭（"post not found"）：同一支 handler
+		// 的兩半對「貼文不存在」不該有兩種答案。
+		visible, err := s.forumPostVisibleByID(r.Context(), postID)
+		if err != nil {
+			logger.ErrorfContext(r.Context(), "[FORUM] 檢查文章失敗 post_id=%d: %v", postID, err)
+			internalError(w, "unable to load forum post")
+			return
+		}
+		if !visible {
+			writeError(w, http.StatusNotFound, "post not found")
+			return
+		}
 		// 預設只給 8 則，因為多數留言不會被展開；前端「看更多」才以 limit 放大。
 		// 上限壓在 12 是為了防止有人直接請求 limit=100000 拖垮 DB 與回應體積。
 		const initialCommentPageSize = 8
@@ -1066,14 +1140,17 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Schema 沒有外鍵，因此「文章是否存在」必須自行檢查，否則會留下孤兒留言。
-	// 用 COUNT(*) 而非 SELECT 1：兩者成本相同，但 COUNT 語意在這裡更直觀。
-	var postCount int
-	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ?`, postID).Scan(&postCount); err != nil {
+	// deleted_at IS NULL 讓「對一篇已刪除的貼文留言」得到 404：它與貼文不
+	// 存在對使用者是同一件事，而留言留在表裡只會是沒人看得見的孤兒。
+	// （檢查本身見 forumPostVisibleByID。）
+	visible, err := s.forumPostVisibleByID(r.Context(), postID)
+	if err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 檢查文章失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to load forum post")
 		return
 	}
 	// 回 404 而非 500：使用者操作沒有錯，是目標不存在，語意要對。
-	if postCount == 0 {
+	if !visible {
 		writeError(w, http.StatusNotFound, "post not found")
 		return
 	}
@@ -1128,7 +1205,7 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 //
 // 判斷順序不可調換，這是本函式最容易出錯的地方：
 //
-//	/posts/1                              → GET 單篇／PUT 編輯／DELETE 刪除本人貼文
+//	/posts/1                              → GET 單篇／PUT 編輯／DELETE 軟刪除本人貼文
 //	/posts/1/comments/2/report            → comment 檢舉
 //	/posts/1/comments/2                   → PUT 編輯／DELETE 刪除本人留言
 //	/posts/1/comments                     → 留言
@@ -1219,7 +1296,7 @@ func (s *Server) handleForumPostDetail(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "invalid post id")
 		return
 	}
-	posts, err := s.loadForumPosts(r, `WHERE fp.id = ?`, []interface{}{postID}, 1, 0)
+	posts, err := s.loadForumPosts(r, `fp.id = ?`, []interface{}{postID}, 1, 0)
 	if err != nil {
 		s.writeForumPostLoadError(w, err, "unable to load forum post")
 		return
@@ -1281,8 +1358,10 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 單一 UPDATE 具原子性，不需要交易（同 createForumPost 的說明）。
+	// deleted_at IS NULL 讓「編輯一篇已刪除的貼文」落到 404 而不是成功：
+	// 那篇貼文在任何頁面都已經不存在，編輯它只會產生一筆沒人看到的改動。
 	result, err := s.db.ExecContext(r.Context(),
-		`UPDATE forum_posts SET content = ?, updated_at = ? WHERE id = ? AND author_email = ?`,
+		`UPDATE forum_posts SET content = ?, updated_at = ? WHERE id = ? AND author_email = ? AND deleted_at IS NULL`,
 		req.Content, time.Now(), postID, author)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 編輯本人貼文失敗 post_id=%d: %v", postID, err)
@@ -1311,6 +1390,12 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 // 「A 文章的留言 id」對「B 文章的留言 id 路由」送出 PUT —— 授權仍然成立
 // （他確實是那則留言的作者），但呼叫端以為自己改的是另一篇文章的留言。
 // 那不會造成越權，卻會讓「我在 B 篇底下編輯留言」的結果在 A 篇生效。
+//
+// 第四個條件是母文章必須還活著（EXISTS ... deleted_at IS NULL）：一篇已被軟刪除的
+// 貼文（MigrateMySQL 第 30 步）在任何頁面都不存在，改它底下的留言只會產生一筆
+// 沒有人看得見的改動。把條件放進 UPDATE 本身而不是先查再改，是為了讓「貼文在兩
+// 次查詢之間被刪掉」這個競態沒有落點 —— 與 handleForumPostDelete 把作者條件放進
+// DELETE 本身是同一個理由。影響 0 列時回 404，與「留言不存在」同一種回應。
 func (s *Server) handleForumCommentUpdate(w http.ResponseWriter, r *http.Request, commentID int64) {
 	author := s.sessions.ResolveUser(r)
 	if author == "" {
@@ -1345,7 +1430,9 @@ func (s *Server) handleForumCommentUpdate(w http.ResponseWriter, r *http.Request
 	}
 	result, err := s.db.ExecContext(r.Context(),
 		`UPDATE forum_post_comments SET content = ?, updated_at = ?
-		 WHERE id = ? AND author_email = ? AND post_id = ?`,
+		 WHERE id = ? AND author_email = ? AND post_id = ?
+		   AND EXISTS (SELECT 1 FROM forum_posts p
+		               WHERE p.id = forum_post_comments.post_id AND p.deleted_at IS NULL)`,
 		req.Content, time.Now(), commentID, author, postID)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 編輯本人留言失敗 post_id=%d comment_id=%d: %v", postID, commentID, err)
@@ -1385,8 +1472,15 @@ func (s *Server) handleForumCommentDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// 作者條件放進 DELETE 本身，理由與 handleForumPostDelete 相同。
+	// 母文章的可見性條件（EXISTS ... deleted_at IS NULL）也寫在同一個原子操作裡：
+	// 一篇已軟刪除的貼文底下的留言照樣可以讓作者收回，但「對它做任何新動作」不行。
+	// 先查再刪會留下一個縫隙（貼文在兩次查詢之間被刪），而那個縫隙在這裡的症狀
+	// 是 200 OK —— 沒有人會發現。
 	result, err := s.db.ExecContext(r.Context(),
-		`DELETE FROM forum_post_comments WHERE id = ? AND author_email = ? AND post_id = ?`,
+		`DELETE FROM forum_post_comments
+		 WHERE id = ? AND author_email = ? AND post_id = ?
+		   AND EXISTS (SELECT 1 FROM forum_posts p
+		               WHERE p.id = forum_post_comments.post_id AND p.deleted_at IS NULL)`,
 		commentID, author, postID)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 刪除本人留言失敗 post_id=%d comment_id=%d: %v", postID, commentID, err)
@@ -1426,7 +1520,16 @@ func forumCommentIDFromPath(path string) (int64, bool) {
 	return id, true
 }
 
-// handleForumPostDelete 刪除登入者自己的貼文。
+// handleForumPostDelete 軟刪除登入者自己的貼文。
+//
+// 軟刪而非 DELETE FROM：刪除在本站的語意是「不再對外顯示」，不是「從資料庫
+// 抹除」。實際效果是 UPDATE deleted_at，因此貼文、它的留言、按讚與檢舉紀錄
+// 都還在，只是任何讀取路徑都看不到它（見 MigrateMySQL 第 30 步）。選擇軟刪
+// 的兩個具體理由：使用者按下去的那一下沒有第二道確認以外的緩衝；以及檢舉
+// 工單（forum_reports）指向的貼文不該在被處理後就再也無從對帳。
+//
+// 副作用是「什麼時候真的消失」不再是這個 handler 能回答的問題，因此清理
+// 機制必須另外設計（目前刻意沒有，見 docs/KNOWN_ISSUES.md）。
 func (s *Server) handleForumPostDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		methodNotAllowed(w)
@@ -1452,15 +1555,19 @@ func (s *Server) handleForumPostDelete(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "invalid post id")
 		return
 	}
-	// 將作者條件放進 DELETE 本身，避免「先查作者、再刪除」之間的權限競態。
-	result, err := s.db.ExecContext(r.Context(), `DELETE FROM forum_posts WHERE id = ? AND author_email = ?`, postID, author)
+	// 將作者條件放進 UPDATE 本身，避免「先查作者、再刪除」之間的權限競態。
+	// deleted_at IS NULL 讓重複刪除同一篇回 404（語意是「它已經不在了」），
+	// 而不是假裝又成功了一次 —— 也順便避免把刪除時間覆寫成第二次的時間。
+	result, err := s.db.ExecContext(r.Context(),
+		`UPDATE forum_posts SET deleted_at = ? WHERE id = ? AND author_email = ? AND deleted_at IS NULL`,
+		time.Now(), postID, author)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 刪除本人貼文失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to delete forum post")
 		return
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
-		// 不區分貼文不存在或屬於他人，避免藉回應差異探測作者權限。
+		// 不區分貼文不存在、屬於他人或已被刪除，避免藉回應差異探測作者權限。
 		http.NotFound(w, r)
 		return
 	}
@@ -1468,6 +1575,9 @@ func (s *Server) handleForumPostDelete(w http.ResponseWriter, r *http.Request) {
 	// 的 actor 欄位記的是管理員。寫一筆 actor 是使用者的「post.index_failed」
 	// 只會讓稽核紀錄多一個讀不出意義的動作；使用者路徑的索引失敗只留日誌，
 	// 後臺路徑才補稽核（見 recordPostIndexFailure）。
+	//
+	// 軟刪除一樣要移除索引：索引的用途是讓公開搜尋找得到內容，而軟刪的貼文
+	// 在公開頁已經不存在。留著它只會製造「搜尋得到、點進去 404」的幽靈貼文。
 	if err := s.unindexForumPost(r.Context(), postID); err != nil {
 		logger.WarnfContext(r.Context(), "[FORUM] 移除本人貼文的搜尋索引失敗 post_id=%d: %v", postID, err)
 	}
@@ -1511,12 +1621,24 @@ func (s *Server) handleForumReport(w http.ResponseWriter, r *http.Request, targe
 	var count int
 	// table 名稱以字串拼接而非字串格式化佔位符（MySQL 不支援），安全性仰賴
 	// 上述 targetType 非使用者可控這項前提。
+	//
+	// 條件與 table 分開寫，因為兩者都依目標類型而異，而這正是它必須分開的原因：
+	// 留言是一次 DELETE（forum_post_comments 沒有軟刪除），貼文卻必須是「還活著
+	// 的」。對一篇已經被軟刪除的貼文（MigrateMySQL 第 30 步）開出的檢舉，會產生
+	// 一張指向沒有人打得開的內容的工單 —— 覆核者在佇列裡看到的是一篇本來就該
+	// 消失的貼文，而它還躺在 pending 清單裡等著人處理。
+	//
+	// 留言刻意不連帶檢查母文章：留言本身沒有刪除狀態，而檢舉佇列存在的理由就是
+	// 讓覆核者看見「當時被檢舉的是什麼」（見 forum_admin_handlers.go 對報告
+	// 目標查找不過濾軟刪除的說明）。
 	table := "forum_posts"
+	condition := "id = ? AND deleted_at IS NULL"
 	if targetType == "comment" {
 		table = "forum_post_comments"
+		condition = "id = ?"
 	}
 	// 檢查目標存在，否則會產生指向不存在內容的檢舉紀錄，讓管理介面出現幽靈資料。
-	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM "+table+" WHERE id = ?", targetID).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM "+table+" WHERE "+condition, targetID).Scan(&count); err != nil {
 		internalError(w, "unable to load report target")
 		return
 	}
@@ -1644,8 +1766,10 @@ func (s *Server) handleForumPostLike(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	// 交易內確認文章存在：schema 沒有外鍵，否則會出現指向不存在文章的讚。
+	// deleted_at IS NULL 與留言的存在性檢查同一個理由：對一篇已經刪掉的貼文
+	// 按讚，只會在表裡留下一筆沒有人能再看到的讚。
 	var postCount int
-	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ?`, postID).Scan(&postCount); err != nil {
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, postID).Scan(&postCount); err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 檢查文章失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to load forum post")
 		return
@@ -2198,7 +2322,7 @@ func (s *Server) handleForumPublicPosts(w http.ResponseWriter, r *http.Request) 
 	// author_email 有索引（遷移第 21 步），因此這是「索引等值過濾 + 依
 	// idx_forum_posts_created_at 排序」。刻意不過濾停權：listForumPosts 不過濾，
 	// 這裡額外過濾會讓同一篇貼文在首頁可見、在個人頁消失。
-	posts, err := s.loadForumPosts(r, `WHERE fp.author_email = ?`, []interface{}{author}, pageSize, offset)
+	posts, err := s.loadForumPosts(r, `fp.author_email = ?`, []interface{}{author}, pageSize, offset)
 	if err != nil {
 		s.writeForumPostLoadError(w, err, "unable to load public posts")
 		return
@@ -2231,6 +2355,12 @@ func (s *Server) handleForumPublicPosts(w http.ResponseWriter, r *http.Request) 
 //
 // 刻意不過濾停權：listForumPosts 不過濾，這裡額外過濾會讓同一篇貼文在首頁可見、
 // 在自己的個人頁消失 —— 而這正是使用者最需要把它找出來刪掉的情形。
+//
+// 但軟刪除的貼文**不過濾不行**：它走的是與首頁同一支 loadForumPosts，而那裡
+// 的可見性條件是 forumPostVisible。這代表「刪掉之後在自己的頁面也看不到」，
+// 也就是軟刪除目前沒有救回的入口 —— 那個入口（已刪貼文列表＋恢復）不存在
+// 時，這是刻意的取捨：寧可讓它消失，也不要讓每個人都在自己的頁上看見一篇
+// 已經按過刪除的貼文。真的需要救回時要從資料庫著手（見 docs/KNOWN_ISSUES.md）。
 func (s *Server) handleForumMyPosts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -2253,7 +2383,7 @@ func (s *Server) handleForumMyPosts(w http.ResponseWriter, r *http.Request) {
 
 	// author_email 有索引（遷移第 21 步），因此這是「索引等值過濾 + 依
 	// idx_forum_posts_feed 排序」，不會退化成掃描。
-	posts, err := s.loadForumPosts(r, `WHERE fp.author_email = ?`, []interface{}{email}, pageSize, offset)
+	posts, err := s.loadForumPosts(r, `fp.author_email = ?`, []interface{}{email}, pageSize, offset)
 	if err != nil {
 		s.writeForumPostLoadError(w, err, "unable to load own posts")
 		return

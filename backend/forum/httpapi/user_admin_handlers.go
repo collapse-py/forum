@@ -377,9 +377,11 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 
 	// 以三個關聯子查詢一次算完每位使用者的發文/留言/按讚數，避免 N+1 查詢。
 	// COALESCE 處理尚未建立個人檔案（forum_profiles 無對應列）的情況，避免 Scan 到 NULL 失敗。
+	// 發文數扣除軟刪除的貼文：這個數字用來判斷「這個人活躍嗎」，而已經刪掉的
+	// 貼文在站上不存在（與本檔的貼文列表、CSV 匯出同一個口徑）。
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT u.email, u.status, COALESCE(fp.nickname, ''), u.created_at, u.updated_at,
-		       (SELECT COUNT(*) FROM forum_posts WHERE author_email = u.email),
+		       (SELECT COUNT(*) FROM forum_posts WHERE author_email = u.email AND deleted_at IS NULL),
 		       (SELECT COUNT(*) FROM forum_post_comments WHERE author_email = u.email),
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE author_email = u.email)
 		FROM forum_users u
@@ -892,11 +894,14 @@ func (s *Server) handleAdminUserContent(w http.ResponseWriter, r *http.Request, 
 
 	// ---- 查一：此使用者的文章 ----
 	// 按讚數與留言數以子查詢即時統計，因為後台也能編輯留言、更新後需立刻看到正確數字。
+	// deleted_at IS NULL：這個頁面是「這個人現在有哪些內容」，而軟刪除的貼文
+	// 在站上已經不存在（與使用者自己看到的 /my-posts 同一個口徑）。
 	postRows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, author_email, content, created_at, image_url,
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = forum_posts.id),
 		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id)
-		FROM forum_posts WHERE author_email = ? ORDER BY created_at DESC, id DESC`, email)
+		FROM forum_posts WHERE author_email = ? AND deleted_at IS NULL
+		ORDER BY created_at DESC, id DESC`, email)
 	if err != nil {
 		internalError(w, "unable to load user posts")
 		return
@@ -1077,8 +1082,10 @@ func (s *Server) createAdminUserComment(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	// 檢查目標文章存在性：COUNT 為 0 代表文章已被刪除，回 404 而非讓 INSERT 留下孤兒資料。
+	// deleted_at IS NULL 讓「軟刪除」也算已刪除：在那篇貼文下面留言只會產生
+	// 一筆沒有人能看到的留言（公開頁與管理頁都看不到那篇貼文）。
 	var postCount int
-	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ?`, req.PostID).Scan(&postCount); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, req.PostID).Scan(&postCount); err != nil {
 		internalError(w, "unable to load forum post")
 		return
 	}

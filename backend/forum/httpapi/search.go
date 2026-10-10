@@ -216,13 +216,9 @@ func (s *Server) handleAdminForumSearch(w http.ResponseWriter, r *http.Request) 
 // 降級只在錯誤時發生，理由見檔頭說明。
 func (s *Server) searchForumPostIDs(ctx context.Context, query string, offset, limit int, includeAuthor bool) ([]int64, int, string, error) {
 	if s.esEnabled() {
-		result, err := s.es.Search(ctx, query, offset, limit, includeAuthor)
+		ids, total, err := s.searchForumPostIDsElasticsearch(ctx, query, offset, limit, includeAuthor)
 		if err == nil {
-			ids := make([]int64, 0, len(result.Hits))
-			for _, hit := range result.Hits {
-				ids = append(ids, hit.ID)
-			}
-			return ids, result.Total, engineElasticsearch, nil
+			return ids, total, engineElasticsearch, nil
 		}
 		// ErrDisabled 只會在「設定了位址卻又變成未啟用」時出現，屬於程式錯誤；
 		// 因此照樣記錄，不假裝它是預期情況。
@@ -239,6 +235,118 @@ func (s *Server) searchForumPostIDs(ctx context.Context, query string, offset, l
 	return ids, total, engineMySQL, nil
 }
 
+// searchBackfillRounds 是「這一頁有幽靈文件時向 ES 多要幾輪」的上限。
+//
+// 補齊是為了讓翻頁永遠是滿的：一頁 10 筆裡混進 1 篇已刪除的貼文，若不補就是
+// 「第 3 頁只有 9 張卡」，而最後一頁全混到幽靈時更是一整頁空白。設上限而不是
+// 無上限迴圈，是因為 ES 端持續壞下去時（例如索引從未清理、每次都比到一堆幽靈），
+// 與其把請求拖成無限迴圈，不如退回「這一頁短一點」—— 那至少還有東西可看。
+const searchBackfillRounds = 3
+
+// searchForumPostIDsElasticsearch 走 ES 取得貼文 ID，並以 MySQL 的可見性校正結果。
+//
+// 為什麼需要校正：ES 的文件在貼文刪除時由 unindexForumPost 移除，而那是一個
+// best-effort 操作 —— ES 剛好短暫不可用時，刪除會成功而索引留下**幽靈文件**。
+// 幽靈文件造成兩個症狀，兩者都不會報錯：
+//
+//   - 它出現在 ids 裡，於是組裝階段（loadForumPostsByIDs / loadAdminForumPostsByIDs）
+//     必須再濾一次。那兩道過濾仍然保留，是第二道防線。
+//   - 它被算進 total，於是回應宣稱「找到 10 筆」而畫面上只有 9 張卡；幽靈落在
+//     最後一頁時更糟 —— 那一頁會整個是空的。
+//
+// 因此這裡在回傳之前用一次主鍵 IN 查問把幽靈挑掉，並把 total 往下修正被挑掉的
+// 筆數；挑掉之後這一頁短了就向 ES 多要幾筆補齊（輪數上限見 searchBackfillRounds）。
+//
+// 這個修正只涵蓋「已經載入到這一頁」的幽靈：坐在更後面、從未被要出來的幽靈仍會
+// 讓 total 多算幾筆。要根除得讓 ES 與 MySQL 定期對帳 —— 而啟動時的全量重建
+// （RebuildSearchIndex）做不到這件事，它只補索引、不刪多出來的文件。在對帳機制
+// 出現之前，這裡保證的是「回應與畫面一致」，不是「total 永遠精確」。
+func (s *Server) searchForumPostIDsElasticsearch(ctx context.Context, query string, offset, limit int, includeAuthor bool) ([]int64, int, error) {
+	ids := make([]int64, 0, limit)
+	total := 0
+	dropped := 0
+	// needed 是這一輪還缺幾筆；fetchOffset 是下一輪要從 ES 的第幾筆開始要。
+	needed := limit
+	fetchOffset := offset
+	for round := 0; round < searchBackfillRounds && needed > 0; round++ {
+		result, err := s.es.Search(ctx, query, fetchOffset, needed, includeAuthor)
+		if err != nil {
+			return nil, 0, err
+		}
+		total = result.Total
+		page := make([]int64, 0, len(result.Hits))
+		for _, hit := range result.Hits {
+			page = append(page, hit.ID)
+		}
+		if len(page) == 0 {
+			break
+		}
+		visible, err := s.visibleForumPostIDs(ctx, page)
+		if err != nil {
+			return nil, 0, err
+		}
+		kept := 0
+		for _, id := range page {
+			if visible[id] {
+				// 依 ES 的順序追加：搜尋結果的排序是相關性分數，重新排序會讓
+				// 「搜 A 卻看到 B 排在第一」而無法解釋。
+				ids = append(ids, id)
+				kept++
+			} else {
+				dropped++
+			}
+		}
+		if kept == len(page) {
+			// 這一頁全都是活著的貼文，沒有需要補齊的缺口。
+			break
+		}
+		needed -= kept
+		fetchOffset += len(page)
+	}
+	// total 減掉看得到的幽靈：寧可少報也不要讓回應宣稱比畫面上更多的結果。
+	// 理論上 dropped 不會超過 total（它本來就被算在 total 裡），夾住只是為了
+	// 不讓一個異常回應變成負數。
+	if corrected := total - dropped; corrected >= 0 {
+		total = corrected
+	}
+	return ids, total, nil
+}
+
+// visibleForumPostIDs 回傳「這些 id 當中哪些還活著（存在且未被軟刪除）」的集合。
+//
+// 用一次 IN 查詢而不是逐筆確認：這一頁最多 pageSizeMax 筆，一次往返就夠；
+// 逐筆會把搜尋端點的 DB 成本變成 O(頁面大小)。
+func (s *Server) visibleForumPostIDs(ctx context.Context, ids []int64) (map[int64]bool, error) {
+	visible := make(map[int64]bool, len(ids))
+	if len(ids) == 0 {
+		return visible, nil
+	}
+	placeholders := make([]string, 0, len(ids))
+	args := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM forum_posts WHERE deleted_at IS NULL AND id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		visible[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return visible, nil
+}
+
 // searchForumPostIDsMySQL 是 ES 不可用時的降級搜尋：以 content LIKE ? 找出
 // 符合的貼文，依建立時間新到舊排序。
 //
@@ -249,6 +357,11 @@ func (s *Server) searchForumPostIDs(ctx context.Context, query string, offset, l
 //
 // LIKE 的樣式必須自行跳脫 % 與 _，否則使用者搜尋「100%」會變成
 // 「開頭是 100 的任何字串」，而 _ 會單獨撈出大量無關結果。
+//
+// 軟刪除的貼文不參與搜尋：這條降級路徑的結果與 ES 路徑必須一致，而 ES 那邊
+// 的索引在刪除時就被 unindexForumPost 移除了（見 handleForumPostDelete 的說明）。
+// 一條被軟刪的貼文在這裡還找得到，症狀是「關掉 ES 之後搜尋結果多出幾篇點不
+// 進去的文章」。
 func (s *Server) searchForumPostIDsMySQL(ctx context.Context, query string, offset, limit int, includeAuthor bool) ([]int64, int, error) {
 	pattern := "%" + escapeLikePattern(query) + "%"
 	// 條件字串以 if/else 白名單組出，值一律走佔位符（與 forum_admin_handlers.go
@@ -262,12 +375,17 @@ func (s *Server) searchForumPostIDsMySQL(ctx context.Context, query string, offs
 		condition = `(content LIKE ? OR author_email = ?)`
 		args = append(args, query)
 	}
+	// 軟刪除過濾直接寫在兩句 SQL 裡，而不是另外用一個 where 變數串接：兩句
+	// 各自都看得見「先濾掉刪除的」這件事，而讀程式碼的人不必為了確認它去追
+	// 一個變數的值（這個不變條件由 post_soft_delete_test.go 掃原始碼把守）。
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM forum_posts WHERE `+condition, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM forum_posts WHERE deleted_at IS NULL AND `+condition, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM forum_posts WHERE `+condition+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+		`SELECT id FROM forum_posts WHERE deleted_at IS NULL AND `+condition+
+			` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
 		append(append([]interface{}{}, args...), limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -305,6 +423,10 @@ func escapeLikePattern(value string) string {
 // 這個共用常數 —— 那才是「三種來源必須回同一種欄位」這條不變條件所在的位置。
 // 真正需要共用的部分（去識別化、標籤、圖片 token）本來就已經是共用函式，
 // 結果形狀因此必然一致。
+//
+// 可見性條件也共用：forumPostVisible 讓「搜尋引擎覺得該回、但貼文已經被刪掉」
+// 的 ID 在組裝階段就被丟掉。少了它，症狀是搜尋結果的筆數比實際渲染出來的卡片
+// 多（前端收到一份對不上數字的清單），而那不會有任何錯誤。
 func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost, error) {
 	placeholders := make([]string, 0, len(ids))
 	args := make([]interface{}, 0, len(ids)+1)
@@ -318,7 +440,7 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT `+forumPostProjection+`
 		`+forumPostFrom+`
-		WHERE fp.id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+		WHERE `+forumPostVisible+` AND fp.id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -391,6 +513,9 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 
 // loadAdminForumPostsByIDs 依指定的 ID 順序組出後臺的貼文物件（含真實 email
 // 與完整留言），語意與 loadForumPostsByIDs 對稱。
+//
+// 軟刪除的貼文同樣不回來：後臺的搜尋是管理工具，不是回收桶。把刪除的貼文
+// 混在搜尋結果裡只會讓「這篇還在」與「這篇已經沒了」在列表上無法分辨。
 func (s *Server) loadAdminForumPostsByIDs(ctx context.Context, ids []int64) ([]adminForumPost, error) {
 	placeholders := make([]string, 0, len(ids))
 	args := make([]interface{}, 0, len(ids))
@@ -403,7 +528,7 @@ func (s *Server) loadAdminForumPostsByIDs(ctx context.Context, ids []int64) ([]a
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = forum_posts.id),
 		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id),
 		       pinned
-		FROM forum_posts WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+		FROM forum_posts WHERE deleted_at IS NULL AND id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -505,6 +630,10 @@ func (s *Server) indexForumPost(ctx context.Context, id int64, content, authorEm
 // 貼文已不存在（sql.ErrNoRows）時改為呼叫 unindexForumPost：刪除路徑已經會呼叫
 // unindexForumPost，這裡再補一次刪除語意是合理的冪等行為，而它失敗也要回報 ——
 // 否則呼叫端會以為「重新索引」成功了，實際上索引裡還留著幽靈貼文。
+//
+// 軟刪除的貼文走同一條路：查不到列（deleted_at IS NULL 把它濾掉了）就移除索引。
+// 反過來的做法（照著已刪除的內容重建索引）會把使用者已經刪掉的文字重新放回
+// 公開搜尋，而那正是軟刪除要避免的事。
 func (s *Server) reindexForumPostByID(ctx context.Context, id int64) error {
 	if !s.esEnabled() {
 		return nil
@@ -514,7 +643,7 @@ func (s *Server) reindexForumPostByID(ctx context.Context, id int64) error {
 	// err 逐項區分是為了讓「查不到」與「查詢失敗」走不同處置：
 	// 前者是正常的競態（貼文剛好被另一個請求刪掉），後者要留下日誌。
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, author_email, content, created_at FROM forum_posts WHERE id = ?`, id).
+		`SELECT id, author_email, content, created_at FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, id).
 		Scan(&doc.ID, &authorEmail, &doc.Content, &doc.CreatedAt)
 	if err == sql.ErrNoRows {
 		return s.unindexForumPost(ctx, id)
@@ -540,6 +669,10 @@ func (s *Server) unindexForumPost(ctx context.Context, id int64) error {
 	if !s.esEnabled() {
 		return nil
 	}
+	// 刻意不加重試：ES 的請求逾時是 3 秒，而在刪除的使用者請求裡重試會把最壞
+	// 情況的延遲變成數秒級 —— 那是拿所有刪除操作的體驗換一個「少數幾次能救回來」
+	// 的機會。幽靈文件的後果由 searchForumPostIDsElasticsearch 的可見性校正吸收
+	// （回應與畫面因此不會不一致），這裡只負責把立刻成功的那些清掉。
 	if err := s.es.DeletePost(ctx, id); err != nil {
 		logger.WarnfContext(ctx, "[SEARCH] 移除貼文索引失敗 post_id=%d: %v", id, err)
 		return err
@@ -565,12 +698,14 @@ func (s *Server) RebuildSearchIndex(ctx context.Context) (int, error) {
 	}
 	// 以 id 為分頁依據（而不是 created_at）：id 是主鍵，單調遞增且唯一，
 	// 分頁結果不會因為有同秒建立的貼文而漏筆或重複。
+	// deleted_at IS NULL 讓重建不會把已刪除的貼文寫回索引：重建的用途是補上
+	// 漏掉的同步，而被刪掉的貼文的正確狀態就是「不在索引裡」。
 	sent := 0
 	var lastID int64
 	for {
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT id, author_email, content, created_at
-			FROM forum_posts WHERE id > ? ORDER BY id ASC LIMIT ?`, lastID, rebuildBatchSize)
+			FROM forum_posts WHERE id > ? AND deleted_at IS NULL ORDER BY id ASC LIMIT ?`, lastID, rebuildBatchSize)
 		if err != nil {
 			return sent, err
 		}

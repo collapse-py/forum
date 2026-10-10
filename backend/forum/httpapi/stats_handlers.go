@@ -274,7 +274,7 @@ func (s *Server) loadStatsTotals(ctx context.Context, start time.Time) (statsTot
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM forum_users WHERE created_at >= ?),
-			(SELECT COUNT(*) FROM forum_posts WHERE created_at >= ?),
+			(SELECT COUNT(*) FROM forum_posts WHERE created_at >= ? AND deleted_at IS NULL),
 			(SELECT COUNT(*) FROM forum_post_comments WHERE created_at >= ?),
 			(SELECT COUNT(*) FROM forum_post_likes WHERE created_at >= ?)
 	`, start, start, start, start)
@@ -290,13 +290,16 @@ func (s *Server) loadStatsTotals(ctx context.Context, start time.Time) (statsTot
 // 回應」比「有多少人按了讚」更能代表文章的份量，而兩者的相關性不夠高到
 // 可以只挑一個當指標。相同分數時以 id 降冪（而非留言或讚數降冪）作為
 // 穩定的次要排序 —— 否則同分項目在兩次請求之間會跳動。
+//
+// deleted_at IS NULL：統計衡量的是「這個站現在看得見的內容」。把已刪除的
+// 貼文算進互動榜，會讓管理員去看一篇任何人都打不開的文章。
 func (s *Server) loadStatsTopPosts(ctx context.Context, start time.Time) ([]statsPost, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.id, p.author_email, p.created_at, LEFT(p.content, `+strconv.Itoa(statsExcerptRunes*4)+`),
 		       (SELECT COUNT(*) FROM forum_post_comments c WHERE c.post_id = p.id),
 		       (SELECT COUNT(*) FROM forum_post_likes l WHERE l.post_id = p.id)
 		FROM forum_posts p
-		WHERE p.created_at >= ?
+		WHERE p.created_at >= ? AND p.deleted_at IS NULL
 		ORDER BY 5 + 6 DESC, p.id DESC
 		LIMIT `+strconv.Itoa(statsTopLimit), start)
 	if err != nil {
@@ -371,12 +374,15 @@ func (s *Server) loadStatsTopAuthors(ctx context.Context, start time.Time) ([]st
 	// 變成「視窗內的留言總量」。當留言總量遠大於前 10 名的留言量時，
 	// 新寫法讀的列更多。兩者都走索引、都不退化到全表掃描，因此判斷標準
 	// 是「排行榜的 10 個 id 對上全視窗聚合」這個數量級通常小得多。
+	//
+	// deleted_at IS NULL 與 loadStatsTopPosts 同一個理由：排行榜要能照著名單
+	// 去後臺找到那篇文章，而軟刪除的貼文在任何列表都已經不存在。
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.author_email, p.posts, COALESCE(c.comments, 0)
 		FROM (
 			SELECT author_email, COUNT(*) AS posts
 			FROM forum_posts
-			WHERE created_at >= ?
+			WHERE created_at >= ? AND deleted_at IS NULL
 			GROUP BY author_email
 			ORDER BY posts DESC, author_email ASC
 			LIMIT `+strconv.Itoa(statsTopLimit)+`

@@ -10,7 +10,7 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 
 資料表清單（schema 全貌）
 
-	forum_posts                  討論區文章主檔：id / author_email / content / image_url / created_at
+	forum_posts                  討論區文章主檔：id / author_email / content / image_url / created_at / updated_at / pinned / deleted_at
 	forum_post_likes             按讚表，以 (post_id, author_email) 複合主鍵表示「一人一文一讚」
 	forum_post_comments          文章留言：id / post_id / author_email / content / created_at
 	forum_reports                檢舉工單（可指向文章或留言），含處理狀態與覆核者
@@ -864,6 +864,46 @@ func MigrateMySQL(db *sql.DB) error {
 	//     失去回滾機會，並不划算。
 	if _, err := db.Exec(`
 		ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL;
+	`); err != nil {
+		return err
+	}
+
+	// 30) forum_posts.deleted_at：貼文刪除改成軟刪（soft delete）。
+	//
+	//     為什麼需要：刪除曾經是 DELETE FROM forum_posts —— 一刀下去，貼文、它
+	//     被檢舉的脈絡、以及「這篇曾經存在」的事實同時消失。改為軟刪之後：
+	//
+	//       a) 誤刪可以救回來。使用者按刪除的當下沒有第二次確認以外的緩衝，
+	//          而硬刪除讓那一下變成不可逆。
+	//       b) 管理側仍握有脈絡。檢舉工單（forum_reports）指向的貼文被硬刪後，
+	//          forum_admin_actions 的稽核紀錄雖然記了「刪文」，但內容只剩截斷
+	//          後的前 200 字；軟刪讓原文仍在表裡。
+	//       c) 外部的引用不會變成死線。留言、按讚、檢舉都還在，只是不再顯示。
+	//
+	//     NULL 的語意是「沒有被刪除」；有值則是刪除發生的時間。與 updated_at
+	//     （第 28 步）同一個約定：NULL 代表「從未發生」，既有資料因此一律是
+	//     「未刪除」，回填作業等於不存在。
+	//
+	//     刻意不用 TINYINT deleted 旗標：時間戳同時回答「有沒有被刪」與「什麼
+	//     時候被刪」，而後者是清理工作（見下）唯一需要排序的依據。旗標要再補
+	//     一個 deleted_at 才能做同一件事。
+	//
+	//     型別選 DATETIME 而非 TIMESTAMP：與第 28 步同一個理由 —— 本專案的
+	//     時間欄位一律由應用層寫入 time.Now()（主機本地時區），TIMESTAMP 會
+	//     做時區轉換，讓同一列裡的兩個欄位表示不同時區。
+	//
+	//     不加索引：唯一會用到它的查詢都是「已經拿著 id 找到那一列」（編輯、
+	//     按讚、留言的存在性檢查），走主鍵；而列表端的過濾是與排序欄位一起
+	//     出現的附加條件，不是篩選的主體（理由同第 28 步不加索引的判斷）。
+	//
+	//     資料不會自動消失：軟刪把「從資料庫抹除」的責任從 handler 移了出去，
+	//     因此需要一個清理機制才能真正回收空間。當前刻意沒有排程器 ——
+	//     貼文量在這個站點的規模下，保留數百筆已刪貼文的成本低於一個會
+	//     自動刪資料的排程所帶來的風險。需要時機成熟再加（見
+	//     docs/KNOWN_ISSUES.md）。
+	if _, err := db.Exec(`
+		ALTER TABLE forum_posts
+			ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL AFTER updated_at;
 	`); err != nil {
 		return err
 	}

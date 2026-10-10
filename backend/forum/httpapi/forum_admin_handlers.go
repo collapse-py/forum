@@ -13,7 +13,7 @@ HTTP 路由對照（註冊於 server.go 的 Handler()，皆未套用 requireLogi
 	GET    /api/admin/forum/posts          → handleAdminForumPosts  → listAdminForumPosts（?page=N，每頁 25 筆）
 	POST   /api/admin/forum/posts          → handleAdminForumPosts  → createAdminForumPost
 	PUT    /api/admin/forum/posts/{id}     → handleAdminForumPost（只改 content）
-	DELETE /api/admin/forum/posts/{id}     → handleAdminForumPost
+	DELETE /api/admin/forum/posts/{id}     → handleAdminForumPost（軟刪除）
 	GET    /api/admin/forum/comments       → handleAdminForumComments（?postId=N 必填）
 	POST   /api/admin/forum/comments       → handleAdminForumComments
 	PUT    /api/admin/forum/comments/{id}  → handleAdminForumComment（只改 content）
@@ -30,7 +30,7 @@ HTTP 路由對照（註冊於 server.go 的 Handler()，皆未套用 requireLogi
 	/api/admin/users/{email}/posts|comments）。
 
 資料表依賴（schema 定義於 forum/data/mysql.go 的 MigrateMySQL）
-	forum_posts		文章主表；本檔案會 UPDATE content 與 DELETE 整列
+	forum_posts		文章主表；本檔案會 UPDATE content 與軟刪除（deleted_at）
 	forum_post_comments	留言子表，post_id 邏輯上指向 forum_posts.id，但沒有宣告外鍵
 	forum_post_likes	按讚表（複合主鍵 post_id + author_email），本檔案只用於統計數量
 	forum_reports		檢舉表，含 status 狀態機、reviewed_at / reviewed_by 審核軌跡，
@@ -340,6 +340,14 @@ func (s *Server) handleAdminForumReports(w http.ResponseWriter, r *http.Request)
 	// 「通過（刪文）」剛刪掉目標），子查詢會回 NULL，而 database/sql 無法把 NULL
 	// 掃描進 string 欄位，沒有 COALESCE 時整筆查詢會以 500 結束 —— 一筆過期的檢舉
 	// 會讓管理介面看不到其餘所有檢舉。空字串代表「目標已不存在」，前端據此顯示提示。
+	//
+	// 貼文改成軟刪除（MigrateMySQL 第 30 步）之後，「被刪掉的貼文」不再讓子查詢
+	// 回 NULL —— 那一列還在，只是不在任何列表裡出現。COALESCE 仍然必要：留言
+	// 還是硬刪除，而更早之前的資料可能已經被人工清掉。
+	//
+	// 這裡刻意**不**過濾軟刪除的貼文（forum_posts.deleted_at）：檢舉工單要回答的
+	// 是「當時被檢舉的是什麼」，而那篇貼文現在也許已經被刪。把內容留給覆核者看
+	// 是這個佇列存在的理由；真的已經沒有那一列時，COALESCE 也已經給出答案。
 	query := `
 		SELECT id, target_type, target_id, reporter_email, reason, status, created_at, reviewed_at, reviewed_by,
 		       COALESCE(CASE WHEN target_type = 'post' THEN (SELECT author_email FROM forum_posts WHERE id = target_id)
@@ -926,15 +934,23 @@ ensureForumReportTarget 確認檢舉目標（文章或留言）真的存在。
 func (s *Server) ensureForumReportTarget(ctx context.Context, targetType string, targetID int64) error {
 	// 預設視為 post。呼叫端都會先跑過 validateAdminForumReport（擋掉 post/comment 以外的值），
 	// 所以這裡不需要再回傳錯誤，也讓本函式可以獨立於驗證流程安全運作。
+	//
+	// 條件與 table 分開寫，因為兩者都依目標類型而異：留言是一次 DELETE
+	// （forum_post_comments 沒有軟刪除），貼文卻必須是「還活著的」。對一篇已經被
+	// 軟刪除的貼文（MigrateMySQL 第 30 步）開出的檢舉，會產生一張指向沒有人打得開
+	// 的內容的工單 —— 它躺在 pending 佇列裡，而覆核者打開來看時只看到一篇本來就該
+	// 消失的貼文（與 handleForumReport 的同一個判斷）。
 	table := "forum_posts"
+	condition := "id = ? AND deleted_at IS NULL"
 	if targetType == "comment" {
 		table = "forum_post_comments"
+		condition = "id = ?"
 	}
 	var count int
 	// 用 COUNT(*) 而不是 SELECT ... ：兩張目標表的欄位並不完全一致（留言沒有 image_url），
 	// COUNT(*) 可以讓兩種目標共用同一段 SQL；而 id 是主鍵、比對成本等同一次索引查找，
 	// 因此多算一次 COUNT 的成本可以忽略。
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id = ?", targetID).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE "+condition, targetID).Scan(&count); err != nil {
 		return err
 	}
 	// 手動產生 sql.ErrNoRows：COUNT 查詢在沒有資料列時會回傳 0 而不是 ErrNoRows，
@@ -1017,8 +1033,10 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 
 	// 先算總數：pages 需要它。COUNT(*) 在 InnoDB 上需要掃描，但列表本身已是分頁的，
 	// 用一次額外計數換前端能畫出完整頁碼是划算的。
+	// deleted_at IS NULL：軟刪除的貼文不在後臺列表裡（它已經不在任何公開頁），
+	// 而 total 必須與列表同一批資料，否則頁碼會比實際內容多出一頁空的。
 	var total int
-	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE deleted_at IS NULL`).Scan(&total); err != nil {
 		internalError(w, "unable to count forum posts")
 		return
 	}
@@ -1026,14 +1044,15 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 	// COUNT（那樣會變成 3N 次往返）。兩張子表都有以 post_id 開頭的索引
 	// （idx_forum_post_likes_post_id、idx_forum_post_comments_post_id），
 	// 因此每個子查詢都是索引查找而非全表掃描。
-	// LIMIT / OFFSET 也使用佔位符：MySQL 允許 prepared statement 這麼做，
+	// LIMIT / OFFSET 也使用佔位符：MySQL 允許 prepared statement 這麼用，
 	// 不必把數字字串拼接進 SQL（拼接數字雖無注入風險，仍會失去使用 prepared statement 的能力）。
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, author_email, content, created_at, image_url,
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = forum_posts.id),
 		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id),
 		       pinned
-		FROM forum_posts ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+		FROM forum_posts WHERE deleted_at IS NULL
+		ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, pageSize, offset)
 	if err != nil {
 		internalError(w, "unable to load forum posts")
 		return
@@ -1224,19 +1243,21 @@ func (s *Server) createAdminForumPost(w http.ResponseWriter, r *http.Request) {
 handleAdminForumPost 處理 /api/admin/forum/posts/{id} 的單篇文章操作。
 
 	PUT	只更新 content；作者、建立時間、附圖都不動
-	DELETE	刪除整篇文章
+	DELETE	軟刪除整篇文章（UPDATE deleted_at，資料保留）
 	其他	methodNotAllowed 回 405
 
 刪除的順序與外鍵的關係
 
 	forum_post_comments 與 forum_post_likes 在 MigrateMySQL 中只建立了 INDEX，
 	並沒有宣告 FOREIGN KEY 指向 forum_posts。因此刪除文章不需要先刪子表，
-	也不會因外鍵約束失敗——這裡的單句 DELETE 就是完整流程，不需要交易。
+	也不會因外鍵約束失敗。
 
-	代價是會留下孤兒留言與孤兒按讚。它們不會出現在任何查詢結果中
-	（列表都以 forum_posts 為主表，留言以 post_id = 存在的主鍵為條件），
-	等同軟刪除。若日後改成宣告 ON DELETE CASCADE，這裡「先刪父表」就會失敗，
-	必須改成在同一個交易裡先刪留言與按讚再刪文章。
+	軟刪除之後這條更沒有爭議：文章那一列還在，子表根本沒有孤兒可言 —— 留言
+	與按讚會跟著母文章一起「不存在」，而在救回機制出現之前它們也一起保持
+	不可見。若日後改成真的 DELETE（硬刪除），留言與按讚就會變成孤兒資料：
+	它們不會出現在任何查詢結果中（列表都以 forum_posts 為主表），等同另一種
+	軟刪除；真要宣告 ON DELETE CASCADE，則必須改成在同一個交易裡先刪留言與
+	按讚再刪文章。
 */
 func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminForum(w, r) {
@@ -1291,7 +1312,7 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 
 		var beforeContent string
 		if err := tx.QueryRowContext(r.Context(),
-			`SELECT content FROM forum_posts WHERE id = ?`, id).Scan(&beforeContent); err != nil {
+			`SELECT content FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, id).Scan(&beforeContent); err != nil {
 			if err == sql.ErrNoRows {
 				http.NotFound(w, r)
 				return
@@ -1300,7 +1321,7 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		result, err := tx.ExecContext(r.Context(), `UPDATE forum_posts SET content = ? WHERE id = ?`, req.Content, id)
+		result, err := tx.ExecContext(r.Context(), `UPDATE forum_posts SET content = ? WHERE id = ? AND deleted_at IS NULL`, req.Content, id)
 		if err != nil {
 			internalError(w, "unable to update forum post")
 			return
@@ -1337,11 +1358,17 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		}
 		writeOK(w, map[string]bool{"ok": true})
 	case http.MethodDelete:
-		// 單一 DELETE 即完成：留言與按讚沒有外鍵約束，不需要先刪子表（理由見上方說明）。
+		// 單一 UPDATE 即完成：留言與按讚沒有外鍵約束，不需要先動子表（理由見上方說明）。
 		//
-		// 稽核：刪文是不可逆的，而它是這個後臺最常被使用的操作（檢舉的
-		// 「通過（刪文）」就走這條路）。把刪除前的內容與作者記下來，事後才能
-		// 回答「這篇文是誰寫的、寫了什麼、為什麼被刪」。
+		// 軟刪除而不是 DELETE FROM（與使用者的 handleForumPostDelete 同一個決定，
+		// 理由見 MigrateMySQL 第 30 步）：貼文從所有公開頁面消失，但原文、留言、
+		// 按讚與檢舉工單都還在，因此事後仍可對帳。真正的資料回收是另一個機制。
+		//
+		// 稽核：刪文在後台沒有復原路徑（軟刪除只保留了資料，沒有恢復入口），
+		// 而它是這個後臺最常被使用的操作（檢舉的「通過（刪文）」就走這條路）。
+		// 把刪除前的內容與作者記下來，事後才能回答「這篇文是誰寫的、寫了什麼、
+		// 為什麼被刪」。軟刪除讓這份稽核多一個好處：changes 引用的原文仍然查
+		// 得到，不必只靠稽核裡截斷後的 200 字。
 		tx, err := s.beginAdminTx(r)
 		if err != nil {
 			internalError(w, "unable to delete forum post")
@@ -1351,7 +1378,7 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 
 		var beforeAuthor, beforeContent string
 		if err := tx.QueryRowContext(r.Context(),
-			`SELECT author_email, content FROM forum_posts WHERE id = ?`, id).Scan(&beforeAuthor, &beforeContent); err != nil {
+			`SELECT author_email, content FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, id).Scan(&beforeAuthor, &beforeContent); err != nil {
 			if err == sql.ErrNoRows {
 				// 沒有比對到資料列即視為不存在 → 404。
 				http.NotFound(w, r)
@@ -1361,7 +1388,8 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		result, err := tx.ExecContext(r.Context(), `DELETE FROM forum_posts WHERE id = ?`, id)
+		result, err := tx.ExecContext(r.Context(),
+			`UPDATE forum_posts SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now(), id)
 		if err != nil {
 			internalError(w, "unable to delete forum post")
 			return
@@ -1382,7 +1410,8 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 一定要同步移除索引文件。檢舉的「通過（刪文）」走的正是這條路徑，
-		// 留下殘留文件的話，搜尋結果會出現點進去是 404 的幽靈貼文。
+		// 留下殘留文件的話，搜尋結果會出現點進去是 404 的幽靈貼文。軟刪除也
+		// 不改變這件事：公開頁看不到它，索引就沒有理由留著。
 		//
 		// 失敗時補記稽核是這一條路徑特別重要的地方：稽核紀錄剛剛才完整地記下
 		// 「文章已刪除」，若索引沒清掉而沒有任何紀錄，兩邊就再也對不起來了
@@ -1425,12 +1454,21 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 			badRequest(w, "invalid post id")
 			return
 		}
-		// 母文章不存在時回空清單而非 404：文章被刪除後後台仍可能請求它的留言，
-		// 此時「沒有留言」與「文章不存在」對前端畫面而言結果相同，不必額外區分。
+		// 母文章不存在時回空清單而非 404：對前端畫面而言「沒有留言」與「文章不存在」
+		// 結果相同，不必額外區分。
+		//
+		// 已軟刪除的貼文也要濾掉（EXISTS ... deleted_at IS NULL，見 MigrateMySQL
+		// 第 30 步）：後臺的文章列表與搜尋都排除已刪除的貼文，只有這支端點還能照
+		// postId 把它底下的留言撿回來 —— 那等於給「刪除」留了一個管理側的入口，
+		// 而它存在的理由只是硬刪除時代的遺留（那時「文章被刪掉」確實等同「文章
+		// 不存在」，現在這兩件事已經不同了）。
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT id, post_id, author_email, content, created_at
-			FROM forum_post_comments WHERE post_id = ?
-			ORDER BY created_at ASC, id ASC`, postID)
+			SELECT c.id, c.post_id, c.author_email, c.content, c.created_at
+			FROM forum_post_comments c
+			WHERE c.post_id = ?
+			  AND EXISTS (SELECT 1 FROM forum_posts p
+			              WHERE p.id = c.post_id AND p.deleted_at IS NULL)
+			ORDER BY c.created_at ASC, c.id ASC`, postID)
 		if err != nil {
 			internalError(w, "unable to load forum comments")
 			return
@@ -1473,10 +1511,12 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 		}
 		// 目標文章必須存在：forum_post_comments.post_id 沒有外鍵，
 		// 這道 COUNT 檢查是防止產生孤兒留言的唯一一道，也是不能直接 INSERT 的原因。
+		// deleted_at IS NULL 把「已軟刪除的貼文」視同不存在：在它下面留言只會
+		// 產生一筆沒有人看得見的留言（連管理後台都看不到那篇貼文）。
 		// 檢查與寫入之間沒有交易：兩者之間若有人刪掉文章，會留下一筆孤兒留言；
 		// 以管理後台的低併發來看，這個縫隙可接受（孤兒留言不會出現在任何查詢結果中）。
 		var postCount int
-		if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ?`, req.PostID).Scan(&postCount); err != nil {
+		if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, req.PostID).Scan(&postCount); err != nil {
 			internalError(w, "unable to load forum post")
 			return
 		}

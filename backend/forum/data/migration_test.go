@@ -328,7 +328,7 @@ func TestMigrateMySQLOnExistingDatabaseWithData(t *testing.T) {
 	// INSERT 一列（那會讓「欄位存在」與「欄位可用」混在一起，
 	// 而後者還會牽涉預設值的語意）。
 	for table, columns := range map[string][]string{
-		"forum_posts":    {"image_url", "updated_at"},
+		"forum_posts":    {"image_url", "updated_at", "deleted_at"},
 		"forum_profiles": {"bio", "public_key", "avatar_url"},
 	} {
 		for _, column := range columns {

@@ -238,7 +238,7 @@ func (s *Server) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) 
 		FROM forum_users u
 		LEFT JOIN (
 			SELECT author_email, COUNT(*) AS posts
-			FROM forum_posts GROUP BY author_email
+			FROM forum_posts WHERE deleted_at IS NULL GROUP BY author_email
 		) pc ON pc.author_email = u.email
 		LEFT JOIN (
 			SELECT author_email, COUNT(*) AS comments
@@ -295,11 +295,14 @@ func (s *Server) handleAdminExportPosts(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// deleted_at IS NULL：匯出是「這個站目前有什麼」的對帳用途，軟刪除的貼文
+	// 不該出現在檔案裡 —— 否則匯出去的數字會比後臺列表與公開頁都多。
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT p.id, p.author_email, LEFT(p.content, `+strconv.Itoa(csvExcerptRunes*4)+`), p.created_at,
 		       (SELECT COUNT(*) FROM forum_post_comments c WHERE c.post_id = p.id),
 		       (SELECT COUNT(*) FROM forum_post_likes l WHERE l.post_id = p.id)
 		FROM forum_posts p
+		WHERE p.deleted_at IS NULL
 		ORDER BY p.id DESC
 		LIMIT `+strconv.Itoa(csvExportMaxRows))
 	if err != nil {

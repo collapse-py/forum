@@ -526,8 +526,11 @@ func (s *Server) handleAdminPostPin(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	// deleted_at IS NULL：置頂一篇已刪除的貼文沒有意義 —— 它不會出現在任何
+	// 公開頁，而稽核會記下一筆「置頂了某篇貼文」卻看不到效果的操作。與
+	// SELECT 保持同一個條件，兩邊才不會出現「讀得到、改不到」的落差。
 	var before int
-	if err := tx.QueryRowContext(r.Context(), `SELECT pinned FROM forum_posts WHERE id = ?`, id).Scan(&before); err != nil {
+	if err := tx.QueryRowContext(r.Context(), `SELECT pinned FROM forum_posts WHERE id = ? AND deleted_at IS NULL`, id).Scan(&before); err != nil {
 		if err == sql.ErrNoRows {
 			http.NotFound(w, r)
 			return
@@ -543,7 +546,7 @@ func (s *Server) handleAdminPostPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := tx.ExecContext(r.Context(), `UPDATE forum_posts SET pinned = ? WHERE id = ?`, boolToInt(req.Pinned), id)
+	result, err := tx.ExecContext(r.Context(), `UPDATE forum_posts SET pinned = ? WHERE id = ? AND deleted_at IS NULL`, boolToInt(req.Pinned), id)
 	if err != nil {
 		internalError(w, "unable to update post")
 		return

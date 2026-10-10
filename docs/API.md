@@ -30,7 +30,7 @@
 | POST | `/api/forum/posts` | 建立貼文 |
 | GET | `/api/forum/posts/{id}` | 單篇貼文（永久連結頁；匿名可讀，找不到回 404） |
 | PUT | `/api/forum/posts/{id}` | 編輯自己的貼文本文（**只有 `content`**，見 [已知問題](KNOWN_ISSUES.md)） |
-| DELETE | `/api/forum/posts/{id}` | 刪除自己的貼文 |
+| DELETE | `/api/forum/posts/{id}` | 軟刪除自己的貼文（`deleted_at` 寫入時間，資料保留） |
 | GET | `/api/forum/posts/{id}/comments` | 留言列表（公開） |
 | POST | `/api/forum/posts/{id}/comments` | 建立留言 |
 | PUT / DELETE | `/api/forum/posts/{id}/comments/{cid}` | 編輯／刪除自己的留言 |
@@ -73,7 +73,7 @@
 | Method | Path |
 | --- | --- |
 | GET / POST | `/api/admin/forum/posts` |
-| GET / PUT / DELETE | `/api/admin/forum/posts/{id}` |
+| GET / PUT / DELETE | `/api/admin/forum/posts/{id}` （DELETE 為軟刪除） |
 | POST | `/api/admin/forum/posts/{id}/pin` （body `{"pinned":true\|false}`） |
 | GET / POST | `/api/admin/forum/comments` |
 | GET / PUT / DELETE | `/api/admin/forum/comments/{id}` |
@@ -100,3 +100,19 @@
 | GET | `/api/forum/announcement` （公開；沒有生效中的公告時回 `announcement: null`） |
 | GET / POST | `/api/admin/announcements` |
 | PATCH | `/api/admin/announcements/{id}` （body `{"body":…,"active":…,"hoursUntilExpiry":…}`） |
+
+---
+
+## 貼文的軟刪除（soft delete）
+
+貼文刪除（使用者的 `DELETE /api/forum/posts/{id}` 與後臺的 `DELETE /api/admin/forum/posts/{id}`）不會把資料列從 `forum_posts` 移除，而是把 `deleted_at` 寫上當下時間。
+
+| 問題 | 答案 |
+| --- | --- |
+| 刪掉之後還看得到嗎？ | 看不到。所有讀取路徑（動態、追蹤動態、個人頁、永久連結、**留言列表**、搜尋、後臺列表、統計、CSV 匯出）都帶 `deleted_at IS NULL`。 |
+| 重複刪除同一篇？ | 回 404（與「這篇不存在」同一種回應，不區分以避免探測作者權限）。 |
+| 留言、按讚、檢舉呢？ | 資料都還在表裡，但**讀不到也不能再互動**：`GET /comments` 回 404，編輯／刪除自己的留言、按讚、留言、檢舉、置頂同樣一律 404。 |
+| 對一篇已刪除的貼文還能做什麼？ | 什麼都不能。它對外等同不存在，因此所有子資源端點都以母文章的可見性把關，而不是只看子資源自己還在不在。 |
+| 搜尋引擎呢？ | 刪除時移除 ES 文件（`unindexForumPost`）；全量重建也跳過已刪除的貼文。若移除失敗而留下幽靈文件，搜尋端會再用 MySQL 的可見性把它從結果與筆數中挑掉（必要時向後補齊該頁），因此回應宣稱的筆數不會多於畫面上看得到的。 |
+| 可以救回來嗎？ | 目前沒有恢復入口（API 或介面都沒有）。要救回只能對 `forum_posts` 下 `UPDATE ... SET deleted_at = NULL`，見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)。 |
+| 資料什麼時候真正消失？ | 目前不會。軟刪除把「回收」從 handler 移出去，需要另外設計清理機制（見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。 |
