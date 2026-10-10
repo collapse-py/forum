@@ -105,8 +105,8 @@ type Server struct {
 // 是等管理員恰好打開監控頁（見 logTrustedProxyMode）。它沒有啟動 goroutine，
 // 因此與上面的分工並不衝突。
 //
-// es.Client 刻意不當成參數：它只是 cfg.ESURL 與 cfg.ESIndex 兩個字串的
-// 組裝結果，沒有連線要在這裡建立（es.Client 內部是 http.Client，沒有
+// es.Client 刻意不當成參數：它只是 cfg 的 ES_URL、ES_INDEX 與三個驗證欄位
+// 的組裝結果，沒有連線要在這裡建立（es.Client 內部是 http.Client，沒有
 // dial），因此在這裡就地建構能讓「設定檔有沒有填 ES_URL」成為唯一的事實來源。
 // 填了就是啟用，沒填 s.es 保持 nil、搜尋退回 MySQL（見 search.go）。
 //
@@ -146,7 +146,11 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 		}
 	}
 	if cfg.ESURL != "" {
-		srv.es = es.New(cfg.ESURL, cfg.ESIndex)
+		srv.es = es.New(cfg.ESURL, cfg.ESIndex, es.Auth{
+			Username: cfg.ESUsername,
+			Password: cfg.ESPassword,
+			APIKey:   cfg.ESAPIKey,
+		})
 	}
 	srv.logTrustedProxyMode()
 	return srv

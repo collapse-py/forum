@@ -141,8 +141,10 @@ XSS），但驗證是完整的。
    `-@dangerous` 擋掉 `KEYS` / `FLUSHALL` / `CONFIG` 這類會被用來一步取得全部 token 的指令。
 3. **密碼獨立且夠長。** 不要與 MySQL root 共用 —— 共用密碼代表任一處洩漏等於兩處淪陷，
    而且兩處的 log 與設定檔會互相佐證。
-4. **不要把 `REDIS_PASSWORD` 與 `GOOGLE_CLIENT_SECRET` 放在同一個檔案裡。** 目前六種
-   憑證都在 `config.conf`，任何一次檔案外洩就是全部。
+4. **不要把 `REDIS_PASSWORD` 與 `GOOGLE_CLIENT_SECRET` 放在同一個檔案裡。** 目前七種
+   憑證都在 `config.conf`（含 ES 的帳密與 API key），任何一次檔案外洩就是全部。
+   若要分開，可讀的是「把 ES 指到同一份設定檔之外的部署端」而不是抽環境變數 ——
+   見 [CONFIGURATION](CONFIGURATION.md) 的 ES 驗證段。
 5. **設定 `TRUSTED_PROXY_CIDRS`**（見下），並確認 `X-Forwarded-For` 在最外層就被剝掉。
 6. **網路層加一條**：即使 Redis 只在內網，也值得確認後端**沒有**把 `192.168.x.x` 這類
    私有位址暴露成可從外部連線的服務（例如誤設的 port forward）。
@@ -371,6 +373,8 @@ GET /api/forum/public-posts?user=<SHA-256(email)>
 - [ ] `TRUSTED_PROXY_CIDRS` 已填成**真正在前面那道代理**的位址段
 - [ ] 最外層的代理有**剝掉**外部送來的 `X-Forwarded-For`，而不是照單全收後追加
 - [ ] Elasticsearch 若未啟用，`ES_URL` 是留空的
+- [ ] Elasticsearch 若啟用了安全性，`ES_USERNAME`/`ES_PASSWORD` 或 `ES_API_KEY`
+      有填（兩者皆空時每個 ES 請求都是 401，而搜尋會安靜退回 MySQL）
 
 **設定一致性**
 

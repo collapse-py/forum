@@ -198,6 +198,25 @@ ES_URL=
 # （下次啟動時會以新 mapping 全量重建）
 ES_INDEX=forum_posts
 
+# 以下三項是 ES 的驗證資訊，全部留空＝以無驗證方式連線（ES 未啟用安全性時
+# 的正確設定）。ES 若啟了 xpack.security，沒有憑證的每個請求都會拿到 401，
+# 而搜尋會**安靜地**退回 MySQL LIKE —— 網站看起來正常，只是搜尋品質變差。
+#
+# 兩種驗證只能選一種主線：兩個都填時以 ES_API_KEY 為準（它可以只授權這個
+# 索引的讀寫，而基本帳號通常是權限更大的內建帳號）。
+# 三者都留空時不會送出任何 Authorization 標頭。
+#
+# Basic Auth：ES 的 native realm。
+ES_USERNAME=
+ES_PASSWORD=
+# API key：有兩種寫法，兩種都可以直接貼 —— 有沒有冒號就是分辨依據。
+#   a) 未編碼的兩截原值（_security/api_key 回傳的 id 與 api_key 以冒號相接），
+#      程式會自行 base64：
+# ES_API_KEY=4uGxL2sB:dGhlLWtleS1ib2R5
+#   b) 已編碼（console 與 curl 範例給的那串）：
+# ES_API_KEY=NHVHeEwyc0I6ZEdobExXdGxlUzFpYjJSNQ==
+ES_API_KEY=
+
 # ------------------------------------------------------------
 #  Google OAuth 2.0（authorization code flow）
 # ------------------------------------------------------------

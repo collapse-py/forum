@@ -41,6 +41,8 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `REDIS_ADDR` / `REDIS_PASSWORD` / `REDIS_DB` | `127.0.0.1:6379` / 空 / `0` | |
 | `ES_URL` | 空（停用） | 設定了就啟用 ES 搜尋 |
 | `ES_INDEX` | `forum_posts` | |
+| `ES_USERNAME` / `ES_PASSWORD` | 空 | ES 的 Basic Auth。留空＝不帶驗證標頭 |
+| `ES_API_KEY` | 空 | ES 的 API key。**與 `ES_USERNAME` 同時設定時以此為準** |
 | `FILES_SERVER_URL` | `http://localhost:7070` | 內部上傳目標 |
 | `FILES_SERVER_PUBLIC_URL` | 同上 | 對外可讀的位址；與上一項相同代表沒有內外網分離 |
 | `FILES_SERVER_TOKEN` | 讀環境變數 `FILES_SERVER_TOKEN` | **唯一支援環境變數的設定** |
@@ -63,6 +65,8 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 ### 幾個不看原始碼會猜錯的細節
 
 - `applyDefaults` 對「空值或非正數」補值，因此**無法用設定檔把某個視窗設成 0 秒**（那會讓限流失效）。布林值接受 `1` / `true` / `yes` / `on`（不分大小寫）。
+- **ES 的驗證只走設定檔**，不像 `FILES_SERVER_TOKEN` 有環境變數後備 —— 與 `DB_DSN`、`GOOGLE_CLIENT_SECRET` 一致。`ES_API_KEY` 可以貼「未編碼的 `id:api_key`」或「已編碼的 base64」兩種寫法（看有無冒號分辨），程式只挑一種送。
+- **ES 三項驗證全留空時不會送出任何 `Authorization` 標頭**。ES 若啟用了安全性，沒有憑證的每個請求都是 401，而搜尋會安靜退回 MySQL `LIKE`（網站看起來正常，只有搜尋品質變差），因此 `forum -check` 會印出這一列的狀態。
 - **刻意「設成 30 天」是允許的** —— 那代表部署者知道自己在做什麼，與「忘記設定」是不同的情況。
 - `MONITOR_RETENTION_HOURS` 決定「寫多少進資料庫」，**不決定監控頁時間軸的長度**（那是 `metrics.Options.WindowMinutes`，目前固定 120 分鐘）。混為一談的後果是設定 retention 的人以為圖會變長。
 - `ALLOWED_ADMIN_EMAIL` 刻意**不**做 Gmail 點號與 `+` 別名的正規化 —— 白名單的重點是「只有這些明確的信箱可以當管理員」，放寬比對只會讓它更容易被誤加。

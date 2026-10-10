@@ -16,6 +16,7 @@ es 套件的測試（backend/forum/es/es_test.go）。
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,11 +29,14 @@ import (
 
 // newTestClient 對著指定的 handler 建立 Client，並把逾時縮短到 2 秒：
 // 測試若因故打不到 handler，會在 2 秒內失敗而不是掛滿預設的 30 秒。
+//
+// 驗證資訊一律留空：需要驗證的測試另外用 newAuthedTestClient 表達意圖，
+// 而不在這個共用 helper 上堆參數。
 func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return New(server.URL, "forum_posts"), server
+	return New(server.URL, "forum_posts", Auth{}), server
 }
 
 // capturedRequest 記錄假 ES 收到的請求，供斷言使用。
@@ -50,7 +54,7 @@ func writeJSONBody(w http.ResponseWriter, status int, body string) {
 }
 
 func TestNewNormalizesBaseURLAndIndex(t *testing.T) {
-	client := New("http://es.example:9200/", "")
+	client := New("http://es.example:9200/", "", Auth{})
 	if client.baseURL != "http://es.example:9200" {
 		t.Fatalf("baseURL = %q, want trailing slash removed", client.baseURL)
 	}
@@ -61,19 +65,19 @@ func TestNewNormalizesBaseURLAndIndex(t *testing.T) {
 		t.Fatal("Enabled() = false for a configured client")
 	}
 	// 空白字串是「沒設定」，Enabled 必須為 false，讓呼叫端走 MySQL 降級。
-	if New("   ", "forum_posts").Enabled() {
+	if New("   ", "forum_posts", Auth{}).Enabled() {
 		t.Fatal("Enabled() = true for a blank baseURL")
 	}
 	// 索引名會被用在 URL 路徑上，因此必須去掉空白；名稱本身的驗證交給 ES。
-	if New("http://es:9200", "  custom  ").index != "custom" {
-		t.Fatalf("index = %q, want trimmed", New("http://es:9200", "  custom  ").index)
+	if New("http://es:9200", "  custom  ", Auth{}).index != "custom" {
+		t.Fatalf("index = %q, want trimmed", New("http://es:9200", "  custom  ", Auth{}).index)
 	}
 }
 
 // TestDisabledClientIsSafe 確認未設定 ES 時所有方法都不發請求、且回傳
 // ErrDisabled 讓呼叫端可以用 errors.Is 分流。
 func TestDisabledClientIsSafe(t *testing.T) {
-	client := New("", "forum_posts")
+	client := New("", "forum_posts", Auth{})
 	ctx := context.Background()
 
 	if client.Enabled() {
@@ -453,11 +457,242 @@ func TestParseHTTPErrorShapes(t *testing.T) {
 // TestRequestTimeoutIsBounded 確認逾時是有限值：ES 是輔助性相依，
 // 搜尋與索引都不該讓 HTTP 請求被它拖住。
 func TestRequestTimeoutIsBounded(t *testing.T) {
-	client := New("http://es.example:9200", "forum_posts")
+	client := New("http://es.example:9200", "forum_posts", Auth{})
 	if client.client.Timeout != requestTimeout {
 		t.Fatalf("timeout = %v, want %v", client.client.Timeout, requestTimeout)
 	}
 	if requestTimeout > 5*time.Second {
 		t.Fatalf("requestTimeout = %v, want a value that keeps requests well under proxy limits", requestTimeout)
 	}
+}
+
+/* ==========================================================================
+    驗證
+     ========================================================================== */
+
+// TestAuthKindPrecedence 釘住「兩種驗證都給了的時候用哪一種」。
+//
+// 這不是風格問題：若 Kind 與 Client 實際送出的標頭走不同條規則，啟動報告會
+// 宣稱送 basic 而 ES 收到 apikey（或相反），而那個不一致沒有任何症狀可查。
+// 因此這裡同時斷言 Kind 與 HeaderValue。
+func TestAuthKindPrecedence(t *testing.T) {
+	cases := []struct {
+		name string
+		auth Auth
+		kind string
+	}{
+		{"完全沒給", Auth{}, AuthKindNone},
+		{"只有空白視為沒給", Auth{Username: "   ", APIKey: "\t"}, AuthKindNone},
+		{"只有帳密", Auth{Username: "elastic", Password: "s3cret"}, AuthKindBasic},
+		{"只有 API key", Auth{APIKey: "aGFuZzprZXk="}, AuthKindAPIKey},
+		// API key 優先：它可以只授權單一索引，而內建帳號通常權限更大。
+		{"兩者都給時 API key 贏", Auth{Username: "elastic", Password: "s3cret", APIKey: "aGFuZzprZXk="}, AuthKindAPIKey},
+		{"有 key 沒有帳密也是 API key", Auth{APIKey: "  aGFuZzprZXk=  "}, AuthKindAPIKey},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.auth.Kind(); got != tc.kind {
+				t.Fatalf("Kind() = %q, want %q", got, tc.kind)
+			}
+			// Client 建構時就把種類與標頭算好，兩者必須來自同一次判定。
+			client := New("http://es:9200", "forum_posts", tc.auth)
+			if got := client.AuthKind(); got != tc.kind {
+				t.Fatalf("client.AuthKind() = %q, want %q", got, tc.kind)
+			}
+			// none 一律不送標頭；其他兩種一定要有值。
+			if tc.kind == AuthKindNone {
+				if header := tc.auth.HeaderValue(); header != "" {
+					t.Fatalf("HeaderValue() = %q, want empty", header)
+				}
+				if client.authHeader != "" {
+					t.Fatalf("client.authHeader = %q, want empty", client.authHeader)
+				}
+				return
+			}
+			if client.authHeader != tc.auth.HeaderValue() {
+				t.Fatalf("client.authHeader = %q, want %q", client.authHeader, tc.auth.HeaderValue())
+			}
+		})
+	}
+}
+
+// TestAuthHeaderValue 逐項確認兩種驗證的標頭值。
+//
+// Basic 的值是 RFC 7617 的 base64("user:password")，必須逐字元比對 ——
+// 少一個冒號或錯用 RawURLEncoding 都會讓 ES 回 401，而 ES 的 401 訊息
+// 不會告訴你是編碼錯了。
+func TestAuthHeaderValue(t *testing.T) {
+	t.Run("basic", func(t *testing.T) {
+		got := Auth{Username: "elastic", Password: "s3cret"}.HeaderValue()
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("elastic:s3cret"))
+		if got != want {
+			t.Fatalf("HeaderValue() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("密碼可以含冒號而不被截斷", func(t *testing.T) {
+		// SplitN 的相反錯誤：這裡用字串相加，因此密碼裡的冒號原樣保留。
+		got := Auth{Username: "elastic", Password: "a:b:c"}.HeaderValue()
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("elastic:a:b:c"))
+		if got != want {
+			t.Fatalf("HeaderValue() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("使用者名稱去掉頭尾空白", func(t *testing.T) {
+		// 空白使用者名稱幾乎一定是貼上時多帶的，而 ES 的 401 看不出這個原因。
+		got := Auth{Username: "  elastic\n", Password: "s3cret"}.HeaderValue()
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("elastic:s3cret"))
+		if got != want {
+			t.Fatalf("HeaderValue() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("密碼刻意不修剪", func(t *testing.T) {
+		// 密碼可以合法地含空白；擅自修剪會讓 401 的原因指向錯誤的方向。
+		got := Auth{Username: "elastic", Password: " s3cret "}.HeaderValue()
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("elastic: s3cret "))
+		if got != want {
+			t.Fatalf("HeaderValue() = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestAPIKeyCredentialAcceptsBothForms 確認兩種 API key 寫法都送到 ES 手上
+// 都是 base64("id:key")。
+//
+// 容納兩種的理由：ES 對「給了未編碼的值」與「key 過期」回的是同一句
+// security_exception，而部署者手上的值可能來自 console（已編碼）或
+// _security/api_key 的 JSON 回應（兩截式）。
+func TestAPIKeyCredentialAcceptsBothForms(t *testing.T) {
+	const id, key = "4uGxL2sB", "dGhlLWtleS1ib2R5"
+	encoded := base64.StdEncoding.EncodeToString([]byte(id + ":" + key))
+	decoded := id + ":" + key
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"已編碼的原樣送出", encoded, encoded},
+		{"未編碼的在此編碼", decoded, encoded},
+		{"編碼值前後的空白去掉", "  " + encoded + "\n", encoded},
+		{"兩截式帶空白也認得", " " + decoded + " ", encoded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := apiKeyCredential(tc.in); got != tc.want {
+				t.Fatalf("apiKeyCredential(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// 標頭值本身要帶 "ApiKey " 前綴 —— 那是 ES apikey realm 的 scheme 名稱，
+	// 與 HTTP 的 Authorization: Bearer 同名不同物。
+	header := Auth{APIKey: decoded}.HeaderValue()
+	if header != "ApiKey "+encoded {
+		t.Fatalf("HeaderValue() = %q, want %q", header, "ApiKey "+encoded)
+	}
+}
+
+// TestAuthorizationHeaderIsSentOnEveryRequest 確認標頭加在共用的 do 上，
+// 因此每一種端點（Ping、EnsureIndex、寫入、刪除、搜尋）都帶得到。
+//
+// 漏掉其中一個端點的症狀是「大部分功能正常，只有某一項一直 401」，
+// 而那比全部 401 更難查 —— 因此逐個端點斷言。
+func TestAuthorizationHeaderIsSentOnEveryRequest(t *testing.T) {
+	const wantAuth = "Basic ZWxhc3RpYzpzM2NyZXQ=" // elastic:s3cret
+	var gotAuth []string
+	client, _ := newAuthedTestClient(t, Auth{Username: "elastic", Password: "s3cret"}, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		switch {
+		case r.URL.Path == "/forum_posts/_search":
+			writeJSONBody(w, http.StatusOK, `{"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}`)
+		case r.Method == http.MethodDelete:
+			writeJSONBody(w, http.StatusOK, `{"result":"deleted"}`)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/_doc/"):
+			writeJSONBody(w, http.StatusCreated, `{"result":"created"}`)
+		default:
+			writeJSONBody(w, http.StatusOK, `{"version":{"number":"9.0.0"}}`)
+		}
+	})
+
+	ctx := context.Background()
+	if err := client.Ping(ctx); err != nil {
+		t.Fatalf("Ping error = %v", err)
+	}
+	if err := client.EnsureIndex(ctx); err != nil {
+		t.Fatalf("EnsureIndex error = %v", err)
+	}
+	if err := client.IndexPost(ctx, PostDocument{ID: 1, Content: "x"}); err != nil {
+		t.Fatalf("IndexPost error = %v", err)
+	}
+	if err := client.IndexPosts(ctx, []PostDocument{{ID: 2, Content: "y"}}); err != nil {
+		t.Fatalf("IndexPosts error = %v", err)
+	}
+	if err := client.DeletePost(ctx, 3); err != nil {
+		t.Fatalf("DeletePost error = %v", err)
+	}
+	if _, err := client.Search(ctx, "x", 0, 10, false); err != nil {
+		t.Fatalf("Search error = %v", err)
+	}
+
+	if len(gotAuth) != 6 {
+		t.Fatalf("captured %d requests, want 6（每一種端點都要發出一次）", len(gotAuth))
+	}
+	for i, auth := range gotAuth {
+		if auth != wantAuth {
+			t.Errorf("request %d Authorization = %q, want %q", i, auth, wantAuth)
+		}
+	}
+}
+
+// TestNoAuthorizationHeaderWithoutCredentials 是上面那支的另一半：沒有
+// 驗證資訊時**不能**憑空送出標頭。
+//
+// 送一個 "Basic " 前綴配空值，或送出 "ApiKey " 配空值，都會讓一個沒有
+// 啟用安全性的 ES 回 401 —— 那會把「升級 ES 開安全性之前」的部署整個弄壞。
+func TestNoAuthorizationHeaderWithoutCredentials(t *testing.T) {
+	var auth string
+	var called bool
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		auth = r.Header.Get("Authorization")
+		writeJSONBody(w, http.StatusOK, `{"version":{"number":"9.0.0"}}`)
+	})
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping error = %v", err)
+	}
+	if !called {
+		t.Fatal("handler was never called")
+	}
+	if auth != "" {
+		t.Fatalf("Authorization = %q, want no header at all", auth)
+	}
+}
+
+// TestUnauthorizedResponseSurfacesAsHTTPError 確認驗證失敗（401）是一個
+// 帶狀態碼的 HTTPError，而不是被降級或吞掉。
+//
+// 呼叫端需要它才能區分「ES 回了 401」（憑證問題，必須修設定）與
+// 「連不上 ES」（網路問題）。兩者都會讓搜尋退回 MySQL，但處置不同。
+func TestUnauthorizedResponseSurfacesAsHTTPError(t *testing.T) {
+	client, _ := newAuthedTestClient(t, Auth{Username: "elastic", Password: "wrong"}, func(w http.ResponseWriter, r *http.Request) {
+		writeJSONBody(w, http.StatusUnauthorized, `{"error":{"type":"security_exception","reason":"unable to authenticate user [elastic]"},"status":401}`)
+	})
+	err := client.Ping(context.Background())
+	if StatusOf(err) != http.StatusUnauthorized {
+		t.Fatalf("StatusOf = %d, want 401", StatusOf(err))
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Type != "security_exception" {
+		t.Fatalf("error = %v, want an HTTPError carrying the ES security_exception type", err)
+	}
+}
+
+// newAuthedTestClient 對著指定的 handler 建立帶驗證的 Client。
+func newAuthedTestClient(t *testing.T, auth Auth, handler http.HandlerFunc) (*Client, *httptest.Server) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return New(server.URL, "forum_posts", auth), server
 }

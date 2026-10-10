@@ -887,3 +887,107 @@ func TestNormalizeEmails(t *testing.T) {
 		})
 	}
 }
+
+/* ==========================================================================
+   Elasticsearch 的驗證設定
+   ========================================================================== */
+
+// TestESAuthSettingsParse 覆蓋三個新鍵的解析。
+//
+// 三條容易靜默出錯的路線各有測試釘住：
+//
+//   - 使用者名稱去空白、密碼**不**去空白。密碼常含空白，擅自修剪會讓 401 的
+//     原因指向錯誤的方向；而 " user" 這種多一個空字元的值只會得到一句
+//     "unable to authenticate"。
+//   - 空字串與未設定無法區分，因此一律是「沒有驗證」。這與 applyDefaults
+//     的整體取捨一致（見檔頭的說明），這裡只是記錄後果。
+func TestESAuthSettingsParse(t *testing.T) {
+	t.Run("全部設定", func(t *testing.T) {
+		cfg := loadString(t, strings.Join([]string{
+			"ES_URL=http://es:9200",
+			"ES_USERNAME=elastic",
+			"ES_PASSWORD=s3cret",
+			"ES_API_KEY=VnV4Q2VMUjpJUk9SWk9wUmh",
+		}, "\n"))
+		if cfg.ESUsername != "elastic" {
+			t.Errorf("ESUsername = %q, want %q", cfg.ESUsername, "elastic")
+		}
+		if cfg.ESPassword != "s3cret" {
+			t.Errorf("ESPassword = %q, want %q", cfg.ESPassword, "s3cret")
+		}
+		if cfg.ESAPIKey != "VnV4Q2VMUjpJUk9SWk9wUmh" {
+			t.Errorf("ESAPIKey = %q, want the value verbatim", cfg.ESAPIKey)
+		}
+	})
+
+	t.Run("帳號去頭尾空白", func(t *testing.T) {
+		cfg := loadString(t, "ES_USERNAME=  elastic\t\n")
+		if cfg.ESUsername != "elastic" {
+			t.Errorf("ESUsername = %q, want trimmed", cfg.ESUsername)
+		}
+	})
+
+	t.Run("密碼原樣保留含空白的值", func(t *testing.T) {
+		cfg := loadString(t, "ES_PASSWORD= p@ss word \n")
+		if cfg.ESPassword != "p@ss word" {
+			t.Errorf("ESPassword = %q, want %q（密碼不去內部空白、只去掉設定檔的頭尾換行）", cfg.ESPassword, "p@ss word")
+		}
+	})
+
+	t.Run("API key 不去空白以外的一切加工", func(t *testing.T) {
+		// 解碼與否由 es 套件判斷，config 不預先認定格式。
+		const key = "VnV4Q2VMUjpJUk9SWk9wUmh="
+		cfg := loadString(t, "ES_API_KEY="+key)
+		if cfg.ESAPIKey != key {
+			t.Errorf("ESAPIKey = %q, want %q", cfg.ESAPIKey, key)
+		}
+	})
+
+	t.Run("未設定時為空字串", func(t *testing.T) {
+		cfg := loadString(t, "ES_URL=http://es:9200\n")
+		if cfg.ESUsername != "" || cfg.ESPassword != "" || cfg.ESAPIKey != "" {
+			t.Errorf("未設定時三個欄位必須是空字串: %q / %q / %q",
+				cfg.ESUsername, cfg.ESPassword, cfg.ESAPIKey)
+		}
+	})
+
+	t.Run("空字串等同未設定", func(t *testing.T) {
+		// 這份設定格式無法區分兩者（見檔頭），因此寫成空值就是關掉驗證，
+		// 而不是送出一個空的 Authorization 標頭。
+		cfg := loadString(t, "ES_URL=http://es:9200\nES_USERNAME=\nES_PASSWORD=\nES_API_KEY=\n")
+		if cfg.ESUsername != "" || cfg.ESPassword != "" || cfg.ESAPIKey != "" {
+			t.Errorf("空值必須讀成未設定: %q / %q / %q", cfg.ESUsername, cfg.ESPassword, cfg.ESAPIKey)
+		}
+	})
+
+	t.Run("最後一次出現的值贏", func(t *testing.T) {
+		// 與其他欄位同一條規則（見 TestLastValueWins）。
+		cfg := loadString(t, "ES_USERNAME=first\nES_USERNAME=second\n")
+		if cfg.ESUsername != "second" {
+			t.Errorf("ESUsername = %q, want %q", cfg.ESUsername, "second")
+		}
+	})
+
+	t.Run("不支援環境變數後備", func(t *testing.T) {
+		// FILES_SERVER_TOKEN 是唯一從環境變數取值的欄位（見其欄位說明）。
+		// ES 的憑證刻意跟著它以外的多數憑證走：一律來自設定檔。
+		t.Setenv("ES_PASSWORD", "from-env")
+		cfg := loadString(t, "COOKIE_NAME=x\n")
+		if cfg.ESPassword != "" {
+			t.Errorf("ESPassword = %q, want \"\"（環境變數不該被讀取）", cfg.ESPassword)
+		}
+	})
+}
+
+// TestValidateIgnoresESAuthWithoutURL 守住「沒有 ES_URL 時填了憑證」不會
+// 被報成錯誤。
+//
+// 那不是部署錯誤，而是「共用範本檔、不同環境填不同欄位」的必然結果
+// （見 TestUnknownKeysAreSilentlyIgnored 的說明）。真正的提示在啟動報告的
+// 警告列，而不是 Validate。
+func TestValidateIgnoresESAuthWithoutURL(t *testing.T) {
+	cfg := loadString(t, "ES_USERNAME=elastic\nES_API_KEY=VnV4Q2VMUjpJUk9SWk9wUmh\n")
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil（沒有 ES_URL 時憑證只是沒被使用）", err)
+	}
+}

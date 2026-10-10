@@ -29,6 +29,13 @@ es 套件：Elasticsearch 的最小傳輸層（backend/forum/es/es.go）。
   所有方法都回 ErrDisabled 而不發出任何請求。呼叫端因此可以把
   「沒有設定 ES」與「ES 連不上」走同一條降級路徑（改用 MySQL LIKE 搜尋）。
 
+【驗證】
+
+   ES 啟用安全性（xpack.security.enabled）時，未帶驗證的每個請求都會拿到
+   401 security_exception。本套件支援 ES 原生支援的兩種 realm：Basic Auth 與
+   API key（見 Auth）。兩者都不會出現在日誌或錯誤訊息裡 —— 日誌只記錄
+   AuthKind() 的三個值之一。
+
 【逾時】
 
   單一 HTTP.Client 的 Timeout 固定 3 秒，與 health.go 的探測逾時一致。
@@ -42,6 +49,7 @@ package es
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +84,80 @@ const (
 // errors.Is 單獨辨識「這台站本來就沒開 ES」與「開了但連不上」：
 // 前者不必記警告日誌（它是預期中的部署選項），後者必須記。
 var ErrDisabled = errors.New("es: not configured")
+
+// 驗證種類。這三個值是日誌與報告顯示用的標籤，不含任何機密內容。
+const (
+	AuthKindNone   = "none"
+	AuthKindBasic  = "basic"
+	AuthKindAPIKey = "apikey"
+)
+
+// Auth 是連線 ES 時使用的驗證資訊，對應 ES 原生支援的兩種 realm。
+//
+//	Username / Password	HTTP Basic Auth（ES 的 native realm）
+//	APIKey		ES 的 API key，以 Authorization: ApiKey <base64> 送出
+//
+// 三者都留空代表「這個 ES 沒有啟用安全性」，此時完全不送 Authorization 標頭。
+//
+// 兩者同時設定時以 APIKey 為主：API key 可以只授權單一索引的讀寫，而基本帳密
+// 通常是權限更大的內建帳號（elastic）。這個優先序只在 Kind 裡決定一次，
+// 因此「日誌說用哪一種」與「實際送出哪一種」不可能不一致。
+//
+// 之所以不做「401 就退回無驗證」這種自動降級：那會把「密碼寫錯」與
+// 「ES 沒開安全性」混在一起，而兩者的處置完全相反（前者要修設定，後者
+// 本來就不該送憑證）。寧可讓搜尋退回 MySQL LIKE（那條路徑本來就存在），
+// 也不要偷偷改送驗證標頭。
+type Auth struct {
+	Username string
+	Password string
+	APIKey   string
+}
+
+// Kind 報告這個 Auth 會用哪一種驗證。沒有任何資訊時是 AuthKindNone。
+func (a Auth) Kind() string {
+	switch {
+	case strings.TrimSpace(a.APIKey) != "":
+		return AuthKindAPIKey
+	case strings.TrimSpace(a.Username) != "":
+		return AuthKindBasic
+	default:
+		return AuthKindNone
+	}
+}
+
+// HeaderValue 回傳 Authorization 標頭的值；Kind 為 none 時是空字串。
+func (a Auth) HeaderValue() string {
+	switch a.Kind() {
+	case AuthKindAPIKey:
+		return "ApiKey " + apiKeyCredential(a.APIKey)
+	case AuthKindBasic:
+		// net/http 的 SetBasicAuth 只作用在已建立的 Request 上，而本套件的
+		// 標頭在建構 Client 時就決定；兩者產生的是同一個值。
+		credentials := strings.TrimSpace(a.Username) + ":" + a.Password
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials))
+	default:
+		return ""
+	}
+}
+
+// apiKeyCredential 把設定值轉成 ES 期待的憑證本體。
+//
+// ES 的 apikey realm 收的是 base64("id:api_key")，而操作員手上常見的值有兩種：
+// console 與 curl 範例給的已編碼字串，以及 _security/api_key 回傳的
+// {"id": ..., "api_key": ...} 兩截拚成的 "id:key"。分辨方式是看冒號 ——
+// std base64 的字元集（A-Za-z0-9+/=）永遠不含冒號，而未編碼的兩截式一定含有一個。
+// 因此含冒號視為原始格式並在此編碼，其餘原樣送出。
+//
+// 為什麼要容忍兩種：ES 的錯誤訊息區分不了「你給了未編碼的值」與「key 過期」，
+// 兩者都是一句 security_exception。讓部署者貼哪一種都能用，勝過要求他先自己
+// 確認編碼狀態。
+func apiKeyCredential(raw string) string {
+	credential := strings.TrimSpace(raw)
+	if !strings.Contains(credential, ":") {
+		return credential
+	}
+	return base64.StdEncoding.EncodeToString([]byte(credential))
+}
 
 // PostDocument 是論壇貼文在 ES 中的文件格式。
 //
@@ -142,27 +224,45 @@ type Client struct {
 	baseURL string
 	index   string
 	client  *http.Client
+	// authKind 與 authHeader 在建構時算一次，之後不再改變。
+	// authHeader 為空字串代表這個 ES 不需要驗證，do 因此不必為每個請求重新
+	// 判斷「哪一種模式、要不要編碼」。
+	authKind   string
+	authHeader string
 }
 
 // New 建立 Client。baseURL 為空字串時 Client 仍可建構，但所有方法都回
 // ErrDisabled（不 panic、不發請求），因此呼叫端不必在每個呼叫點判斷
 // 「設定檔裡到底有沒有這一行」。
-func New(baseURL, index string) *Client {
+//
+// auth 是驗證資訊；三者皆為空時以無驗證方式連線（見 Auth）。
+func New(baseURL, index string, auth Auth) *Client {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	index = strings.TrimSpace(index)
 	if index == "" {
 		index = defaultIndexName
 	}
 	return &Client{
-		baseURL: baseURL,
-		index:   index,
-		client:  &http.Client{Timeout: requestTimeout},
+		baseURL:    baseURL,
+		index:      index,
+		client:     &http.Client{Timeout: requestTimeout},
+		authKind:   auth.Kind(),
+		authHeader: auth.HeaderValue(),
 	}
 }
 
 // Enabled 報告這個 Client 是否設定了 ES 位址。
 func (c *Client) Enabled() bool {
 	return c != nil && c.baseURL != ""
+}
+
+// AuthKind 報告實際使用的驗證種類（none / basic / apikey），供啟動日誌與
+// 設定檔檢查報告顯示。回傳值不含任何機密內容。
+func (c *Client) AuthKind() string {
+	if c == nil {
+		return AuthKindNone
+	}
+	return c.authKind
 }
 
 // IndexName 回傳實際使用的索引名，僅供日誌顯示。
@@ -191,6 +291,12 @@ func (c *Client) do(ctx context.Context, method, path, contentType string, body 
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	// 驗證標頭在這裡加，因此每一個端點（Ping、EnsureIndex、搜尋、_bulk、刪除）
+	// 都一致地帶上憑證 —— 漏掉其中一個的症狀是「大部分功能正常，只有某一項
+	// 一直 401」，而那比全部 401 更難查。
+	if c.authHeader != "" {
+		req.Header.Set("Authorization", c.authHeader)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

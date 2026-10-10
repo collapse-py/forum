@@ -297,6 +297,13 @@ func main() {
 	 * 結束；下次啟動時會再重建一次，因此中斷它不會留下永久性的落後狀態。
 	 */
 	go func() {
+		if cfg.ESURL != "" {
+			// 驗證種類先記下來：它只有三個值、不含任何機密內容。要記它是因為
+			// 「ES 開了安全性但我們沒給驗證」這個組合失效時，每個請求都只會
+			// 安靜地退回 MySQL LIKE —— 那條降級路徑本身完全正常，因此唯一的
+			// 跡象就是啟動時這一行。
+			logger.Infof("[SEARCH] Elasticsearch 索引 %s（驗證 %s）", cfg.ESIndex, esAuthFrom(cfg).Kind())
+		}
 		indexed, err := srv.RebuildSearchIndex(backgroundCtx)
 		if err != nil {
 			// errors.Is 判定 ErrDisabled：那是「設定檔沒填 ES_URL」的預期情況，
@@ -595,7 +602,15 @@ func checkConfig(path string) error {
 	fmt.Fprintf(out, "  Redis              : %s (db %d)\n", cfg.RedisAddr, cfg.RedisDB)
 	fmt.Fprintf(out, "  檔案伺服器（後台） : %s\n", cfg.FilesServerURL)
 	fmt.Fprintf(out, "  檔案伺服器（對外） : %s\n", cfg.FilesServerPublicURL)
-	fmt.Fprintf(out, "  Elasticsearch      : %s（索引 %s）\n", orNotSet(cfg.ESURL, "未設定 → 搜尋功能不會啟用，會退回 MySQL 的 LIKE 比對"), cfg.ESIndex)
+	// ES 那一行同時報驗證種類。理由：ES 開了安全性而這裡沒有任何憑證時，
+	// 每個請求都會拿到 401，而搜尋會**持續退回 MySQL LIKE** —— 網站看起來
+	// 完全正常，只是搜尋品質悄悄變差。這個狀態必須在啟動報告裡看得見。
+	esAuthKind := esAuthFrom(cfg).Kind()
+	if cfg.ESURL == "" {
+		fmt.Fprintf(out, "  Elasticsearch      : %s\n", orNotSet(cfg.ESURL, "未設定 → 搜尋功能不會啟用，會退回 MySQL 的 LIKE 比對"))
+	} else {
+		fmt.Fprintf(out, "  Elasticsearch      : %s（索引 %s · 驗證 %s）\n", cfg.ESURL, cfg.ESIndex, esAuthKind)
+	}
 	fmt.Fprintln(out)
 
 	// 5. 憑證。只報有無 —— 見函式檔頭的說明。
@@ -611,6 +626,9 @@ func checkConfig(path string) error {
 		{"FILES_SERVER_TOKEN", cfg.FilesServerToken},
 		{"REDIS_PASSWORD", cfg.RedisPassword},
 		{"DB_DSN 內含帳密", cfg.DbDSN},
+		{"ES_USERNAME", cfg.ESUsername},
+		{"ES_PASSWORD", cfg.ESPassword},
+		{"ES_API_KEY", cfg.ESAPIKey},
 	} {
 		fmt.Fprintf(out, "  %s · %s\n", c.name, present(c.value))
 	}
@@ -621,6 +639,27 @@ func checkConfig(path string) error {
 	if cfg.IsProduction() && cfg.FilesServerToken == "" {
 		fmt.Fprintf(out, "  警告              : 正式環境未設定 FILES_SERVER_TOKEN —— "+
 			"上傳端點會接受任何來源的請求\n")
+	}
+	// ES 的三個驗證欄位是「配對設定」，而每一種不對稱的組合都有不同的症狀，
+	// 且全部是靜默的（搜尋只是安靜地退回 MySQL LIKE）。分開報而不是合成一句
+	// 「ES 驗證設定有問題」：那一句會讓人回到逐項比對設定檔。
+	esAuthProvided := cfg.ESUsername != "" || cfg.ESPassword != "" || cfg.ESAPIKey != ""
+	switch {
+	case cfg.ESURL == "" && esAuthProvided:
+		fmt.Fprintf(out, "  警告              : 有 ES 驗證資訊但 ES_URL 留空 —— 搜尋功能未啟用，這些憑證不會被使用\n")
+	case esAuthKind == es.AuthKindBasic && cfg.ESPassword == "":
+		fmt.Fprintf(out, "  警告              : 只設了 ES_USERNAME 沒有 ES_PASSWORD —— "+
+			"以空密碼送 Basic Auth，ES 會回 401 並讓搜尋退回 MySQL\n")
+	case esAuthKind == es.AuthKindNone && esAuthProvided:
+		fmt.Fprintf(out, "  警告              : 設了 ES 帳密卻組不成一組 Basic Auth（ES_USERNAME 留空）—— "+
+			"不會送出任何驗證標頭\n")
+	case esAuthKind == es.AuthKindAPIKey && cfg.ESUsername != "":
+		// 不是警告，是事實陳述：兩個都給了的時候採 APIKey（見 es.Auth）。
+		// 不印出來的話，部署者會以為送出去的是那一組帳密。
+		fmt.Fprintf(out, "  備註              : ES_USERNAME 與 ES_API_KEY 都設了 —— 實際送出的是 API key\n")
+	case cfg.ESURL != "" && esAuthKind == es.AuthKindNone:
+		fmt.Fprintf(out, "  備註              : ES_URL 已設定但沒有任何驗證資訊，將以無驗證方式連線；"+
+			"ES 若啟用了安全性，所有請求會以 401 失敗並讓搜尋退回 MySQL\n")
 	}
 	fmt.Fprintln(out)
 
@@ -717,6 +756,19 @@ func dbEndpoint(dsn string) string {
 		}
 	}
 	return "（無法解析 DSN）"
+}
+
+// esAuthFrom 從設定檔組出 ES 的驗證資訊。
+//
+// 刻意只做欄位搬運，「哪一種驗證會真的被採用」一律交給 es.Auth.Kind 判定 ——
+// 那條規則（API key 優先於基本帳密）必須只有一個事實來源，否則報告會宣稱
+// 送的是 basic 而程式實際送出 apikey，而那種不一致沒有任何症狀。
+func esAuthFrom(cfg config.Config) es.Auth {
+	return es.Auth{
+		Username: cfg.ESUsername,
+		Password: cfg.ESPassword,
+		APIKey:   cfg.ESAPIKey,
+	}
 }
 
 // present 把一個值轉成「已設定（長度 N）」或「未設定」。

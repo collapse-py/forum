@@ -23,9 +23,9 @@ SESSION_EXPIRE_HOURS 誤寫成 abc 時會安靜地變成 72 小時而不是報�
 
 設定是一次性載入的快照，沒有熱更新機制；修改檔案必須重啟行程才會生效。
 
-憑證（GOOGLE_CLIENT_SECRET、FILES_SERVER_TOKEN、REDIS_PASSWORD、DB_DSN 中的帳密）
-以純文字存放在設定檔，程式端不做任何加密或解密。部署時必須以檔案權限保護，
-若要走環境變數注入，目前只有 FILES_SERVER_TOKEN 一個欄位支援。
+憑證（GOOGLE_CLIENT_SECRET、FILES_SERVER_TOKEN、REDIS_PASSWORD、DB_DSN 中的帳密、
+ES_USERNAME/ES_PASSWORD/ES_API_KEY）以純文字存放在設定檔，程式端不做任何加密或解密。
+部署時必須以檔案權限保護，若要走環境變數注入，目前只有 FILES_SERVER_TOKEN 一個欄位支援。
 
 applyDefaults 內的預設值以「本機開發能跑起來」為目標，不代表正式環境的安全建議值。
 
@@ -164,6 +164,16 @@ import (
 // ESIndex 是貼文索引名稱。沿用舊版主站 config.conf 的 ES_INDEX 一詞，預設
 // forum_posts；它必須與 ES 上既有的其他索引（例如舊功能的 history_posts）
 // 不同名，否則兩種資料會混在同一个索引裡互相覆蓋。
+// ESUsername 與 ESPassword 是連線 ES 用的 Basic Auth 帳密，ESPassword 留空代表
+// 「這台 ES 沒有啟用安全性」。與 DB_DSN、GOOGLE_CLIENT_SECRET 一樣以明文載入且
+// 不支援環境變數（見 FilesServerToken 的說明）：設定檔已經在 .gitignore 裡，
+// 多一條注入路徑只會讓「這份設定從哪裡來」變得不一致。
+// ESAPIKey 是 ES 的 API key，字面上可以是 Elasticsearch 的
+// _security/api_key 回傳的 "id:api_key" 兩截式原值，也可以是已經 base64 編碼過的值
+// （console 顯示的那串）—— 分辨方式是看有無冒號，編號在 es 套件裡只做一次。
+// 三者都留空代表不帶任何驗證標頭。ESUsername 與 ESAPIKey 同時設定時以 ESAPIKey
+// 為主：API key 可以只授權這個索引的讀寫，而基本帳密通常是權限更大的內建帳號。
+// 那個優先序只有一個事實來源（es.Auth.Kind），因此日誌與實際送出的標頭不會不一致。
 type Config struct {
 	CookieName    string        // COOKIE_NAME
 	SessionExpire time.Duration // SESSION_EXPIRE_HOURS（設定檔單位：小時）
@@ -214,6 +224,9 @@ type Config struct {
 	AllowedAdminEmail     []string // ALLOWED_ADMIN_EMAIL（逗號分隔，載入時已 TrimSpace + ToLower）
 	ESURL                 string   // ES_URL（留空＝不啟用 Elasticsearch，搜尋退回 MySQL LIKE）
 	ESIndex               string   // ES_INDEX（預設 forum_posts）
+	ESUsername            string   // ES_USERNAME（ES 的 Basic Auth 帳號，留空＝不驗證）
+	ESPassword            string   // ES_PASSWORD（ES 的 Basic Auth 密碼）
+	ESAPIKey              string   // ES_API_KEY（ES 的 API key，優先於 Basic Auth）
 	LogLevel              string   // LOG_LEVEL
 	LogFile               string   // LOG_FILE
 	LogFormat             string   // LOG_FORMAT（"json" 或 "text"）
@@ -405,6 +418,19 @@ func Load(path string) (Config, error) {
 			cfg.ESURL = strings.TrimRight(val, "/")
 		case "ES_INDEX":
 			cfg.ESIndex = val
+		case "ES_USERNAME":
+			// 使用者名稱去掉空白：它幾乎不可能合法地含空白，而 " user" 這種
+			// 貼上時多帶一個空字元的值會讓 ES 回 401，而訊息裡看不出原因。
+			// 密碼刻意**不**去空白（密碼可以合法地含空白，擅自修剪會讓
+			// 401 的原因指向錯誤的方向）。
+			cfg.ESUsername = strings.TrimSpace(val)
+		case "ES_PASSWORD":
+			// 敏感值：明文載入、不加密、不進任何日誌（與 GOOGLE_CLIENT_SECRET 同）。
+			cfg.ESPassword = val
+		case "ES_API_KEY":
+			// 原樣載入：含冒號的 "id:key" 兩截式與已編碼的 base64 都由 es 套件
+			// 分辨，config 不預先判斷 —— 那條規則必須只有一個實作。
+			cfg.ESAPIKey = val
 		case "LOG_LEVEL":
 			// 不在此處驗證：logger.parseLevel 對無法辨識的值會退回 INFO，
 			// 由該處統一處理所有合法與不合法情形。
