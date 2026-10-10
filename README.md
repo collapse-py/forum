@@ -65,7 +65,13 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
 - **Redis 版可撤銷 Session**：滑動續期，Redis 掛掉等於全部登入失效
 - **三段式 IP 限流**：內容寫入（10/60s）、圖片上傳（5/60s）、OAuth 跳轉（10/60s）各自
   獨立額度，依端點成本區分
+- **files_server 自己的每 IP 限流**：媒體讀取與寫入（上傳／刪除）各自一套 token bucket
+  （預設 50/s 與 2/s，burst 分別 200 與 20）。它與後端的限流器互不隸屬 —— 後端的
+  額度保護不到另一個程序，而 `/files/` 的每一次讀取都伴隨一次 Redis 探查
 - **媒體存取權杖**：上傳時發短 TTL 的 Redis token 綁定圖片網址，可主動釋放
+- **單一的來源位址真相**：限流、IP 封鎖、監控、稽核與 access log 全都走同一份
+  `TRUSTED_PROXY_CIDRS` 信任模型 —— 同一個請求不會因為「哪一段程式碼問它來自哪裡」
+  而得到兩個不同的答案
 
 各後台頁面「在回答什麼問題」與其取捨，見 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
@@ -93,7 +99,7 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
 - `MySQL`：持久化資料（貼文、留言、稽核…），schema 啟動時自動建立
 - `Redis`：session、媒體權杖、IP 封鎖名單 —— 全站的信任根
 - `Elasticsearch`：全文搜尋，選用（留空則退回 MySQL `LIKE`）
-- `files_server/`：媒體上傳／刪除／讀取（local 或 S3）
+- `files_server/`：媒體上傳／刪除／讀取（local 或 S3），含自己的一套每 IP 限流
 
 反向代理（nginx / Caddy / Cloudflare Tunnel）**不在此 repo 內**，TLS 由它終結。
 
@@ -179,6 +185,10 @@ docker compose --env-file deploy/settings.conf up -d       # 3. 起服務
 - `COOKIE_SECURE` —— 走 HTTPS 就必須 `true`
 - `FILES_SERVER_TOKEN`（唯一支援環境變數的設定）與 files_server 的 `[upload] token`
   必須相同；`MEDIA_TOKEN_KEY_PREFIX` 與 files_server 的 `token_key_prefix` 必須相同
+  （兩邊的兜底值現在是同一個字面值，因此「兩邊都漏設」不會再造成
+  「上傳成功、貼文也存得下、圖片一律 401」）
+- files_server 的 `[ratelimit]`：媒體與寫入各自一套每 IP 額度，裝在有限流的反向代理
+  後面時可以 `enabled = false`
 
 完整參數表與「不看原始碼會猜錯的細節」見 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
 
@@ -191,6 +201,13 @@ docker compose --env-file deploy/settings.conf up -d       # 3. 起服務
   三段式限流
 - 匿名性：email 不出現在 URL，公開身分是 `SHA256(email)`
 - 媒體：UUID v4 檔名、副檔名白名單（不含 svg）、短 TTL 存取權杖
+- **寫入端點的 body 有大小上限**：`MaxBytesReader` 在解碼時就生效，而不是等業務長度
+  檢查跑完 —— 一個數百 MB 的 JSON 不會先完整進到記憶體裡
+- **刪除路徑被收斂到單一檔名**：`/delete` 只接受 `<filesDir>/<一個檔名>`，`. 與 ..`
+  會被拒絕（它們能讓 `os.Remove` 作用在目錄上），而儲存層再檢查一次解析後的路徑
+  是否仍在 `files/` 之內
+- **上傳 token 以常數時間比對**；`upload.token` 留空是明確允許的本機測試狀態，
+  正式環境必須設定（留空等於「找得到埠就能上傳與刪除」，且沒有任何錯誤訊息會提醒）
 
 完整威脅模型、實測記錄與上線檢查表見 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
@@ -218,9 +235,10 @@ docker compose --env-file deploy/settings.conf up -d       # 3. 起服務
 
 ```bash
 cd backend && go test ./...              # 後端測試
-cd files_server && go test ./...         # 檔案服務測試
+cd files_server && go test ./...         # 檔案服務測試（上傳／刪除／token／路徑／限流）
+cd tools/invariants && go test ./...     # 專屬不變條件 analyzer 自測（含負向測試）
 cd frontend && npm run typecheck && npm run build
-node tools/i18n/verify-catalogs.mjs      # 翻譯目錄與語系宣稱
+node tools/i18n/verify-catalogs.mjs      # 翻譯目錄與語系宣稱（可從任何目錄執行）
 ```
 
 前端沒有單元測試 —— 型別檢查（`strict` + `noUncheckedIndexedAccess` +
@@ -235,7 +253,8 @@ node tools/i18n/verify-catalogs.mjs      # 翻譯目錄與語系宣稱
 
 1. **`TRUSTED_PROXY_CIDRS` 留空時，限流與封鎖都可被單一偽造標頭繞過。** 症狀是
    「限流看起來有開，只是擋不住任何人」—— 輪替 `X-Forwarded-For` 就重置額度。
-   監控頁的 `clientIpTrust.mode` 會顯示 `legacy-headers`，那就是沒設定的訊號。
+   監控頁的 `clientIpTrust.mode` 會顯示 `legacy-headers`，那就是沒設定的訊號；
+   存取記錄裡的 IP 也走同一份模型，因此兩邊的數字從此對得起來。
 2. **`httpapi` 約 2,500 行、仍有約 88% 沒有測試覆蓋。** 優先順序建議依「壞掉時的
    爆炸半徑」排：批次／匯出 → 貼文 CRUD → 公告 → 統計。
 3. **`docker compose` 尚未在本機實測過**（撰寫本文時的開發環境沒有可用的 Docker
