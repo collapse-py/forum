@@ -19,8 +19,35 @@ log 輸出格式與寫入目的地
 	        同一個 LOG_FILE 會被無限追加下去。實際運作需由外部機制（logrotate、
 	        容器 stdout 收集、或定期輪替部署環境的檔案系統）負責換檔；
 	        換檔後因為檔案句柄仍指向舊 inode，應重啟行程讓日誌重新開檔。
-	時間格式：2006-01-02 15:04:05.000，毫秒精度，取自 time.Now()（本機時區，格式本身不含時區或
-	  位移資訊），因此跨主機彙整時須另外補上時區資訊。
+	時間格式：2006-01-02T15:04:05.000Z07:00 —— RFC 3339、毫秒精度、帶本機時區位移
+	        （例如 2026-10-13T09:22:12.123+08:00；UTC 主機上以 Z 結尾）。取自 time.Now()。
+	        帶偏移是為了讓跨主機彙整的紀錄可以直接排序與比對，不需要另外猜每台機器
+	        落在哪個時區。同一偏移下欄位的字典序等於時間序；混合不同偏移的主機仍須
+	        先解析再比對 —— 而「到底有沒有偏移」在舊格式裡根本無從判斷。
+
+輸出格式（LOG_FORMAT=text，預設）
+
+	每一行都是 key=value 序列，欄位順序固定：
+
+	    time=<時間> level=<LEVEL> request_id="<16 進位>" ip="<來源>" user_email="<email>" caller="<檔名:行號>" msg="<訊息>"
+
+	三條省略規則，全部是為了「一行的寬度只花在有意義的欄位上」：
+	  - request_id / ip / user_email：背景工作（啟動訊息、遷移結果）沒有任何請求中繼資料，
+	    此時整段省略，行首直接是 time=level=caller=msg=。
+	  - caller：呼叫點就在 logger 套件內時省略（例如 LoggingMiddleware 自己呼叫 InfoContext，
+	    caller 會指向 middleware.go 而不是任何業務碼）。業務碼的呼叫一律保留。
+	  - msg 永遠是最後一個欄位，讓「一行從哪裡開始是訊息」只需要一條規則。
+	time 與 level 是程式產生的固定形狀，不加引號，方便 `grep level=ERROR`；
+	其餘欄位一律以 Go 字串字面值（strconv.Quote）包覆 —— 見 sanitizeLogValue 的說明。
+
+輸出格式（LOG_FORMAT=json）
+
+	固定七個鍵，schema 不隨訊息而變，收集端（ELK、Loki）可以直接建立索引：
+
+	    {"time":"<時間>","level":"<LEVEL>","request_id":"…","ip":"…","user_email":"…","caller":"…","msg":"…"}
+
+	背景工作的三個中繼鍵仍存在、值為空字串（不出現/缺席的鍵會讓收集端的型別推斷
+	更容易出錯，因此刻意保留空值而非省略）。caller 未知或被抑制時同樣是空字串。
 
 日誌等級門檻
 
@@ -52,7 +79,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -203,11 +233,12 @@ func parseLevel(s string) Level {
 //
 // 已知殘餘限制（本函式刻意不做的事）：
 //   - **不做敏感資訊遮蔽**。email 與 IP 會以明文輸出。
-//   - **不跳脫空白與等號**。因此一個值若含有 " fake_ip=9.9.9.9" 這樣的內容，
-//     在 text 輸出裡會與真正的欄位難以區分（JSON 輸出沒有這個問題，因為值被
-//     包在引號內）。這是刻意的取捨：要擋掉它就得改變整個 text 輸出的形狀，
-//     而那會讓所有既有的 grep 規則失效。規則 2 擋掉的是「新的一行」——
-//     那才是能偽造出一條記錄的層級，也是稽核日誌真正需要守住的那一層。
+//   - **不跳脫引號本身**。這不是漏洞：text 輸出的每個欄位值都由 quoteField 以
+//     strconv.Quote 包住（JSON 輸出的跳脫由 encoding/json 負責），因此值裡即使含
+//     " fake_ip=9.9.9.9" 這種內容，也留在同一個引號區段內，不會與真正的欄位混淆。
+//     text 輸出「無法區分欄位邊界」是早期版本的已知限制，已隨欄位引號化消失。
+//     sanitizeLogValue 真正守住的是「不能多出第 N 行」—— 那才是能偽造出一條記錄的
+//     層級，也是稽核日誌真正需要守住的那一層。
 func sanitizeLogValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -276,6 +307,50 @@ const (
 // isUTF8Continuation 判斷一個位元組是否為 UTF-8 的延續位元組（10xxxxxx）。
 func isUTF8Continuation(b byte) bool { return b&0xC0 == 0x80 }
 
+// timeLayout 是每行日誌的時間格式：RFC 3339、毫秒精度、帶本機時區位移
+// （例如 2026-10-13T09:22:12.123+08:00；UTC 主機上以 Z 結尾）。
+//
+// 選它的三個理由：
+//  1. 帶時區位移：跨主機彙整時不必推測每台機器在哪個時區 —— 舊格式
+//     （2006-01-02 15:04:05.000）把位移丟掉了，彙整後的時間序是不可信的。
+//  2. 可被 time.Parse(time.RFC3339, …) 與任何日誌收集端直接解析，
+//     不需要自訂 parser。
+// 3. 固定寬度，位移格式統一（Z 或 ±HH:MM）。同一時區偏移的多行紀錄，字典序
+//    等於時間序，sort / awk 因此可用；混合不同偏移的主機仍須先解析再比對
+//    —— 那本來就是帶位移要解決的問題，而不是它引入的問題。
+const timeLayout = "2006-01-02T15:04:05.000Z07:00"
+
+/*
+loggerPackageDir 是本套件原始碼所在的目錄（正規化成斜線），只用來辨識
+「呼叫點就在 logger 套件內」的堆疊帧。
+
+為什麼要省略這種 caller：LoggingMiddleware 自己呼叫 InfoContext / WarnContext /
+ErrorContext 記存取記錄，而那些函式的 callerSkip 是固定的 2，所以 caller 一定
+指向 middleware.go 的某一行 —— 對讀日誌的人沒有任何價值，只是在每一行存取記錄裡
+重複同一個無意義的座標。業務碼的呼叫（caller 指到 handler、blocklist.go 等）
+一律保留，那才是出事時要的「這行是誰打的」。
+
+比對的是**目錄**而不是檔名：不同套件存在同名檔案（middleware.go、logger.go）
+完全可能，只靠 basename 比對會誤傷。這裡先用完整路徑比對目錄，命中才略過，
+之後仍然只把 basename 寫進日誌。
+
+初始化時計算一次：runtime.Caller 的成本只在這裡付一次。
+*/
+var loggerPackageDir = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	return path.Dir(filepath.ToSlash(file))
+}()
+
+// quoteField 把要寫進 text 輸出的欄位值包成 Go 字串字面值。
+//
+// 這是 text 輸出「欄位不會被值混淆」的機制：值裡即使含空白、等號或看起來像
+// 另一個欄位的 " fake_ip=9.9.9.9"，也在同一對引號內。sanitizeLogValue 已經
+// 移除控制字元，因此 strconv.Quote 實際只處理引號、反斜線與非列印字元。
+func quoteField(value string) string { return strconv.Quote(value) }
+
 // logf 是不帶 context 的內部寫入路徑。
 // callerSkip 固定為 3：呼叫堆疊為 logWithContext → logf → Debugf/Infof/... → 業務程式碼，
 // 所以要往上跳 3 層才能指到真正的呼叫端，runtime.Caller(0) 才是 logWithContext 自己。
@@ -288,8 +363,13 @@ func (l *Logger) logf(level Level, format string, args ...interface{}) {
 // 參數：
 //   - ctx：若帶有 Metadata（見 middleware.go 的 WithMetadata），會把 request_id /
 //     IP / user_email 附到每一條日誌上，讓後端呼叫鏈的記錄可以依 request_id 串起來。
-//     傳入 context.Background() 時（走 logf 的路徑）只會得到三個 "-" 的佔位值。
+//     傳入 context.Background() 時（走 logf 的路徑）只會得到三個 "-" 的佔位值，
+//     輸出時整段中繼欄位被省略（見檔案頭的 text 輸出格式）。
 //   - callerSkip：要顯示的呼叫端深度，見 logf 的說明。
+//
+// caller 欄位的省略規則：呼叫點就在 logger 套件內時不輸出 caller。唯一的呼叫者是
+// LoggingMiddleware 自己（記存取記錄），它的座標是固定的 middleware.go，對診斷
+// 沒有價值；業務碼的呼叫一律保留。理由見 loggerPackageDir 的說明。
 //
 // 錯誤處理：json 編碼失敗時不讓錯誤向外傳播（否則每個請求都會因日誌而失敗），
 // 而是降級輸出一行保底的文字記錄。
@@ -313,9 +393,8 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// 毫秒精度足夠排序又不至於讓每行過長。取本機時區且不輸出時區標記，
-	// 跨主機比對時間時需留意此限制。
-	now := time.Now().Format("2006-01-02 15:04:05.000")
+	// 毫秒精度足夠排序又不至於讓每行過長；帶本機時區位移（見 timeLayout）。
+	now := time.Now().Format(timeLayout)
 	// 先組成訊息再清洗一次：format 的引數常來自使用者輸入（email、URL、錯誤內容），
 	// 必須在寫入前統一去掉換行與控制字元。
 	msg := sanitizeLogValue(fmt.Sprintf(format, args...))
@@ -328,20 +407,24 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 	meta.UserEmail = sanitizeLogValue(meta.UserEmail)
 	meta.RequestID = sanitizeLogValue(meta.RequestID)
 
+	// 背景工作（main 的啟動訊息、遷移結果）三個中繼欄位都會是 "-"，此時 text 輸出
+	// 整段省略它們、JSON 輸出把它們清成空字串。註：只有三欄「同時」為 "-" 時才算
+	// 背景；LoggingMiddleware 會把未登入者填成 "anonymous"，因此 HTTP 存取記錄
+	// 走不到這個分支。
+	background := meta.RequestID == "-" && meta.IP == "-" && meta.UserEmail == "-"
+
 	// runtime.Caller 的 skip 必須與呼叫者的實際堆疊深度一致，否則會記錄到本套件自己的檔名。
 	// 保留 ok 的判斷：部分環境（如已裁剪的堆疊）可能取不到，這時留空字串而非中斷輸出。
 	_, file, line, ok := runtime.Caller(callerSkip)
 	caller := ""
-	if ok {
-		// runtime 回傳的是建置機的完整路徑；只取檔名，避免把部署路徑寫進日誌。
-		// 兩次處理分別對應 Unix 的 "/" 與 Windows 的 "\" 分隔符。
-		if idx := strings.LastIndex(file, "/"); idx >= 0 {
-			file = file[idx+1:]
+	if ok && (loggerPackageDir == "" || path.Dir(filepath.ToSlash(file)) != loggerPackageDir) {
+		// runtime 回傳的是建置機的完整路徑；正規化成斜線後只取檔名，
+		// 避免把部署路徑寫進日誌（一次處理同時涵蓋 Unix 與 Windows 的分隔符號）。
+		base := filepath.ToSlash(file)
+		if idx := strings.LastIndex(base, "/"); idx >= 0 {
+			base = base[idx+1:]
 		}
-		if idx := strings.LastIndex(file, "\\"); idx >= 0 {
-			file = file[idx+1:]
-		}
-		caller = sanitizeLogValue(fmt.Sprintf("%s:%d", file, line))
+		caller = sanitizeLogValue(fmt.Sprintf("%s:%d", base, line))
 	}
 
 	if l.format == "json" {
@@ -355,11 +438,11 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 			"caller":     caller,
 			"msg":        msg,
 		}
-		// 背景工作（例如 main 的啟動訊息）沒有任何請求中繼資料，三欄會都是 "-"。
-		// 此時改寫成空字串，避免佔位符號被誤認為真實值。
+		// 背景工作沒有任何請求中繼資料，三欄會都是 "-"。此時改寫成空字串，
+		// 避免佔位符號被誤認為真實值；鍵仍然保留，讓每行的 schema 一致。
 		// 註：只有三欄「同時」為 "-" 時才會清空；LoggingMiddleware 會把未登入者填成
 		// "anonymous"，因此 HTTP 存取記錄走不到這個分支。
-		if meta.RequestID == "-" && meta.IP == "-" && meta.UserEmail == "-" {
+		if background {
 			entry["request_id"] = ""
 			entry["ip"] = ""
 			entry["user_email"] = ""
@@ -377,12 +460,29 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 		}
 		l.logger.Print(string(encoded))
 	} else {
-		// 純文字輸出。三欄皆為佔位符號（背景工作）時省略整段前綴，讓行較短好讀。
-		if meta.RequestID == "-" && meta.IP == "-" && meta.UserEmail == "-" {
-			l.logger.Printf("%s [%s] %s %s", now, levelNames[level], caller, msg)
-			return
+		// 純文字輸出：key=value 序列，msg 永遠在最後（見檔案頭的格式說明）。
+		// time 與 level 是固定形狀，不加引號，方便 grep level=ERROR；
+		// 其餘欄位一律引號化，讓值裡的空白與 " key=value" 不會混淆欄位邊界。
+		var b strings.Builder
+		b.WriteString("time=")
+		b.WriteString(now)
+		b.WriteString(" level=")
+		b.WriteString(levelNames[level])
+		if !background {
+			b.WriteString(" request_id=")
+			b.WriteString(quoteField(meta.RequestID))
+			b.WriteString(" ip=")
+			b.WriteString(quoteField(meta.IP))
+			b.WriteString(" user_email=")
+			b.WriteString(quoteField(meta.UserEmail))
 		}
-		l.logger.Printf("%s [%s] request_id=%s ip=%s user_email=%s %s %s", now, levelNames[level], meta.RequestID, meta.IP, meta.UserEmail, caller, msg)
+		if caller != "" {
+			b.WriteString(" caller=")
+			b.WriteString(quoteField(caller))
+		}
+		b.WriteString(" msg=")
+		b.WriteString(quoteField(msg))
+		l.logger.Print(b.String())
 	}
 }
 

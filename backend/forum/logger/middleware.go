@@ -346,8 +346,15 @@ func LoggingMiddleware(next http.Handler, resolveUser UserResolver, resolveIP Cl
 		duration := time.Since(start)
 		// 記錄 path 而非完整 RequestURI：查詢字串常帶 token 或使用者輸入，
 		// 只記路徑可大幅降低敏感資訊外洩的機會。
-		msg := fmt.Sprintf("[HTTP] request_id=%s %s %s %s status=%d duration=%s",
-			requestID, r.Method, r.URL.Path, r.Proto, rw.statusCode, duration)
+		// 訊息裡刻意不再出現 request_id：它已經由 logger 的中繼欄位帶在同一行上
+		// （見 logger.go 的 text/json 輸出格式），重複一次只會讓同一行有兩個相同
+		// 的 ID，grep 與人工閱讀都要多排除一個命中。
+		// duration 固定以毫秒為單位（三位小數）：time.Duration.String() 會依大小
+		// 換單位（0s、850µs、2.5s），聚合端要為每種單位寫一條 parser；固定單位
+		// 讓「這一欄是數字」對人與機器都成立，也包括亞毫秒的 0.000。
+		msg := fmt.Sprintf("[HTTP] %s %s %s status=%d duration_ms=%.3f",
+			r.Method, r.URL.Path, r.Proto, rw.statusCode,
+			float64(duration)/float64(time.Millisecond))
 
 		// 分級規則：伺服器端錯誤最嚴重優先判定；4xx 與逾時並列為 WARN；
 		// 逾時門檻定在 3 秒，與前端一般互動的等待容忍度對齊，避免正常但偏慢的

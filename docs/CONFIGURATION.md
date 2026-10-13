@@ -15,6 +15,7 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 - [backend/config/config.conf](#backendconfigconfigconf)
 - [files_server/config.conf](#files_serverconfigconf)
 - [最小可用設定](#最小可用設定)
+- [日誌輸出格式](#日誌輸出格式)
 
 ---
 
@@ -54,7 +55,7 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | |
 | `GOOGLE_REDIRECT_URL` | — | 必須與 Google Cloud Console 逐字相符 |
 | `ALLOWED_ADMIN_EMAIL` | 空 | 逗號分隔。載入與比對**雙邊**都做 TrimSpace + ToLower |
-| `LOG_LEVEL` / `LOG_FILE` / `LOG_FORMAT` | `INFO` / `server.log` / `text` | 格式可選 `json` |
+| `LOG_LEVEL` / `LOG_FILE` / `LOG_FORMAT` | `INFO` / `server.log` / `text` | 格式可選 `json`；輸出行格式見[日誌輸出格式](#日誌輸出格式) |
 | `MONITOR_RETENTION_HOURS` | `24` | 監控分鐘彙總在資料庫保留幾小時 |
 | `AUDIT_RETENTION_DAYS` | `90` | 稽核紀錄保留幾天 |
 
@@ -156,3 +157,39 @@ token_key_prefix = "forum:token:"   # 必須與後端 MEDIA_TOKEN_KEY_PREFIX 相
 token_ttl_sec = 60
 public_files = false
 ```
+
+---
+
+## 日誌輸出格式
+
+`LOG_FORMAT` 只有兩種值，兩種都是「一行一筆」。欄位順序固定，`msg` 永遠在最後。
+
+### `text`（預設，人讀）
+
+```
+time=2026-10-13T09:22:12.123+08:00 level=INFO caller="main.go:318" msg="[SERVER] Forum server started at :8088"
+time=2026-10-13T09:22:12.456+08:00 level=WARN request_id="9f2c1d0b4a6e5f70" ip="203.0.113.7" user_email="anonymous" msg="[HTTP] GET /api/forum/posts HTTP/1.1 status=404 duration_ms=850.000"
+```
+
+- **時間**是 RFC 3339 毫秒精度、帶本機時區位移（`Z` 代表 UTC）。多主機彙總時可直接排序，不需要猜時區；同一時區偏移下字典序等於時間序，混合不同偏移須先解析再比對。
+- **等級** `level=` 不加引號，方便 `grep 'level=ERROR'`。
+- **`time` / `level` / `caller` / `msg` 之外的值一律引號化**（Go 字串字面值）。IP、email 這類外部可控值即使含空白或 `key=value`，也留在同一對引號內，不會偽造出獨立欄位。
+- **`request_id` / `ip` / `user_email`** 只出現在請求範圍的記錄上；背景工作（啟動訊息、遷移結果）整段省略。
+- **`caller`** 是「這行是誰打的」。存取記錄的呼叫點在 logger 中介層本身，座標固定、沒有診斷價值，因此省略；業務碼的呼叫一律保留。
+- **`msg` 永遠是最後一個欄位**，因此「一行從哪裡開始是訊息」只需要一條規則。
+- 訊息裡的換行與控制字元會被清洗成空格（`sanitizeLogValue`），「注入一行假記錄」在這裡被擋下；單一欄位值超過 256 bytes 會截斷並加 `...`。
+
+### `json`（機器讀，給 ELK / Loki）
+
+```json
+{"time":"2026-10-13T09:22:12.123+08:00","level":"WARN","request_id":"9f2c1d0b4a6e5f70","ip":"203.0.113.7","user_email":"anonymous","caller":"","msg":"[HTTP] GET /api/forum/posts HTTP/1.1 status=404 duration_ms=850.000"}
+```
+
+- 固定七個鍵（`time` / `level` / `request_id` / `ip` / `user_email` / `caller` / `msg`），schema 不隨訊息改變，收集端可以直接建索引。
+- 背景工作的三個中繼鍵仍存在、值為空字串（刻意不出現在/缺席鍵，避免收集端型別推斷出錯）；`caller` 被抑制時同樣是空字串。
+- 所有值都是字串，因此 `status`、`duration_ms`（固定毫秒、三位小數）目前在 `msg` 內而不是獨立鍵 —— 改版時若要升為頂層欄位，收集端的 parser 需要一併更新。
+
+### 兩個刻意的限制
+
+- **不做檔案切割**：沒有大小上限、沒有時間輪替，`LOG_FILE` 會被無限追加，換檔請靠外部機制（logrotate 或容器 stdout 收集），換檔後需重啟行程才會重新開檔。
+- **不做敏感資訊遮蔽**：email 與來源 IP 是明文。`msg` 會不會帶出 token、密碼取決於呼叫端傳了什麼；存取記錄只記路徑、不記查詢字串，就是為了降低這個風險。

@@ -39,6 +39,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -327,26 +328,37 @@ func TestLevelOrderingIsMeaningful(t *testing.T) {
 
 // TestBackgroundMessagesOmitMetadataPrefix 守住背景工作的輸出形狀。
 //
-// 背景工作（啟動訊息、遷移結果）沒有請求中繼資料，三欄會都是 "-"。這個分支
-// 讓那些訊息短得多，而它壞掉時的症狀是「每一條啟動訊息看起來都像一個有來源
-// IP 與使用者的 HTTP 請求」—— 那會讓「這條記錄從哪來的」變得無法回答。
+// 背景工作（啟動訊息、遷移結果）沒有請求中繼資料，三個中繼欄位會被整段省略。
+// 它壞掉時的症狀是「每一條啟動訊息看起來都像一個有來源 IP 與使用者的 HTTP 請求」
+// —— 那會讓「這條記錄從哪來的」變得無法回答。
+//
+// caller 的說明：這個測試的呼叫點就在 logger 套件內（logger_test.go），依
+// caller 抑制規則（見 loggerPackageDir）本來就不會輸出 caller —— 本支測試
+// 斷言的正是「沒有 caller 欄位」；「業務碼的 caller 會被記錄」由同層
+// logcaller 套件的外部測試負責（那個測試的檔案在別的目錄，才騙不過抑制規則）。
 func TestBackgroundMessagesOmitMetadataPrefix(t *testing.T) {
 	buf := capture(t)
 	Infof("啟動訊息")
 
 	out := buf.String()
-	if strings.Contains(out, "request_id=") || strings.Contains(out, "user_email=") {
-		t.Errorf("背景訊息不該帶中繼前綴:\n%s", out)
+	if strings.Contains(out, "request_id=") || strings.Contains(out, "user_email=") || strings.Contains(out, "ip=") {
+		t.Errorf("背景訊息不該帶中繼欄位:\n%s", out)
 	}
 	if !strings.Contains(out, "啟動訊息") {
 		t.Errorf("訊息本身不見了:\n%s", out)
 	}
-	if !strings.Contains(out, "[INFO]") {
+	if !strings.Contains(out, "level=INFO") {
 		t.Errorf("等級標記不見了:\n%s", out)
+	}
+	if strings.Contains(out, "caller=") {
+		t.Errorf("呼叫點在 logger 套件內時不該出現 caller 欄位:\n%s", out)
 	}
 }
 
 // TestRequestMessagesCarryMetadata 守住 HTTP 存取記錄帶著中繼欄位。
+//
+// 欄位值一律帶引號（strconv.Quote），因此斷言包含引號在內 —— 這同時是
+// 「text 輸出欄位邊界不會被值混淆」這個性質的可執行證據。
 func TestRequestMessagesCarryMetadata(t *testing.T) {
 	buf := capture(t)
 
@@ -356,14 +368,18 @@ func TestRequestMessagesCarryMetadata(t *testing.T) {
 
 	out := buf.String()
 	for _, want := range []string{
-		"request_id=abc123",
-		"ip=203.0.113.7",
-		"user_email=someone@example.com",
-		"處理貼文列表",
+		"request_id=\"abc123\"",
+		"ip=\"203.0.113.7\"",
+		"user_email=\"someone@example.com\"",
+		"msg=\"處理貼文列表\"",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("輸出缺少 %q:\n%s", want, out)
 		}
+	}
+	// msg 是最後一個欄位：行的結尾必須就是訊息。
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), `msg="處理貼文列表"`) {
+		t.Errorf("msg 不是最後一個欄位:\n%s", out)
 	}
 }
 
@@ -400,16 +416,83 @@ func TestMetadataFieldsAreSanitized(t *testing.T) {
 	}
 }
 
-// TestSanitizeLogValueKeepsColumnFormUnambiguous 記錄一個刻意不修的限制。
+// TestTextTimeFormatIsRFC3339WithOffset 守住時間格式改版後的兩個性質：
+// 可被 time.Parse(time.RFC3339, …) 解析、且位移反映本機時區。
 //
-// 這支測試的斷言是「目前會產生這種混淆的輸出」。它存在的理由不是要讓這個
-// 行為保持不變，而是要讓**它是有名的**：sanitizeLogValue 的「已知殘餘限制」
-// 說明裡寫著 text 輸出的欄位無法防住值內含 " key=value" 的混淆，而這支測試
-// 是那個說明的可執行證據。
+// 舊格式（2006-01-02 15:04:05.000）把時區丟掉了，症狀是跨主機彙整日誌時
+// 時間序不可信而沒有任何錯誤訊息 —— 這種失效只有測試釘得住。
+func TestTextTimeFormatIsRFC3339WithOffset(t *testing.T) {
+	buf := capture(t)
+
+	before := time.Now()
+	Infof("時間格式檢查")
+	after := time.Now()
+
+	line := strings.TrimSpace(buf.String())
+	const prefix = "time="
+	idx := strings.Index(line, prefix)
+	if idx < 0 {
+		t.Fatalf("輸出沒有 time= 欄位:\n%s", line)
+	}
+	field := line[idx+len(prefix):]
+	if end := strings.IndexByte(field, ' '); end >= 0 {
+		field = field[:end]
+	}
+
+	parsed, err := time.Parse(time.RFC3339, field)
+	if err != nil {
+		t.Fatalf("time=%q 不是 RFC 3339（收集端無法解析）: %v", field, err)
+	}
+	// 位移必須是本機時區的位移，而不是被固定成 UTC 或 +00:00。
+	_, wantOffset := before.Zone()
+	_, gotOffset := parsed.Zone()
+	if wantOffset != gotOffset {
+		t.Errorf("time=%q 的位移 %d 秒不等於本機位移 %d 秒", field, gotOffset, wantOffset)
+	}
+	// 解析回來的時間必須落在呼叫前後的區間內（毫秒精度內）。
+	if parsed.Before(before.Truncate(time.Millisecond)) || parsed.After(after.Add(time.Millisecond)) {
+		t.Errorf("time=%q 不在呼叫前後的時間區間內（%s … %s）", field, before, after)
+	}
+}
+
+// TestAccessLogOmitsCallerAndDuplicateRequestID 守住存取記錄行的兩個形狀。
 //
-// 若將來有人真的去修（例如以引號包住欄位值），這支測試會失敗並要求同時更新
-// 那段說明與所有依賴 text 輸出的 grep 規則 —— 那正是它該做的事。
-func TestSanitizeLogValueKeepsColumnFormUnambiguous(t *testing.T) {
+//  1. caller 省略：存取記錄的呼叫點就在 logger 套件（middleware.go），
+//     那個座標對診斷沒有價值，見 loggerPackageDir 的說明。
+//  2. request_id 不重複：它已經由中繼欄位帶在同一行，舊版在訊息裡又寫一次，
+//     同一行出現兩次同一個 ID，grep 命中數直接翻倍。
+func TestAccessLogOmitsCallerAndDuplicateRequestID(t *testing.T) {
+	buf := capture(t)
+
+	h := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), nil, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/forum/posts", nil))
+
+	id := rec.Header().Get("X-Request-ID")
+	if id == "" {
+		t.Fatal("X-Request-ID 回應標頭沒有被設定")
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "caller=") {
+		t.Errorf("存取記錄不該有 caller 欄位（呼叫點在 logger 套件內）:\n%s", out)
+	}
+	if got := strings.Count(out, id); got != 1 {
+		t.Errorf("request ID 在行內出現 %d 次，want 1（訊息與中繼欄位重複了）:\n%s", got, out)
+	}
+	if !strings.Contains(out, `msg="[HTTP] GET /api/forum/posts HTTP/1.1 status=200 duration_ms=`) {
+		t.Errorf("存取記錄的訊息形狀不對:\n%s", out)
+	}
+}
+// TestSanitizeLogValueFieldsAreQuoted 守住 text 輸出的欄位引號化。
+//
+// 本測試取代了舊的 TestSanitizeLogValueKeepsColumnFormUnambiguous。那時的結論是
+// 「text 輸出無法區分欄位值內的 ' key=value'」並刻意不修；現在每個欄位值都由
+// strconv.Quote 包住，同一行輸出裡 fake_ip 屬於 ip 欄位的值，不再是一個獨立欄位。
+//
+// 這支測試把那個攻擊形狀釘住：它失效時的症狀是「攻擊者可以用一個 X-Forwarded-For
+// 在日誌裡插入一個看起來像系統欄位的 key=value」，而沒有任何錯誤訊息。
+func TestSanitizeLogValueFieldsAreQuoted(t *testing.T) {
 	buf := capture(t)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -417,12 +500,15 @@ func TestSanitizeLogValueKeepsColumnFormUnambiguous(t *testing.T) {
 	InfofContext(r.Context(), "測試")
 
 	out := buf.String()
-	if !strings.Contains(out, "fake_ip=9.9.9.9") {
-		t.Skip("text 輸出的欄位形式已經改成不會被混淆的形狀 —— " +
-			"請更新 sanitizeLogValue 的「已知殘餘限制」說明，並確認沒有 grep 規則依賴舊形狀")
+	// 整個偽造內容必須留在 ip 的引號區段內。
+	if !strings.Contains(out, `ip="1.2.3.4 fake_ip=9.9.9.9"`) {
+		t.Errorf("ip 欄位的值沒有被引號包住，欄位邊界可被偽造:\n%s", out)
 	}
-	t.Log("如預期，text 輸出無法區分欄位值內的 \" key=value\"：" +
-		"這是刻意不修的取捨，理由見 sanitizeLogValue 的說明")
+	// 偽造的欄位不得以獨立的 key=value 形狀出現在行內（引號外）。
+	trimmed := strings.ReplaceAll(out, `ip="1.2.3.4 fake_ip=9.9.9.9"`, "")
+	if strings.Contains(trimmed, "fake_ip=") {
+		t.Errorf("偽造的 fake_ip 以獨立欄位的形狀出現了:\n%s", out)
+	}
 }
 
 // TestJSONFormatEmitsParsableObject 覆蓋 json 輸出格式。
@@ -464,6 +550,11 @@ func TestJSONFormatEmitsParsableObject(t *testing.T) {
 	}
 	if msg, _ := entry["msg"].(string); !strings.Contains(msg, "quoted") {
 		t.Errorf("msg 被過度清洗了，引號內的內容應該保留: %q", msg)
+	}
+	// 時間必須是帶時區位移的 RFC 3339（收集端直接依它建立時間索引）。
+	ts, _ := entry["time"].(string)
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Errorf("time = %q 不是可解析的 RFC 3339（收集端無法索引）: %v", ts, err)
 	}
 }
 
@@ -913,8 +1004,8 @@ func TestLoggingMiddlewareAnonymousWhenNoResolver(t *testing.T) {
 
 // TestLoggingMiddlewareSeverityByStatus 守住存取記錄的分級規則。
 //
-// 分級是維運的第一個過濾條件（只看 ERROR 找真正的問題），而它壞掉時的症狀是
-// 「5xx 沒被記成 ERROR」—— 也就是出事時最該看到的那些記錄被埋在 INFO 裡。
+// 分級是維運的第一個過濾條件（grep level=ERROR 找真正的問題），而它壞掉時的
+// 症狀是「5xx 沒被記成 ERROR」—— 也就是出事時最該看到的那些記錄埋在 INFO 裡。
 func TestLoggingMiddlewareSeverityByStatus(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -922,12 +1013,12 @@ func TestLoggingMiddlewareSeverityByStatus(t *testing.T) {
 		wantLevels []string
 		notLevels  []string
 	}{
-		{name: "2xx → INFO", status: http.StatusOK, wantLevels: []string{"[INFO]"}, notLevels: []string{"[WARN]", "[ERROR]"}},
-		{name: "3xx → INFO", status: http.StatusFound, wantLevels: []string{"[INFO]"}, notLevels: []string{"[WARN]", "[ERROR]"}},
-		{name: "4xx → WARN", status: http.StatusNotFound, wantLevels: []string{"[WARN]"}, notLevels: []string{"[INFO]", "[ERROR]"}},
-		{name: "5xx → ERROR", status: http.StatusInternalServerError, wantLevels: []string{"[ERROR]"}, notLevels: []string{"[INFO]", "[WARN]"}},
+		{name: "2xx → INFO", status: http.StatusOK, wantLevels: []string{"level=INFO"}, notLevels: []string{"level=WARN", "level=ERROR"}},
+		{name: "3xx → INFO", status: http.StatusFound, wantLevels: []string{"level=INFO"}, notLevels: []string{"level=WARN", "level=ERROR"}},
+		{name: "4xx → WARN", status: http.StatusNotFound, wantLevels: []string{"level=WARN"}, notLevels: []string{"level=INFO", "level=ERROR"}},
+		{name: "5xx → ERROR", status: http.StatusInternalServerError, wantLevels: []string{"level=ERROR"}, notLevels: []string{"level=INFO", "level=WARN"}},
 		// 5xx 的判定優先於 4xx 的分支：兩者並列而非串接。
-		{name: "599 → ERROR（不是 WARN）", status: 599, wantLevels: []string{"[ERROR]"}, notLevels: []string{"[WARN]"}},
+		{name: "599 → ERROR（不是 WARN）", status: 599, wantLevels: []string{"level=ERROR"}, notLevels: []string{"level=WARN"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
