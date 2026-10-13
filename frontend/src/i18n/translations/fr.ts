@@ -215,6 +215,9 @@ export const fr: Record<MessageKey, string> = {
     'Échec de l\'enregistrement du commentaire. Veuillez réessayer plus tard.',
   'comment.deleteFailed':
     'Échec de la suppression du commentaire. Veuillez réessayer plus tard.',
+  'comment.reply': 'Répondre',
+  'comment.replyPlaceholder': 'Répondre à {author}…',
+  'comment.pending': 'Une autre action sur un commentaire est en cours, veuillez patienter.',
   'report.reasonPlaceholder':
     'Veuillez saisir le motif du signalement (maximum 500 caractères)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const fr: Record<MessageKey, string> = {
     'Modifier le commentaire #{id}',
   'posts.deleteCommentTitle':
     'Supprimer le commentaire #{id}',
-  'posts.deleteCommentMessage':
-    'La suppression est irréversible. Voulez-vous continuer ?',
+  'posts.deleteCommentMessage': 'La suppression est irréversible, et toutes les réponses sous ce commentaire seront également supprimées. Voulez-vous continuer ?',
   'posts.listTitle':
     'Liste des articles',
   'posts.clearSearch':

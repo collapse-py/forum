@@ -159,6 +159,9 @@ export const zhCN: Record<MessageKey, string> = {
   'comment.editContentLabel': '评论内容',
   'comment.editFailed': '评论保存失败，请稍后再试。',
   'comment.deleteFailed': '评论删除失败，请稍后再试。',
+  'comment.reply': '回复',
+  'comment.replyPlaceholder': '回复 {author}…',
+  'comment.pending': '另一条评论操作正在进行中，请稍候。',
 
   /* ==========================================================================
      report
@@ -823,7 +826,7 @@ export const zhCN: Record<MessageKey, string> = {
   'posts.add': '新增',
   'posts.editCommentTitle': '编辑评论 #{id}',
   'posts.deleteCommentTitle': '删除评论 #{id}',
-  'posts.deleteCommentMessage': '删除后无法恢复。要继续吗？',
+  'posts.deleteCommentMessage': '删除后无法恢复，该留言下的所有回复也会一并移除。要继续吗？',
   'posts.listTitle': '帖子列表',
   'posts.clearSearch': '清除搜索',
   'posts.searchLabel': '关键词搜索',

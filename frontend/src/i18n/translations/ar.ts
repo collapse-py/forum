@@ -215,6 +215,9 @@ export const ar: Record<MessageKey, string> = {
     'فشل حفظ التعليق، حاول مرة أخرى لاحقًا.',
   'comment.deleteFailed':
     'فشل حذف التعليق، حاول مرة أخرى لاحقًا.',
+  'comment.reply': 'رد',
+  'comment.replyPlaceholder': 'الرد على {author}…',
+  'comment.pending': 'تتم متابعة إجراء آخر على التعليق، يُرجى الانتظار.',
   'report.reasonPlaceholder':
     'أدخل سبب البلاغ (الحد الأقصى 500 حرف)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const ar: Record<MessageKey, string> = {
     'تعديل التعليق #{id}',
   'posts.deleteCommentTitle':
     'حذف التعليق #{id}',
-  'posts.deleteCommentMessage':
-    'بعد الحذف لن تتمكن من استردادها. المتابعة؟',
+  'posts.deleteCommentMessage': 'بعد الحذف لن تتمكن من استردادها، كما ستُحذف كل الردود عليها. المتابعة؟',
   'posts.listTitle':
     'قائمة المنشورات',
   'posts.clearSearch':

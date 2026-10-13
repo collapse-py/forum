@@ -110,6 +110,10 @@ export interface AdminUserContent {
 export interface AdminComment {
   id: number;
   postId?: number;
+  /** 所回覆的留言 id；0 或省略代表第一層。 */
+  parentId?: number;
+  /** 層級 1..3。後臺用它把回覆排進樹裡。 */
+  depth?: number;
   content: string;
   authorEmail?: string;
   createdAt?: string;
@@ -699,6 +703,22 @@ export interface ForumComment {
   createdAt?: string;
   /** 作者是否編輯過這一則。省略未編輯的。 */
   edited?: boolean;
+  /**
+   * 所回覆的留言 id。省略或 0 代表直接貼在文章下的第一層留言。
+   *
+   * 後端對第一層省略這個欄位（omitempty），因此「讀不到」與「0」同義 ——
+   * 組樹時兩者都當成根節點。
+   */
+  parentId?: number;
+  /**
+   * 層級，1..3（見後端 forumCommentMaxDepth）。第一層留言也一定是 1，
+   * 因此這個欄位一定存在，不需要防禦 undefined。
+   *
+   * 它的用途只有一個：決定這一則還能不能被回覆（第三層不行）。組樹的縮排
+   * 用的是樹裡的實際位置而不是這個數字，兩者在正常資料下相同，但樹的位置
+   * 在「父留言還沒載入」時才是可信的那一個。
+   */
+  depth?: number;
   [key: string]: unknown;
 }
 

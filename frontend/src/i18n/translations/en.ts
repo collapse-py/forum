@@ -124,6 +124,9 @@ export const en: Record<MessageKey, string> = {
   'comment.editContentLabel': 'Comment content',
   'comment.editFailed': 'Couldn\'t save the comment, please try again.',
   'comment.deleteFailed': 'Couldn\'t delete the comment, please try again.',
+  'comment.reply': 'Reply',
+  'comment.replyPlaceholder': 'Reply to {author}…',
+  'comment.pending': 'Another comment action is in progress, please wait.',
 
   'report.reasonPlaceholder': 'Tell us why (up to 500 characters)',
   'report.note': 'Your report goes to the site admins',
@@ -763,7 +766,7 @@ export const en: Record<MessageKey, string> = {
   'posts.add': 'Add',
   'posts.editCommentTitle': 'Edit comment #{id}',
   'posts.deleteCommentTitle': 'Delete comment #{id}',
-  'posts.deleteCommentMessage': 'This can\'t be undone. Continue?',
+  'posts.deleteCommentMessage': 'This can\'t be undone, and every reply under this comment goes with it. Continue?',
   'posts.listTitle': 'Posts',
   'posts.clearSearch': 'Clear search',
   'posts.searchLabel': 'Keyword search',

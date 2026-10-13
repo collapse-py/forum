@@ -215,6 +215,9 @@ export const vi: Record<MessageKey, string> = {
     'Lưu bình luận không thành công, vui lòng thử lại sau.',
   'comment.deleteFailed':
     'Xóa bình luận không thành công, vui lòng thử lại sau.',
+  'comment.reply': 'Trả lời',
+  'comment.replyPlaceholder': 'Trả lời {author}…',
+  'comment.pending': 'Một thao tác bình luận khác đang diễn ra, vui lòng đợi.',
   'report.reasonPlaceholder':
     'Nhập lý do báo cáo (đa 500 ký tự)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const vi: Record<MessageKey, string> = {
     'Sửa bình luận #{id}',
   'posts.deleteCommentTitle':
     'Xóa bình luận #{id}',
-  'posts.deleteCommentMessage':
-    'Sau khi xóa, không thể khôi phục. Bạn có chắc muốn tiếp tục không?',
+  'posts.deleteCommentMessage': 'Sau khi xóa, không thể khôi phục, và mọi trả lời bên dưới bình luận này cũng sẽ bị xóa. Bạn có chắc muốn tiếp tục không?',
   'posts.listTitle':
     'Danh sách bài viết',
   'posts.clearSearch':

@@ -186,6 +186,21 @@
         min-width: 0;
       }
 
+      /* 回覆的子清單：縮一階並用左線標出「這些是那一則底下的回覆」。inline-start
+         跟著 dir 鏡射，因此 RTL 語系（ar）的線會落在另一側。
+         後台的「留言」欄很窄（見 .thread__item .row-actions 的說明），因此縮排
+         只用 8px —— 三層最多吃掉 16px，不會把內容擠成一行一字。 */
+      .thread__replies {
+        display: grid;
+        gap: 6px;
+        flex-basis: 100%;
+        margin: 6px 0 0;
+        padding: 0;
+        padding-inline-start: 8px;
+        border-inline-start: 1px solid var(--line);
+        list-style: none;
+      }
+
       .thread__item strong {
         font-size: 11px;
       }

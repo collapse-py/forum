@@ -948,8 +948,11 @@ func (s *Server) handleAdminUserContent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// ---- 查二：此使用者的留言 ----
+	// parent_id 與 depth 一起取回（MigrateMySQL 第 31 步）：有了層級之後，一則留言
+	// 可能是回覆而不是第一層，而 Depth=0 會對前端說謊（據此判斷「這是第幾層」會
+	// 得到 0）。排序不變（由新到舊）：這個清單是「這個人最近說了什麼」。
 	commentRows, err := s.db.QueryContext(r.Context(), `
-		SELECT id, post_id, author_email, content, created_at
+		SELECT id, post_id, parent_id, depth, author_email, content, created_at
 		FROM forum_post_comments WHERE author_email = ?
 		ORDER BY created_at DESC, id DESC`, email)
 	if err != nil {
@@ -960,7 +963,8 @@ func (s *Server) handleAdminUserContent(w http.ResponseWriter, r *http.Request, 
 	defer commentRows.Close()
 	for commentRows.Next() {
 		var comment adminForumComment
-		if err := commentRows.Scan(&comment.ID, &comment.PostID, &comment.AuthorEmail, &comment.Content, &comment.CreatedAt); err != nil {
+		if err := commentRows.Scan(&comment.ID, &comment.PostID, &comment.ParentID, &comment.Depth,
+			&comment.AuthorEmail, &comment.Content, &comment.CreatedAt); err != nil {
 			internalError(w, "unable to read user comments")
 			return
 		}

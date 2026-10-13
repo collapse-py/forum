@@ -215,6 +215,9 @@ export const ptBR: Record<MessageKey, string> = {
     'Falha ao salvar o comentário. Tente novamente em instantes.',
   'comment.deleteFailed':
     'Falha ao excluir o comentário. Tente novamente em instantes.',
+  'comment.reply': 'Responder',
+  'comment.replyPlaceholder': 'Responder a {author}…',
+  'comment.pending': 'Outra ação de comentário está em andamento, aguarde um instante.',
   'report.reasonPlaceholder':
     'Insira o motivo da denúncia (no máximo 500 caracteres)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const ptBR: Record<MessageKey, string> = {
     'Editar comentário #{id}',
   'posts.deleteCommentTitle':
     'Excluir comentário #{id}',
-  'posts.deleteCommentMessage':
-    'A exclusão é irreversível. Deseja continuar?',
+  'posts.deleteCommentMessage': 'A exclusão é irreversível, e todas as respostas a este comentário também serão excluídas. Deseja continuar?',
   'posts.listTitle':
     'Lista de publicações',
   'posts.clearSearch':

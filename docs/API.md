@@ -31,9 +31,9 @@
 | GET | `/api/forum/posts/{id}` | 單篇貼文（永久連結頁；匿名可讀，找不到回 404） |
 | PUT | `/api/forum/posts/{id}` | 編輯自己的貼文本文（**只有 `content`**，見 [已知問題](KNOWN_ISSUES.md)） |
 | DELETE | `/api/forum/posts/{id}` | 軟刪除自己的貼文（`deleted_at` 寫入時間，資料保留） |
-| GET | `/api/forum/posts/{id}/comments` | 留言列表（公開） |
-| POST | `/api/forum/posts/{id}/comments` | 建立留言 |
-| PUT / DELETE | `/api/forum/posts/{id}/comments/{cid}` | 編輯／刪除自己的留言 |
+| GET | `/api/forum/posts/{id}/comments` | 留言列表（公開；含回覆，最多三層） |
+| POST | `/api/forum/posts/{id}/comments` | 建立留言；body 可帶 `parentId` 回覆某一則留言 |
+| PUT / DELETE | `/api/forum/posts/{id}/comments/{cid}` | 編輯／刪除自己的留言（刪除連同它的回覆子樹；回應帶 `removed`） |
 | POST | `/api/forum/posts/{id}/like` | 按讚 |
 | POST | `/api/forum/posts/{id}/report` | 檢舉貼文 |
 | POST | `/api/forum/posts/{id}/comments/{cid}/report` | 檢舉留言 |
@@ -116,3 +116,19 @@
 | 搜尋引擎呢？ | 刪除時移除 ES 文件（`unindexForumPost`）；全量重建也跳過已刪除的貼文。若移除失敗而留下幽靈文件，搜尋端會再用 MySQL 的可見性把它從結果與筆數中挑掉（必要時向後補齊該頁），因此回應宣稱的筆數不會多於畫面上看得到的。 |
 | 可以救回來嗎？ | 目前沒有恢復入口（API 或介面都沒有）。要救回只能對 `forum_posts` 下 `UPDATE ... SET deleted_at = NULL`，見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)。 |
 | 資料什麼時候真正消失？ | 目前不會。軟刪除把「回收」從 handler 移出去，需要另外設計清理機制（見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。 |
+
+---
+
+## 留言的層級（回覆）
+
+留言可以是另一則留言的回覆，**最多三層**：貼文 → 留言（第 1 層）→ 回覆（第 2 層）→ 回覆的回覆（第 3 層）。第 3 層不能再被回覆，後端回 400（`回覆已達最深層級`）。
+
+| 問題 | 答案 |
+| --- | --- |
+| 怎麼發出一則回覆？ | `POST /api/forum/posts/{id}/comments` 的 body 帶 `parentId`（所回覆的留言 id）。省略或 `0` 代表第一層留言。 |
+| 回覆的對象有條件嗎？ | 必須是**同一篇貼文下**的留言，否則 404（`parent comment not found`）。這讓「回覆了卻在自己的貼文頁面上看不到」不可能發生。 |
+| 列表端有什麼不同？ | `GET /api/forum/posts/{id}/comments` 仍然回**扁平**的一串（沿用 `items`／`hasMore` 分頁），每則多帶 `parentId`（第一層省略）與 `depth`（1..3，一定存在）。組樹由前端負責。 |
+| 刪除一則留言會怎樣？ | 連同它底下的所有回覆一起刪除（使用者與後台的路徑相同）。確認框說的就是這件事。回應帶 `removed`（實際刪掉的筆數），前端的留言數減的是它而不是 1。 |
+| 為什麼刪除要連坐？ | 父留言消失而回覆留下，會出現沒有父留言的孤兒 —— 它會在樹裡漂到第一層，看起來像一句沒有上下文的話。 |
+| 後臺能指定 `parentId` 嗎？ | 不能。後台新增的留言一律是第一層（`POST /api/admin/forum/comments`），但刪除同樣連坐，列表也回 `parentId`／`depth`。 |
+| 留言數怎麼算？ | 回覆計入貼文的 `commentCount`（它是 `forum_post_comments` 的 COUNT，沒有區分層級）。 |

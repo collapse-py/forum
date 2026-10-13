@@ -106,6 +106,9 @@ adminForumComment 是留言的視窗模型，欄位直接對應 forum_post_comme
 
 	ID		留言主鍵
 	PostID		所屬文章 ID（forum_post_comments.post_id）
+	ParentID	所回覆的留言 id；0 代表第一層（語意與 forum_post_comments.parent_id 的 0 相同）
+	Depth		層級 1..3（forumCommentMaxDepth）。後台用它把回覆排進樹裡，
+			而不是讓前端自己數 —— 管理介面與公開頁對「第幾層」必須一致
 	AuthorEmail	留言者信箱原文，同樣只在管理介面顯示
 	Content		留言內文（TEXT）
 	CreatedAt	建立時間
@@ -115,6 +118,8 @@ adminForumComment 是留言的視窗模型，欄位直接對應 forum_post_comme
 type adminForumComment struct {
 	ID          int64     `json:"id"`
 	PostID      int64     `json:"postId"`
+	ParentID    int64     `json:"parentId"`
+	Depth       int       `json:"depth"`
 	AuthorEmail string    `json:"authorEmail"`
 	Content     string    `json:"content"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -1132,8 +1137,11 @@ rows 用 defer 關閉（而非原來在每個錯誤分支手動 Close）：這�
 那邊仍然要記住「外層 rows 未關閉時，內層查詢需要另外借一條連線」這個前提。
 */
 func (s *Server) loadAdminForumComments(ctx context.Context, postID int64, capacity int) ([]adminForumComment, error) {
+	// parent_id 與 depth 一起取回：留言有層級（MigrateMySQL 第 31 步），管理介面
+	// 要把回覆排進樹裡。排序不變（created_at ASC, id ASC）—— 子留言一定晚於父留言，
+	// 因此這個順序同時也是「組樹時父先於子」的順序。
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, post_id, author_email, content, created_at
+		SELECT id, post_id, parent_id, depth, author_email, content, created_at
 		FROM forum_post_comments WHERE post_id = ?
 		ORDER BY created_at ASC, id ASC`, postID)
 	if err != nil {
@@ -1143,7 +1151,8 @@ func (s *Server) loadAdminForumComments(ctx context.Context, postID int64, capac
 	comments := make([]adminForumComment, 0, capacity)
 	for rows.Next() {
 		var comment adminForumComment
-		if err := rows.Scan(&comment.ID, &comment.PostID, &comment.AuthorEmail, &comment.Content, &comment.CreatedAt); err != nil {
+		if err := rows.Scan(&comment.ID, &comment.PostID, &comment.ParentID, &comment.Depth,
+			&comment.AuthorEmail, &comment.Content, &comment.CreatedAt); err != nil {
 			return nil, err
 		}
 		comments = append(comments, comment)
@@ -1463,7 +1472,7 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 		// 而它存在的理由只是硬刪除時代的遺留（那時「文章被刪掉」確實等同「文章
 		// 不存在」，現在這兩件事已經不同了）。
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT c.id, c.post_id, c.author_email, c.content, c.created_at
+			SELECT c.id, c.post_id, c.parent_id, c.depth, c.author_email, c.content, c.created_at
 			FROM forum_post_comments c
 			WHERE c.post_id = ?
 			  AND EXISTS (SELECT 1 FROM forum_posts p
@@ -1478,7 +1487,8 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 		items := make([]adminForumComment, 0)
 		for rows.Next() {
 			var item adminForumComment
-			if err := rows.Scan(&item.ID, &item.PostID, &item.AuthorEmail, &item.Content, &item.CreatedAt); err != nil {
+			if err := rows.Scan(&item.ID, &item.PostID, &item.ParentID, &item.Depth,
+				&item.AuthorEmail, &item.Content, &item.CreatedAt); err != nil {
 				internalError(w, "unable to read forum comments")
 				return
 			}
@@ -1541,6 +1551,10 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 		defer tx.Rollback()
 
 		author := s.sessions.ResolveUser(r)
+		// parent_id / depth 刻意不在欄位清單裡：後台只能新增第一層留言
+		// （ MigrateMySQL 第 31 步的 DEFAULT 讓它們成為 parent_id=0、depth=1）。
+		// 回覆別人的留言是公開頁的行為；後台的用途是管理與代發，讓它可以指定
+		// parentId 只會多一條沒有介面使用的路徑，卻要一起驗證層級上限。
 		result, err := tx.ExecContext(r.Context(), `
 			INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, ?, ?, ?)`,
 			req.PostID, author, req.Content, time.Now())
@@ -1662,7 +1676,11 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 		writeOK(w, map[string]bool{"ok": true})
 	case http.MethodDelete:
 		// 刪除留言不影響其父文章，也沒有任何表以留言為父（forum_reports 只存數字 target_id，
-		// 沒有外鍵），因此單句 DELETE 即完成，不需要先刪子表。
+		// 沒有外鍵），因此不需要先刪其他表。
+		//
+		// 但留言自己的回覆子表是**同一張表**：有了層級之後（MigrateMySQL 第 31 步），
+		// 「刪除一則留言」若不連子孫一起刪，會留下沒有父留言的回覆（孤兒），而它們
+		// 在管理介面與公開頁都還能被讀到。子樹條件見 forumCommentSubtreeJoin。
 		//
 		// 稽核：同 post.delete —— 記下刪除前的作者與內容。
 		tx, err := s.beginAdminTx(r)
@@ -1673,8 +1691,9 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 		defer tx.Rollback()
 
 		var beforeAuthor, beforeContent string
+		var beforePostID int64
 		if err := tx.QueryRowContext(r.Context(),
-			`SELECT author_email, content FROM forum_post_comments WHERE id = ?`, id).Scan(&beforeAuthor, &beforeContent); err != nil {
+			`SELECT author_email, content, post_id FROM forum_post_comments WHERE id = ?`, id).Scan(&beforeAuthor, &beforeContent, &beforePostID); err != nil {
 			if err == sql.ErrNoRows {
 				http.NotFound(w, r)
 				return
@@ -1683,12 +1702,27 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		result, err := tx.ExecContext(r.Context(), `DELETE FROM forum_post_comments WHERE id = ?`, id)
+		// 連同回覆的子樹一起刪（forumCommentSubtreeJoin / …Condition），理由與使用者面
+		// 的 handleForumCommentDelete 相同：父留言消失而回覆留下，會出現沒有人掛鈎的
+		// 孤兒。子樹條件需要 post_id，因此上面先讀出來（稽核本來就要先讀這一列）。
+		//
+		// 這個 root JOIN 沒有作者條件：後台刪的是任何人的留言（檢舉「通過（刪文/刪留言）」
+		// 就是這條路），而子孫也可能不是同一人寫的。
+		//
+		// 稽核只記被指定的那一則：它是「管理員刪除了哪則留言」的紀錄，而「順帶刪了
+		// 幾則回覆」不是這個稽核項要回答的問題（affected 可以是 1 或多筆）。
+		//
+		// SQL 由 forumCommentSubtreeDelete 單一來源組出（與使用者面同一句），
+		// 這個 root JOIN 沒有作者條件、也不檢查母文章是否軟刪除：後台刪的是
+		// 任何人的留言，而被刪留言的貼文可能也已經不在了。
+		affected, err := forumCommentSubtreeDelete(r.Context(), tx, id, beforePostID,
+			`JOIN forum_post_comments root ON root.id = ? AND root.post_id = ?`,
+			id, beforePostID)
 		if err != nil {
 			internalError(w, "unable to delete forum comment")
 			return
 		}
-		if affected, _ := result.RowsAffected(); affected == 0 {
+		if affected == 0 {
 			http.NotFound(w, r)
 			return
 		}
@@ -1702,7 +1736,9 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 			internalError(w, "unable to delete forum comment")
 			return
 		}
-		writeOK(w, map[string]bool{"ok": true})
+		// removed 與使用者面同一種回應：管理介面雖然不顯示它，但「一次刪了幾則」
+		// 是這個端點真正做的事實，讓兩個刪除路徑回同一種形狀。
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "removed": affected})
 	default:
 		// 不可信來源已在前面被 403 擋下；走到這裡代表對方確實是管理員，
 		// 只是用了本路由不接受的方法。

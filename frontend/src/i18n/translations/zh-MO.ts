@@ -215,6 +215,9 @@ export const zhMO: Record<MessageKey, string> = {
     '留言儲存失敗，請稍後再試。',
   'comment.deleteFailed':
     '留言刪除失敗，請稍後再試。',
+  'comment.reply': '回覆',
+  'comment.replyPlaceholder': '回覆 {author}…',
+  'comment.pending': '另一個留言動作正在進行中，請稍候。',
   'report.reasonPlaceholder':
     '請輸入舉報原因（最多 500 字）',
   'report.note':
@@ -1078,8 +1081,7 @@ export const zhMO: Record<MessageKey, string> = {
     '編輯留言 #{id}',
   'posts.deleteCommentTitle':
     '刪除留言 #{id}',
-  'posts.deleteCommentMessage':
-    '刪除後無法復原。要繼續嗎？',
+  'posts.deleteCommentMessage': '刪除後無法復原，該留言底下的所有回覆都會一併移除。要繼續嗎？',
   'posts.listTitle':
     '文章列表',
   'posts.clearSearch':

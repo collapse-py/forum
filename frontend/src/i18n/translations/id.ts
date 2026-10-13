@@ -215,6 +215,9 @@ export const id: Record<MessageKey, string> = {
     'Gagal menyimpan komentar, silakan coba lagi nanti.',
   'comment.deleteFailed':
     'Gagal menghapus komentar, silakan coba lagi nanti.',
+  'comment.reply': 'Balas',
+  'comment.replyPlaceholder': 'Balas {author}…',
+  'comment.pending': 'Tindakan komentar lain sedang berlangsung, mohon tunggu.',
   'report.reasonPlaceholder':
     'Masukkan alasan laporan (maksimal 500 karakter)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const id: Record<MessageKey, string> = {
     'Ubah komentar #{id}',
   'posts.deleteCommentTitle':
     'Hapus komentar #{id}',
-  'posts.deleteCommentMessage':
-    'Penghapusan bersifat permanen. Lanjutkan?',
+  'posts.deleteCommentMessage': 'Penghapusan bersifat permanen, dan semua balasan di bawah komentar ini juga akan dihapus. Lanjutkan?',
   'posts.listTitle':
     'Daftar artikel',
   'posts.clearSearch':

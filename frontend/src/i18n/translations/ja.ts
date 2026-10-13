@@ -158,6 +158,9 @@ export const ja: Record<MessageKey, string> = {
   'comment.editContentLabel': 'コメント内容',
   'comment.editFailed': 'コメントの保存に失敗しました。時間をおいてお試しください。',
   'comment.deleteFailed': 'コメントの削除に失敗しました。時間をおいてお試しください。',
+  'comment.reply': '返信',
+  'comment.replyPlaceholder': '{author} に返信…',
+  'comment.pending': '別のコメント操作が進行中です。しばらくお待ちください。',
 
   /* ==========================================================================
      report
@@ -822,7 +825,7 @@ export const ja: Record<MessageKey, string> = {
   'posts.add': '追加',
   'posts.editCommentTitle': 'コメント #{id} を編集',
   'posts.deleteCommentTitle': 'コメント #{id} を削除',
-  'posts.deleteCommentMessage': '削除すると元に戻せません。続行しますか？',
+  'posts.deleteCommentMessage': '削除すると元に戻せず、このコメントへの返信もすべて削除されます。続行しますか？',
   'posts.listTitle': '投稿一覧',
   'posts.clearSearch': '検索をクリア',
   'posts.searchLabel': 'キーワード検索',

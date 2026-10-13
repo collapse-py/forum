@@ -215,6 +215,9 @@ export const ko: Record<MessageKey, string> = {
     '댓글을 저장하지 못했습니다. 나중에 다시 시도해 주세요.',
   'comment.deleteFailed':
     '댓글을 삭제하지 못했습니다. 나중에 다시 시도해 주세요.',
+  'comment.reply': '답글',
+  'comment.replyPlaceholder': '{author}님에게 답글…',
+  'comment.pending': '다른 댓글 작업이 진행 중입니다. 잠시만 기다려 주세요.',
   'report.reasonPlaceholder':
     '신고 사유 입력(최대 500자)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const ko: Record<MessageKey, string> = {
     '댓글 #{id} 편집',
   'posts.deleteCommentTitle':
     '댓글 #{id} 삭제',
-  'posts.deleteCommentMessage':
-    '삭제하면 되돌릴 수 없습니다. 계속 진행하시겠습니까?',
+  'posts.deleteCommentMessage': '삭제하면 되돌릴 수 없으며, 이 댓글에 달린 모든 답글도 함께 삭제됩니다. 계속 진행하시겠습니까?',
   'posts.listTitle':
     '게시글 목록',
   'posts.clearSearch':

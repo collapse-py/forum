@@ -200,6 +200,10 @@ export const zhTW = {
   'comment.editContentLabel': '留言內容',
   'comment.editFailed': '留言儲存失敗，請稍後再試。',
   'comment.deleteFailed': '留言刪除失敗，請稍後再試。',
+  'comment.reply': '回覆',
+  'comment.replyPlaceholder': '回覆 {author}…',
+  'comment.pending': '另一則留言動作正在進行中，請稍候。',
+
 
   /* ==========================================================================
      report：公開頁的檢舉表單
@@ -1034,7 +1038,7 @@ export const zhTW = {
   'posts.add': '新增',
   'posts.editCommentTitle': '編輯留言 #{id}',
   'posts.deleteCommentTitle': '刪除留言 #{id}',
-  'posts.deleteCommentMessage': '刪除後無法復原。要繼續嗎？',
+  'posts.deleteCommentMessage': '刪除後無法復原，該留言底下的所有回覆也會一併移除。要繼續嗎？',
   'posts.listTitle': '文章列表',
   'posts.clearSearch': '清除搜尋',
   'posts.searchLabel': '關鍵字搜尋',

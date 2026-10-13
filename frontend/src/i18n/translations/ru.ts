@@ -215,6 +215,9 @@ export const ru: Record<MessageKey, string> = {
     'Не удалось сохранить комментарий. Повторите попытку позже.',
   'comment.deleteFailed':
     'Не удалось удалить комментарий. Повторите попытку позже.',
+  'comment.reply': 'Ответить',
+  'comment.replyPlaceholder': 'Ответить {author}…',
+  'comment.pending': 'Выполняется другая операция с комментарием, подождите.',
   'report.reasonPlaceholder':
     'Введите причину жалобы (максимум 500 символов)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const ru: Record<MessageKey, string> = {
     'Изменить комментарий #{id}',
   'posts.deleteCommentTitle':
     'Удалить комментарий #{id}',
-  'posts.deleteCommentMessage':
-    'После удаления восстановить комментарий будет невозможно. Продолжить?',
+  'posts.deleteCommentMessage': 'После удаления восстановить комментарий будет невозможно, и все ответы на него также будут удалены. Продолжить?',
   'posts.listTitle':
     'Список публикаций',
   'posts.clearSearch':

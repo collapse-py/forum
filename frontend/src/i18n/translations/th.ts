@@ -215,6 +215,9 @@ export const th: Record<MessageKey, string> = {
     'บันทึกความคิดเห็นไม่สำเร็จ โปรดลองใหม่ภายหลัง',
   'comment.deleteFailed':
     'ลบความคิดเห็นไม่สำเร็จ โปรดลองใหม่ภายหลัง',
+  'comment.reply': 'ตอบกลับ',
+  'comment.replyPlaceholder': 'ตอบกลับ {author}…',
+  'comment.pending': 'กำลังดำเนินการกับความคิดเห็นอื่นอยู่ โปรดรอสักครู่.',
   'report.reasonPlaceholder':
     'กรุณากรอกเหตุผลรายงาน (สูงสุด 500 ตัวอักษร)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const th: Record<MessageKey, string> = {
     'แก้ไขความเห็น #{id}',
   'posts.deleteCommentTitle':
     'ลบความเห็น #{id}',
-  'posts.deleteCommentMessage':
-    'การลบแล้วย้อนกลับไม่ได้ ต้องการดำเนินการต่อไหม',
+  'posts.deleteCommentMessage': 'การลบแล้วย้อนกลับไม่ได้ และการตอบกลับทั้งหมดใต้ความคิดเห็นนี้จะถูกลบไปด้วย ต้องการดำเนินการต่อไหม',
   'posts.listTitle':
     'รายชื่อโพสต์',
   'posts.clearSearch':

@@ -12,16 +12,18 @@
  * 顯示與隱藏一律用 hidden 或 class。
  */
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { formatDateTime, text } from '../core';
 import { tr, t } from '../i18n';
 import type { ForumComment, ForumPost } from '../types';
 import { FollowButton } from './FollowButton';
+import { MAX_COMMENT_DEPTH } from './useComments';
 import type { CommentsController } from './useComments';
 import type { FollowController } from './useFollow';
 import type { ReportController, ReportTarget } from './useReport';
 import { ForumAvatar } from './ForumAvatar';
+import { buildCommentTree, type CommentNode } from './commentTree';
 
 /** 距離底部多少 px 就觸發「載入更多留言」。 */
 const NEAR_BOTTOM_PX = 80;
@@ -93,6 +95,28 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
    */
   const { loadMore } = comments;
 
+  /*
+   * 留言的樹。
+   *
+   * 兩個陣列分開是有原因的（見 useComments 的 CommentState）：
+   *   - state.items 是後端分頁回傳的，offset 的帳以它為準；
+   *   - state.local 是這個工作階段本地新增的（剛po出去、還沒被任何一頁讀到）。
+   *     它永遠排在 items 後面：新留言的 created_at 必定晚於所有已載入的留言，
+   *     而那正是它在最終列表裡的位置。把兩者混成一個陣列再讓 offset 去數，
+   *     就是 offset 漂移的來源。
+   *
+   * useMemo 的對象是這兩個陣列：組樹是 O(n)，而它只在留言真的變了時才需要重算
+   * （按讚、編輯貼文都會讓這張卡片重繪，但那與留言無關）。少了 memo 的症狀不是
+   * 錯誤，是每次渲染都把整串留言重組一次 —— 25 張卡片 × 每個 render 一次。
+   *
+   * 組樹規則見 buildCommentTree；這裡只負責把「這一篇的留言」交給它。
+   */
+  const allComments = useMemo(
+    () => [...state.items, ...state.local],
+    [state.items, state.local],
+  );
+  const tree = useMemo(() => buildCommentTree(allComments), [allComments]);
+
   const nearBottom = () => {
     const list = listRef.current;
     if (!list) return false;
@@ -107,12 +131,13 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
    * 「還有更多」的訊息就會永遠掛在那裡。
    *
    * 依賴項刻意只放留言狀態：nearBottom() 讀的是 scrollHeight，會強制版面
-   * 計算，25 張卡片就是 25 次，不能每次渲染都做。
+   * 計算，25 張卡片就是 25 次，不能每次渲染都做。state.local 也在依賴裡：
+   * 剛po出的留言會把列表變長，而那正是需要再補一頁的時候。
    */
   useEffect(() => {
     if (!state.open) return;
     if (nearBottom()) loadMore(post.id);
-  }, [state.open, state.loaded, state.loading, state.hasMore, state.items, post.id, loadMore]);
+  }, [state.open, state.loaded, state.loading, state.hasMore, state.items, state.local, post.id, loadMore]);
 
   useEffect(() => {
     if (!menuOpen) return undefined;
@@ -448,27 +473,23 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
         >
           {state.loading && !state.loaded ? <div className="loading">{t('comment.loading')}</div> : null}
           {!state.loaded && state.error ? <div className="comments-empty">{tr(state.error)}</div> : null}
-          {state.loaded && state.items.length === 0 && !state.error ? (
+          {/* 「尚未有人留言」也要把本地剛po的那一則算進去：它不在 items 裡。 */}
+          {state.loaded && allComments.length === 0 && !state.error ? (
             <div className="comments-empty">{t('comment.none')}</div>
           ) : null}
-          {state.items.map((comment) => (
-            <Comment
-              key={comment.id}
-              comment={comment}
+          {tree.map((node) => (
+            <CommentBranch
+              key={node.comment.id}
+              node={node}
+              level={1}
               postId={post.id}
               canInteract={canInteract}
               report={report}
-              /*
-                「是不是我的留言」用 follow.isSelf 判斷，與上面判斷自己的貼文
-                用的是同一個函式 —— 它比對的是後端 publicForumKey(email) 算出來
-                的 authorKey，而這裡的 comment.authorKey 是同一個值。
-                （posts.editable 一類的旗標不存在：公開 API 不會回「這則留言
-                是你的」，因為那等於把「這個金鑰等於我」送到每一個讀取端點。）
-              */
-              isOwn={follow.isSelf(text(comment.authorKey))}
-              pending={state.pendingId === comment.id}
+              follow={follow}
+              pendingId={state.pendingId}
               onUpdate={(commentId, content) => comments.update(post.id, commentId, content)}
               onRemove={(commentId) => comments.remove(post.id, commentId)}
+              onReply={(parentId, content) => comments.reply(post.id, parentId, content)}
               onRequireLogin={onRequireLogin}
             />
           ))}
@@ -508,8 +529,99 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
 }
 
 /* ==========================================================================
-   單則留言
-   ========================================================================== */
+    留言樹
+    ========================================================================== */
+
+interface CommentBranchProps {
+  /** 這一個節點：一則留言與它的回覆。 */
+  node: CommentNode<ForumComment>;
+  /** 這一則的層級，根節點是 1。用來判斷還能不能再回覆一層。 */
+  level: number;
+  /** 檢舉、編輯與刪除留言的端點都在 /api/forum/posts/{postId}/comments/{cid} 之下，因此需要父層的 id。 */
+  postId: number;
+  canInteract: boolean;
+  report: ReportController;
+  follow: FollowController;
+  /** 這篇文章正在進行中的單一留言變更 id；null 代表沒有。 */
+  pendingId: number | null;
+  onUpdate: (commentId: number, content: string) => Promise<boolean>;
+  onRemove: (commentId: number) => void;
+  onReply: (parentId: number, content: string) => Promise<boolean>;
+  onRequireLogin: () => void;
+}
+
+/*
+ * 一則留言 + 它底下的回覆。
+ *
+ * 為什麼遞迴而不是扁平渲染＋縮排 class：層級上限是三層，而遞迴讓「第幾層」由
+ * 巢狀結構本身表達，不需要把 depth 傳進每一則自己去算縮排。回覆的容器
+ * （.comment-replies）因此只需要一套規則，而不是每層一套。
+ *
+ * 每個節點自己帶 key（comment.id）：留言的新增與刪除都發生在子樹裡，React 靠
+ * key 把「同一則」認出來，否則輸入框裡的草稿會在樹重組時跳到別則留言上。
+ */
+function CommentBranch({
+  node,
+  level,
+  postId,
+  canInteract,
+  report,
+  follow,
+  pendingId,
+  onUpdate,
+  onRemove,
+  onReply,
+  onRequireLogin,
+}: CommentBranchProps) {
+  const comment = node.comment;
+  return (
+    <div className="comment-branch">
+      <Comment
+        comment={comment}
+        postId={postId}
+        canInteract={canInteract}
+        report={report}
+        /*
+          「是不是我的留言」用 follow.isSelf 判斷，與判斷自己的貼文用的是同一個
+          函式 —— 它比對的是後端 publicForumKey(email) 算出來的 authorKey，而這裡的
+          comment.authorKey 是同一個值。（posts.editable 一類的旗標不存在：公開 API
+          不會回「這則留言是你的」，因為那等於把「這個金鑰等於我」送到每一個讀取端點。）
+        */
+        isOwn={follow.isSelf(text(comment.authorKey))}
+        pending={pendingId === comment.id}
+        level={level}
+        onUpdate={onUpdate}
+        onRemove={onRemove}
+        onReply={onReply}
+        onRequireLogin={onRequireLogin}
+      />
+      {node.replies.length > 0 ? (
+        <div className="comment-replies">
+          {node.replies.map((reply) => (
+            <CommentBranch
+              key={reply.comment.id}
+              node={reply}
+              level={level + 1}
+              postId={postId}
+              canInteract={canInteract}
+              report={report}
+              follow={follow}
+              pendingId={pendingId}
+              onUpdate={onUpdate}
+              onRemove={onRemove}
+              onReply={onReply}
+              onRequireLogin={onRequireLogin}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ==========================================================================
+    單則留言
+    ========================================================================== */
 
 interface CommentProps {
   comment: ForumComment;
@@ -520,21 +632,42 @@ interface CommentProps {
   /** 「是不是我的留言」由頁面層決定：PostCard 自己沒有帳號資訊。 */
   isOwn: boolean;
   pending: boolean;
+  /** 這一則在樹裡的層級，根節點是 1。 */
+  level: number;
   /** 改掉一則留言；回傳是否成功（見 useComments 的 update 說明）。 */
   onUpdate: (commentId: number, content: string) => Promise<boolean>;
   onRemove: (commentId: number) => void;
+  /** 回覆這一則；回傳是否成功（失敗時保留輸入框）。 */
+  onReply: (parentId: number, content: string) => Promise<boolean>;
   onRequireLogin: () => void;
 }
 
-function Comment({ comment, postId, canInteract, report, isOwn, pending, onUpdate, onRemove, onRequireLogin }: CommentProps) {
+function Comment({ comment, postId, canInteract, report, isOwn, pending, level, onUpdate, onRemove, onReply, onRequireLogin }: CommentProps) {
   const target: ReportTarget = { kind: 'comment', postId, commentId: comment.id };
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [replying, setReplying] = useState(false);
+  const [replyDraft, setReplyDraft] = useState('');
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const replyRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (editing) editRef.current?.focus();
   }, [editing]);
+
+  useEffect(() => {
+    if (replying) replyRef.current?.focus();
+  }, [replying]);
+
+  /*
+   * 還能不能回覆這一則。
+   *
+   * 判據是後端的 depth 而不是樹裡的 level：第三層之後後端會回 400，而 depth 說
+   * 的就是那件事。兩者在正常資料下相同（組樹的層級等於 depth），但 depth 才是
+   * 權威 —— 顯示上多一顆按鈕只會得到一次錯誤訊息，少一顆則沒有任何解釋。
+   * depth 讀不到時退回 level（舊版後端或快取），行為與加這個功能之前一致。
+   */
+  const canReply = (Number(comment.depth) || level) < MAX_COMMENT_DEPTH;
 
   /*
    * 只有真的存成才關掉編輯框（理由與貼文的 saveEditing 相同）：失敗時關掉的話，
@@ -549,6 +682,22 @@ function Comment({ comment, postId, canInteract, report, isOwn, pending, onUpdat
       if (!saved) return;
       setEditing(false);
       setDraft('');
+    });
+  };
+
+  /*
+   * 送出回覆。與編輯同一個契約：只有成功才關掉輸入框（見 useComments.reply）。
+   * pending 在這裡同時是「這一則有另一個變更在進行中」—— 回覆把 pendingId 設成
+   * 父留言的 id（見 useComments），因此送出期間編輯與刪除也會一起停用。
+   */
+  const submitReply = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const content = replyDraft.trim();
+    if (!content || pending) return;
+    void onReply(comment.id, content).then((saved) => {
+      if (!saved) return;
+      setReplying(false);
+      setReplyDraft('');
     });
   };
 
@@ -584,6 +733,20 @@ function Comment({ comment, postId, canInteract, report, isOwn, pending, onUpdat
         <time>{formatDateTime(comment.createdAt)}</time>
         {comment.edited ? <span className="edited-badge">{t('comment.editedBadge')}</span> : null}
         <div className="comment-actions">
+          {/*
+            回覆鈕。第三層不出現（canReply）：讓使用者按一顆必然 400 的按鈕，
+            只會得到一句他無法改變的錯誤訊息。未登入時刻意不 disabled —— 按下去
+            導去登入頁，與檢舉鈕同一個行為（onRequireLogin）。
+          */}
+          {canReply ? (
+            <button
+              className="comment-action-button"
+              type="button"
+              onClick={() => (canInteract ? setReplying(true) : onRequireLogin())}
+            >
+              {t('comment.reply')}
+            </button>
+          ) : null}
           {isOwn ? (
             <button
               className="comment-action-button"
@@ -638,6 +801,39 @@ function Comment({ comment, postId, canInteract, report, isOwn, pending, onUpdat
       ) : (
         <p>{text(comment.content)}</p>
       )}
+      {/*
+        回覆表單。與編輯表單是同一個位置的兩種狀態之一，用同一個 .comment-form
+        版面（方角輸入框、頁尾一列）；插入位置在本文之後、回覆子樹之前，因此
+        視覺上它是「對著這一則說話」。
+      */}
+      {replying ? (
+        <form className="comment-form comment-reply-form" onSubmit={submitReply}>
+          <textarea
+            ref={replyRef}
+            maxLength={2000}
+            required
+            placeholder={t('comment.replyPlaceholder', { author: text(comment.author) })}
+            value={replyDraft}
+            onChange={(event) => setReplyDraft(event.target.value)}
+          />
+          <div className="comment-form-footer">
+            <span className="composer-note">{t('comment.max')}</span>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => {
+                setReplying(false);
+                setReplyDraft('');
+              }}
+            >
+              {t('common.cancel')}
+            </button>
+            <button className="submit-button" type="submit" disabled={pending}>
+              {pending ? t('common.submitting') : t('comment.reply')}
+            </button>
+          </div>
+        </form>
+      ) : null}
       {report.isTarget(target) ? <ReportComposer report={report} /> : null}
     </div>
   );

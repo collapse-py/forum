@@ -215,6 +215,9 @@ export const es: Record<MessageKey, string> = {
     'No se pudo guardar el comentario. Intente de nuevo más tarde.',
   'comment.deleteFailed':
     'No se pudo eliminar el comentario. Intente de nuevo más tarde.',
+  'comment.reply': 'Responder',
+  'comment.replyPlaceholder': 'Responder a {author}…',
+  'comment.pending': 'Hay otra acción de comentario en curso, espera un momento.',
   'report.reasonPlaceholder':
     'Introduzca el motivo de la denuncia (máximo 500 caracteres)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const es: Record<MessageKey, string> = {
     'Editar comentario #{id}',
   'posts.deleteCommentTitle':
     'Eliminar comentario #{id}',
-  'posts.deleteCommentMessage':
-    'Al eliminarlo no se podrá revertir la acción. ¿Continuar?',
+  'posts.deleteCommentMessage': 'Al eliminarlo no se podrá revertir la acción, y todas las respuestas que contiene también se eliminarán. ¿Continuar?',
   'posts.listTitle':
     'Lista de publicaciones',
   'posts.clearSearch':

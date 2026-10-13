@@ -215,6 +215,9 @@ export const hi: Record<MessageKey, string> = {
     'टिप्पणी सहेजी नहीं जा सकी, कृपया बाद में फिर प्रयास करें।',
   'comment.deleteFailed':
     'टिप्पणी हटाई नहीं जा सकी, कृपया बाद में फिर प्रयास करें।',
+  'comment.reply': 'उत्तर दें',
+  'comment.replyPlaceholder': '{author} को उत्तर दें…',
+  'comment.pending': 'एक अन्य टिप्पणी कार्य चल रहा है, कृपया प्रतीक्षा करें.',
   'report.reasonPlaceholder':
     'रिपोर्ट का कारण लिखें (अधिकतम 500 अक्षर)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const hi: Record<MessageKey, string> = {
     'टिप्पणी #{id} संपादित करें',
   'posts.deleteCommentTitle':
     'टिप्पणी #{id} हटाएँ',
-  'posts.deleteCommentMessage':
-    'हटाने के बाद इसे पुनर्प्राप्त नहीं किया जा सकता। क्या जारी रखें?',
+  'posts.deleteCommentMessage': 'हटाने के बाद इसे पुनर्प्राप्त नहीं किया जा सकता, और इस टिप्पणी के नीचे के सभी उत्तर भी हट जाएँगे। क्या जारी रखें?',
   'posts.listTitle':
     'पोस्ट सूची',
   'posts.clearSearch':

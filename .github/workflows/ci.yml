@@ -242,7 +242,7 @@ coverage-floor:
         run: go test ./...
 
   migrations:
-    name: migrations (real MySQL, idempotency / restart / upgrade)
+    name: migrations (real MySQL: idempotency / restart / upgrade / comment subtree)
     runs-on: ubuntu-latest
     needs: backend
     defaults:
@@ -276,12 +276,22 @@ coverage-floor:
           check-latest: true
 
       # go-sqlmock 驗證不了 DDL 真的能執行，miniredis 對 MySQL 沒有對應物 ——
-      # 而這正是本 job 存在的理由。測試自己會 CREATE / DROP 一個拋棄式的資料庫，
+      # 而這正是本 job 存在的理由。測試自己會 CREATE / DROP 一個拋棄式資料庫，
       # 因此連線字串只需要指向伺服器。
       - name: 遷移測試
         env:
           FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
         run: go test ./forum/data/... -v -timeout 10m
+
+      # 留言子樹刪除（forumCommentSubtreeDelete）：四張 forum_post_comments 別名的
+      # 多表 DELETE，而它的失效模式是「每一次留言刪除都 500」。單元測試只能斷言
+      # SQL 字串的形狀，因此這個 job 也執行那一組需要真實 MySQL 的測試
+      #（comment_reply_mysql_test.go，-run MySQL 選得到）。沒有 DSN 時它們全部
+      # skip，所以一般開發者的 go test ./... 與 backend job 都不受影響。
+      - name: 留言子樹刪除（真實 MySQL）
+        env:
+          FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
+        run: go test ./forum/httpapi/... -run MySQL -v -timeout 10m
 
   secrets:
     name: secrets (config.conf 不得進版控)

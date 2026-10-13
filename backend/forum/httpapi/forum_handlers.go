@@ -179,6 +179,12 @@ type forumPost struct {
 //	Content   留言本文，已 TrimSpace 且限制在 2000 個 rune 以內。
 //	CreatedAt 對應 forum_post_comments.created_at；列表以它遞增排序。
 //	Edited    作者是否曾經編輯過這一則（語意與 forumPost.Edited 相同）。
+//	ParentID  所回覆的留言 id；0 代表直接貼在文章下的第一層（語意與
+//	          forum_post_comments.parent_id 的 0 相同）。省略 0 而不是讓每一個
+//	          第一層留言都帶一個 parentId:0 —— 那會是多數列。
+//	Depth     層級，1..forumCommentMaxDepth（見該常數）。刻意一定送出而不是省略：
+//	          前端要靠它決定「這一則還能不能被回覆」，而「省略」與「第一層」在
+//	          這裡無法區分 —— 第一層正是那個不出現的值。
 type forumComment struct {
 	ID           int64    `json:"id"`
 	Author       string   `json:"author"`
@@ -187,14 +193,29 @@ type forumComment struct {
 	Content      string   `json:"content"`
 	CreatedAt    time.Time `json:"createdAt"`
 	Edited       bool     `json:"edited,omitempty"`
+	ParentID     int64    `json:"parentId,omitempty"`
+	Depth        int      `json:"depth"`
 }
 
-// createForumCommentRequest 是 POST /api/forum/posts/{id}/comments 的請求主體。
-// 只有 Content 欄位；留言所屬文章由路徑決定，不接受前端指定。
+// forumCommentMaxDepth 是留言的層級上限（第一層留言本身算第 1 層）。
 //
-//	Content 去除前後空白後必須為 1 至 2000 個 rune，驗證規則在 handler 內。
+// 三層的結構是：貼文 → 留言（1）→ 回覆留言（2）→ 回覆回覆（3）。第三層不能再被
+// 回覆，因此這個數字同時就是「這個站允許的討論深度」。
+//
+// 它與 schema 的關係只有一條：forum_post_comments.depth 由應用層寫入（父留言的
+// depth + 1），沒有 CHECK 約束，唯一的執行點是 handleForumComments 的 POST 分支。
+// 把上限放在常數而不是讓 SQL、handler 與介面各寫一個 3，是因為「層級上限改成四
+// 層」這種決定應該只需要改一個地方。
+const forumCommentMaxDepth = 3
+
+// createForumCommentRequest 是 POST /api/forum/posts/{id}/comments 的請求主體。
+//
+//	Content  去除前後空白後必須為 1 至 2000 個 rune，驗證規則在 handler 內。
+//	ParentID 所回覆的留言 id；0 或省略代表第一層留言。非 0 時該留言必須屬於同一篇
+//	          貼文，且層級必須還沒到上限（見 handler 的 404 / 400 分支）。
 type createForumCommentRequest struct {
-	Content string `json:"content"`
+	Content  string `json:"content"`
+	ParentID int64  `json:"parentId"`
 }
 
 // updateForumCommentRequest 是 PUT /api/forum/posts/{id}/comments/{cid} 的請求主體。
@@ -963,6 +984,41 @@ func (s *Server) forumImageURL(imageURL, token string) string {
 	return publicBase.String()
 }
 
+// forumParentDepthAllowsReply 回覆一則第 parentDepth 層的留言時，新的回覆會不會
+// 還在層級上限內。
+//
+// 抽成函式而不是 inline 在 handler 裡：這是整個層級功能唯一不能出錯的判斷，而它
+// 壞掉的症狀不是錯誤 —— 討論串只是安靜地長到沒有人規定過的第 4 層，而前端那時
+// 已經不再渲染回覆鈕（它只看 depth），於是那一則沒有任何辦法被再回覆，也沒有
+// 任何訊息解釋為什麼。一條有名字、有測試的規則比一個寫在 if 裡的常數更容易在
+// 層級上限改動時被想起來。
+func forumParentDepthAllowsReply(parentDepth int) bool {
+	return parentDepth < forumCommentMaxDepth
+}
+
+// forumParentCommentDepth 回傳「某一篇貼文下某一則留言的層級」。
+//
+// 只有在「要回覆它」的時候才需要這個數字（見 handleForumComments 的 POST 分支：
+// 新留言的 depth = 父留言的 depth + 1，而父留言已經在最深層時不能再回）。
+//
+// post_id 放進條件而不是只查 id：留言的層級只在同一篇貼文內有意義，而少了這個
+// 條件，任何人只要知道別篇的任何留言 id 就能把自己的回覆掛到那則留言底下 ——
+// 那一列接著從自己的貼文頁面上消失，而被掛鈎的那則留言在別篇裡多出一個回覆。
+// 少了這一條的症狀不是錯誤，是「回覆了卻看不到」。
+//
+// 回傳 sql.ErrNoRows 代表「這篇貼文下沒有這則留言」（不存在、或屬於別篇），
+// 由呼叫端決定那是 404。其他錯誤原樣回傳。
+//
+// 不需要軟刪除檢查：forum_post_comments 沒有 deleted_at（刪除是真刪除，見
+// handleForumCommentDelete），因此「存在」就只是「那一列在」。
+func (s *Server) forumParentCommentDepth(ctx context.Context, postID, parentID int64) (int, error) {
+	var depth int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT depth FROM forum_post_comments WHERE id = ? AND post_id = ?`,
+		parentID, postID).Scan(&depth)
+	return depth, err
+}
+
 // handleForumComments 同時處理留言列表（GET）與新增留言（POST）。
 //
 // 兩者合併在同一個 handler 的原因：它們共用同一段路徑解析（取出 post_id），
@@ -1023,8 +1079,14 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		// 是由上而下。idx_forum_post_comments_post_id 讓 WHERE + ORDER BY 走索引。
 		// id 作為次要排序鍵是必要的：created_at 是 DATETIME（秒級精度），
 		// 同秒寫入的多筆留言若沒有 id 打破平手，分頁結果會不穩定而漏讀或重複。
+		//
+		// parent_id 與 depth 一起取回：層級由前端組樹（同一篇的留言一次全部載入，
+		// 子留言的 created_at 必定晚於父留言，因此組樹時父留言一定在陣列裡），
+		// 這裡刻意不組裝樹狀結構 —— 「一次取回整篇」與「組樹」是兩件事，而分頁
+		// 語意（limit/offset/hasMore）在第一種下才是單純的一串列。
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT fc.id, fc.author_email, pr.avatar_url AS author_avatar, fc.content, fc.created_at, fc.updated_at
+			SELECT fc.id, fc.author_email, pr.avatar_url AS author_avatar, fc.content, fc.created_at, fc.updated_at,
+			       fc.parent_id, fc.depth
 			FROM forum_post_comments fc
 			LEFT JOIN forum_profiles pr ON pr.author_email = fc.author_email
 			WHERE fc.post_id = ?
@@ -1062,7 +1124,8 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 			var updatedAt sql.NullTime
 			// author_avatar 的 NULL 來自 LEFT JOIN（這位作者沒有個人資料列）。
 			var authorAvatar sql.NullString
-			if err := rows.Scan(&comment.ID, &comment.Author, &authorAvatar, &comment.Content, &comment.CreatedAt, &updatedAt); err != nil {
+			if err := rows.Scan(&comment.ID, &comment.Author, &authorAvatar, &comment.Content, &comment.CreatedAt, &updatedAt,
+				&comment.ParentID, &comment.Depth); err != nil {
 				logger.ErrorfContext(r.Context(), "[FORUM] 讀取留言失敗 post_id=%d: %v", postID, err)
 				internalError(w, "unable to read comments")
 				return
@@ -1138,6 +1201,13 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "留言最多 2000 字")
 		return
 	}
+	// parentId 的形狀檢查排在所有資料庫查詢之前：它不需要任何庫存狀態，而
+	// 「-1 是一個看起來像 id 的整數」正是它會被打進 SQL 的原因。放進去的話
+	// 只會找不到父留言，然後使用者看到一句與他做的事無關的 404。
+	if req.ParentID < 0 {
+		badRequest(w, "invalid parent comment")
+		return
+	}
 
 	// Schema 沒有外鍵，因此「文章是否存在」必須自行檢查，否則會留下孤兒留言。
 	// deleted_at IS NULL 讓「對一篇已刪除的貼文留言」得到 404：它與貼文不
@@ -1155,15 +1225,50 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	/*
+	 * 回覆的父留言：存在、屬於同一篇、且還沒到層級上限。
+	 *
+	 * 兩個資料庫檢查分開回應而不是合成一個 400，因為它們對使用者的意義不同：
+	 *   - 父留言不存在（或屬於別篇）→ 404。使用者點到的是一個過期的介面狀態
+	 *     （例如在兩個分頁之間那則被刪了），重新載入就好。
+	 *   - 父留言已經在第三層 → 400 並附上理由。這是產品規則，重試也不會成功。
+	 *
+	 * depth 由這裡讀出來、加一再寫入，而不是讓資料庫自己算：層級上限是業務規則
+	 * （forumCommentMaxDepth），而它需要在「擋下」與「寫入」之間被讀一次。
+	 *
+	 * 檢查與寫入之間沒有交易，父留言可能在此時被刪掉而留下一個看不到的回覆 ——
+	 * 與管理後台新增留言的孤兒窗口是同一個判斷（見 forum_admin_handlers.go 的
+	 * POST 分支）：窗口是微秒級、後果是「一則不出現在任何樹裡的回覆」，而包成
+	 * 交易要付出的是每次留言都多兩次往返。
+	 */
+	parentDepth := 0
+	if req.ParentID > 0 {
+		parentDepth, err = s.forumParentCommentDepth(r.Context(), postID, req.ParentID)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "parent comment not found")
+			return
+		}
+		if err != nil {
+			logger.ErrorfContext(r.Context(), "[FORUM] 讀取父留言失敗 post_id=%d parent_id=%d: %v", postID, req.ParentID, err)
+			internalError(w, "unable to load parent comment")
+			return
+		}
+		if !forumParentDepthAllowsReply(parentDepth) {
+			badRequest(w, "回覆已達最深層級")
+			return
+		}
+	}
+	depth := parentDepth + 1
+
 	// 時間只取一次，插入與回應共用同一值，確保前端拿到的 createdAt
 	// 與資料庫中的值完全一致（否則兩次 time.Now() 可能跨越一秒而對不上）。
 	createdAt := time.Now()
 	// 單一 INSERT 本身即具原子性，不需要交易：包起來只會多出 BEGIN/COMMIT 兩次往返。
 	result, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO forum_post_comments (post_id, parent_id, depth, author_email, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		// 再取一次 session 中繼資料作為作者；POST 已通過中介層的登入與停權檢查，
 		// 因此不會是空字串。
-		postID, s.sessions.ResolveUser(r), req.Content, createdAt)
+		postID, req.ParentID, depth, s.sessions.ResolveUser(r), req.Content, createdAt)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 新增留言失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to create comment")
@@ -1186,12 +1291,15 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 直接回傳建立好的物件，前端可插入列表頭端而不必重新載入整頁。
+	// ParentID 與 Depth 一起回：前端要把這一則掛進它回覆的那個位置，而「它是
+	// 第幾層」決定了它下面還能不能再展開回覆框。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"ok": true,
 		"item": forumComment{
 			ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author),
 			AuthorAvatar: authorAvatarURL,
 			Content:      req.Content, CreatedAt: createdAt,
+			ParentID:     req.ParentID, Depth: depth,
 		},
 	})
 }
@@ -1447,15 +1555,87 @@ func (s *Server) handleForumCommentUpdate(w http.ResponseWriter, r *http.Request
 	writeOK(w, map[string]bool{"ok": true})
 }
 
+// forumCommentSubtreeJoin 與 forumCommentSubtreeCondition 是「這一則留言及其所有
+// 回覆」的 SQL 骨幹，兩個常數必須成對使用。
+//
+// 為什麼刪除要是整個子樹而不是只有那一列：留言有了層級之後，「父留言消失、回覆
+// 留在原地」會出現兩種壞結果 —— 回覆變成沒有人掛鈎的孤兒（前端組樹時只能放回
+// 最上層，於是一句「我同意三樓」漂在第一層），以及它繼承的 depth 讓它看起來還
+// 嵌在一個不存在的地方。連子樹一起刪讓「每一則可見的回覆都看得見它的父留言」
+// 這個不變式成立，而前端組樹正是靠它。
+//
+// 為什麼用多表 DELETE 的自我 JOIN 而不是子查詢：MySQL 不允許在 DELETE 的目標表
+// 上掛子查詢（ERROR 1093），而繞過它的兩種已知辦法都不理想 —— 包一層衍生表只在
+// 最佳化器選擇「具現化」時合法（見 MySQL 8 手冊對 Restrictions on Subqueries 的
+// 例外條款），遞迴 CTE 則不能用在 DELETE 上。JOIN 沒有這條限制，也剛好是
+// 「沿著 parent_id 往上走兩層」最自然的寫法。
+//
+// 三路徑對應三層上限：c 自己（被刪的那一則）、parent1（回覆它的）、parent2（回覆
+// 它的回覆的）。層級上限是 forumCommentMaxDepth = 3，因此子孫最多兩層；上限若
+// 提高，這裡要一起加一路徑 —— 那是刻意換來的單純，而這一處會是最明顯的需要跟著
+// 改的地方（見 forumCommentMaxDepth 的說明）。
+//
+// JOIN 全部走主鍵（parent1.id / parent2.id 是 forum_post_comments 的主鍵），
+// 因此成本是「這篇貼文的留言數 × 幾次主鍵查找」，而不是全表掃描。
+//
+// 授權語意刻意不在這兩個常數裡：呼叫端用自己的 JOIN 補上「那一則是誰的、母文章
+// 還活著嗎」，而這裡只負責找出子樹。少了作者條件的那一版（後台）因此必須自己補。
+const forumCommentSubtreeJoin = `FROM forum_post_comments c
+	LEFT JOIN forum_post_comments parent1 ON parent1.id = c.parent_id
+	LEFT JOIN forum_post_comments parent2 ON parent2.id = parent1.parent_id`
+
+// forumCommentSubtreeCondition 是 forumCommentSubtreeJoin 的配對 WHERE。
+//
+// 佔位符依序是 post_id、留言 id、留言 id、留言 id（後三個是同一則：自己、父、
+// 祖父）。呼叫端必須把自己的授權 JOIN 插在 JOIN 子句裡，並把這個條件放在 WHERE。
+const forumCommentSubtreeCondition = `c.post_id = ? AND (c.id = ? OR parent1.id = ? OR parent2.id = ?)`
+
+// forumCommentSubtreeDelete 執行「某一篇貼文下某一則留言及其所有回覆」的刪除，
+// 回傳真正刪掉的列數。
+//
+// 抽成函式而不是讓兩個呼叫端各寫一次那句 SQL：這句話的有效性（四張自我 JOIN 的
+// 語法、佔位符順序、授權 JOIN 的位置）沒有任何單元測試盯得住，而兩份各寫一次的
+// 遲早會有一份忘記跟著 forumCommentMaxDepth 改。單一來源也讓它變成**可執行測試**
+// 的對象 —— 形狀斷言只釘得住字串，釘不住「MySQL 收不收這句 DELETE」。
+//
+// scopeJoin 是呼叫端的授權 JOIN（哪一篇貼文還活著、那一則是誰寫的），它的佔位符
+// 排在 WHERE 之前，因此呼叫端的 args 也要排在最前。子樹條件本身不帶任何授權：
+// 少了作者條件的那一版（後台）因此必須自己補，而補了的那一版（使用者）也只檢查
+// 被指定的那一列 —— 子孫可能不是同一個人寫的。
+//
+// 回傳 0 代表 scopeJoin 沒有匹配到任何列（留言不存在、屬於別篇、不是你的、母文章
+// 已軟刪除），呼叫端自行決定那是 404 還是靜默結束。
+func forumCommentSubtreeDelete(ctx context.Context, db forumCommentExecer,
+	postID, commentID int64, scopeJoin string, scopeArgs ...any) (int64, error) {
+	conditionArgs := make([]any, 0, 4+len(scopeArgs))
+	conditionArgs = append(conditionArgs, scopeArgs...)
+	conditionArgs = append(conditionArgs, postID, commentID, commentID, commentID)
+	result, err := db.ExecContext(ctx,
+		`DELETE c `+forumCommentSubtreeJoin+"\n\t\t"+scopeJoin+"\n\t\t WHERE "+forumCommentSubtreeCondition,
+		conditionArgs...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// forumCommentExecer 是 *sql.DB 與 *sql.Tx 的共同部分：使用者端的刪除直接打資料庫，
+// 後台端的刪除在交易裡（稽核與刪除必須同一筆交易）。只宣告用到的那個方法，
+// 因此測試可以用任何實作替身，而兩個呼叫端都不必包一層。
+type forumCommentExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // handleForumCommentDelete 讓作者刪除自己的留言。
 //
 // 為什麼這一條是必要的（而貼文早就能刪）：一則被人檢舉或回應得不舒服的留言，
 // 使用者原本完全無法自己移除 —— 只能等管理員。而貼文的同一個動作早就存在，
 // 兩者不一致本身就是一个會被使用者當成 bug 回報的落差。
 //
-// 附帶的行為：留言消失後該貼文的 comment_count 會少 1，但那是另一支查詢的
+// 附帶的行為：留言消失後該貼文的 comment_count 會跟著少，但那是另一支查詢的
 // 衍生子查詢（forumPostProjection 裡的 COUNT），下一次讀取自然就正確了，
 // 因此這裡刻意不做「順便把計數欄位減一」—— 這個專案沒有計數快取欄位可減。
+// 連帶刪除之後少的筆數等於子樹大小，而不是固定 1（見以下的子樹條件）。
 func (s *Server) handleForumCommentDelete(w http.ResponseWriter, r *http.Request, commentID int64) {
 	author := s.sessions.ResolveUser(r)
 	if author == "" {
@@ -1471,27 +1651,41 @@ func (s *Server) handleForumCommentDelete(w http.ResponseWriter, r *http.Request
 		badRequest(w, "invalid post id")
 		return
 	}
-	// 作者條件放進 DELETE 本身，理由與 handleForumPostDelete 相同。
-	// 母文章的可見性條件（EXISTS ... deleted_at IS NULL）也寫在同一個原子操作裡：
-	// 一篇已軟刪除的貼文底下的留言照樣可以讓作者收回，但「對它做任何新動作」不行。
-	// 先查再刪會留下一個縫隙（貼文在兩次查詢之間被刪），而那個縫隙在這裡的症狀
-	// 是 200 OK —— 沒有人會發現。
-	result, err := s.db.ExecContext(r.Context(),
-		`DELETE FROM forum_post_comments
-		 WHERE id = ? AND author_email = ? AND post_id = ?
-		   AND EXISTS (SELECT 1 FROM forum_posts p
-		               WHERE p.id = forum_post_comments.post_id AND p.deleted_at IS NULL)`,
-		commentID, author, postID)
+	// 作者條件與母文章的可見性條件（forum_posts.deleted_at IS NULL）都寫進同一個
+	// 原子操作裡：先查再刪會留下一個縫隙（貼文在兩次查詢之間被刪），而那個縫隙
+	// 在這裡的症狀是 200 OK —— 沒有人會發現。因此「對一篇已軟刪除的貼文底下的留言
+	// 按刪除」得到 404（與 API.md 的軟刪除表格同一種說法）。
+	//
+	// 子樹條件（forumCommentSubtreeJoin / …Condition）讓「刪除一則留言」連同它底下
+	// 的回覆一起消失。授權走 root 這個 JOIN 而不是 WHERE：被刪的是整棵子樹，而子孫
+	// 可能不是留言者本人寫的（別人回覆了你）—— 把 author_email 放進 WHERE 會把那些
+	// 回覆留下，於是樹又出現孤兒。放進「那一則是誰的」JOIN 則只檢查被指定的那一列，
+	// 不是每一列。確認框（posts.deleteCommentMessage）說的就是這件事。
+	//
+	// 兩者都是 INNER JOIN：root 或母文章不符合條件時整个 JOIN 沒有列，RowsAffected
+	// 為 0，呼叫端因此回 404 —— 與舊的單列 DELETE 用 EXISTS 表達的是同一件事。
+	//
+	// RowsAffected 因此可能大於 1，而它正是回應給前端的 removed：畫面上要少幾則、
+	// 貼文的留言數要減幾，都由這個數字回答，而不是前端自己推（前端只數得到已載入的
+	// 那幾筆，未載入的子孫會讓留言數虛高到下次重載）。貼文的 comment_count 本身是
+	// 衍生子查詢，重新載入自然正確。
+	affected, err := forumCommentSubtreeDelete(r.Context(), s.db, postID, commentID,
+		`JOIN forum_post_comments root
+		      ON root.id = ? AND root.post_id = ? AND root.author_email = ?
+		 JOIN forum_posts p ON p.id = ? AND p.deleted_at IS NULL`,
+		commentID, postID, author, postID)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 刪除本人留言失敗 post_id=%d comment_id=%d: %v", postID, commentID, err)
-		internalError(w, "unable to delete comment")
+		internalError(w, "unable to delete forum comment")
 		return
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
+	// 0 列同時代表「留言不存在」「屬於別篇」「不是你的」「母文章已軟刪除」，
+	// 不區分以免藉回應差異探測（與 handleForumCommentUpdate 同一個理由）。
+	if affected == 0 {
 		http.NotFound(w, r)
 		return
 	}
-	writeOK(w, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "removed": affected})
 }
 
 // forumCommentIDFromPath 嘗試從 /api/forum/posts/{postID}/comments/{commentID}

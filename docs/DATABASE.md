@@ -13,7 +13,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | 資料表 | 用途 | 關鍵結構 |
 | --- | --- | --- |
 | `forum_posts` | 貼文 | `image_url` 只存**檔名**，讀取時才用 `FILES_SERVER_PUBLIC_URL` 組網址；`updated_at` 可空＝從未被作者編輯過；`deleted_at` 可空＝未被刪除（軟刪除，見 [`API.md`](API.md#貼文的軟刪除soft-delete)） |
-| `forum_post_comments` | 留言 | 無外鍵，完整性靠應用層；`updated_at` 語意同上 |
+| `forum_post_comments` | 留言 | 無外鍵，完整性靠應用層；`updated_at` 語意同上；`parent_id` 指回應的另一則留言（`0`＝第一層）、`depth` 是層級 1..3，見 [`API.md`](API.md#留言的層級回覆) |
 | `forum_post_likes` | 按讚 | 複合 PK `(post_id, author_email)`，天然去重 |
 | `forum_reports` | 檢舉 | `target_type`（`post`/`comment`）+ `target_id` 的多型參照，無外鍵 |
 | `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一；`avatar_url` 只存**檔名**（讀取時組網址，語意指 `forum_posts.image_url`） |

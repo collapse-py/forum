@@ -17,13 +17,14 @@
  *     ListState，因此表格、編輯與刪除都不必為搜尋再寫一份。
  */
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { adminApi, checkAdmin } from '../api/admin';
 import { msg, t, tr, usePageTitle, type Message } from '../i18n';
 import { errorMessage, errorText, formatDateTime, formatNumber, text } from '../core';
 import { SearchGlyph } from '../icons';
-import type { AdminPost, AdminReport, ItemsResponse, PagedResponse, SearchResponse } from '../types';
+import { buildCommentTree, type CommentNode } from '../forum/commentTree';
+import type { AdminComment, AdminPost, AdminReport, ItemsResponse, PagedResponse, SearchResponse } from '../types';
 import { useAdmin } from './provider';
 import { AdminShell } from './shell';
 import {
@@ -739,6 +740,7 @@ interface CommentThreadProps {
   onDelete: (commentId: number) => void;
 }
 
+/** 組樹用的節點由共用的 commentTree.ts 提供（與公開頁同一份）。 */
 function CommentThread({ post, onAdd, onEdit, onDelete }: CommentThreadProps) {
   const comments = Array.isArray(post.comments) ? post.comments : [];
   const addButton = (
@@ -756,37 +758,46 @@ function CommentThread({ post, onAdd, onEdit, onDelete }: CommentThreadProps) {
     );
   }
 
+  // 組樹見 commentTree.ts：後台與公開頁共用同一個函式，因為「父留言不在陣列裡
+  // 時退化為根節點」這個判斷必須兩邊一致 —— 一邊退化、一邊丟棄，會讓管理員看到
+  // 與讀者不同的樹。組樹只認 parentId：父留言的 created_at 必定早於子留言
+  // （列表順序就是如此），因此樹一定組得起來。
+  const tree = buildCommentTree(comments);
+  const renderNodes = (nodes: CommentNode<AdminComment>[]): ReactNode =>
+    nodes.map((node) => (
+      <li className="thread__item" key={node.comment.id}>
+        <div>
+          <strong>{text(node.comment.authorEmail)}</strong>
+          <span>{node.comment.content}</span>
+        </div>
+        <div className="row-actions">
+          <button
+            className="btn btn--sm"
+            type="button"
+            onClick={() => onEdit(node.comment.id, node.comment.content)}
+          >
+            {t('common.edit')}
+          </button>
+          <button
+            className="btn btn--sm btn--danger"
+            type="button"
+            onClick={() => onDelete(node.comment.id)}
+          >
+            {t('common.delete')}
+          </button>
+        </div>
+        {node.replies.length > 0 ? (
+          <ul className="thread__replies">{renderNodes(node.replies)}</ul>
+        ) : null}
+      </li>
+    ));
+
   return (
     <details className="thread">
       <summary className="thread__toggle">
           {t('posts.commentCount', { count: formatNumber(post.commentCount || 0) })}
         </summary>
-      <ul className="thread__list">
-        {comments.map((comment) => (
-          <li className="thread__item" key={comment.id}>
-            <div>
-              <strong>{text(comment.authorEmail)}</strong>
-              <span>{comment.content}</span>
-            </div>
-            <div className="row-actions">
-              <button
-                className="btn btn--sm"
-                type="button"
-                onClick={() => onEdit(comment.id, comment.content)}
-              >
-                {t('common.edit')}
-              </button>
-              <button
-                className="btn btn--sm btn--danger"
-                type="button"
-                onClick={() => onDelete(comment.id)}
-              >
-                {t('common.delete')}
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
+      <ul className="thread__list">{renderNodes(tree)}</ul>
       {addButton}
     </details>
   );

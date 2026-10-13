@@ -12,7 +12,8 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 
 	forum_posts                  討論區文章主檔：id / author_email / content / image_url / created_at / updated_at / pinned / deleted_at
 	forum_post_likes             按讚表，以 (post_id, author_email) 複合主鍵表示「一人一文一讚」
-	forum_post_comments          文章留言：id / post_id / author_email / content / created_at
+	forum_post_comments          文章留言：id / post_id / parent_id / depth / author_email / content / created_at
+	                           （parent_id 指回應的另一則留言，depth 是層級 1..3，見第 31 步）
 	forum_reports                檢舉工單（可指向文章或留言），含處理狀態與覆核者
 	forum_profiles               使用者公開資料：author_email 為主鍵、public_key 為 email 的 SHA-256、avatar_url 只存檔名
 	forum_users                  使用者帳號主檔與停權狀態（status = ACTIVE / SUSPENDED）
@@ -30,9 +31,11 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
     製造「以為有原子性、實際沒有」的假象。加上 DDL 在 MySQL 中會取得隱式鎖，線性執行反而能
     避免兩個實例同時啟動時互相鎖住 metadata 而死鎖。代價是遷移中途失敗會留下半套 schema，
     但因為每一步都是冪等的，下一次啟動會自動補齊剩餘步驟。
- 2. 所有 DDL 儘量使用 IF NOT EXISTS 語法，讓 MigrateMySQL 可以安全地重複執行（啟動時必定會
-    執行一次）。仍舊需要 information_schema 探測的步驟，是因為舊版 MySQL 沒有
-    DROP COLUMN IF EXISTS / 唯一索引「不存在才建立」這類語法。
+  2. 所有 DDL 儘量使用 IF NOT EXISTS 語法，讓 MigrateMySQL 可以安全地重複執行（啟動時必定會
+     執行一次）。仍舊需要 information_schema 探測的步驟，是因為舊版 MySQL 沒有
+     DROP COLUMN IF EXISTS / 唯一索引「不存在才建立」這類語法。探測與建立之間的窗口
+     （兩個實例同時啟動時會被命中）由 addIndexIfNotExists / addUniqueIndexIfNotExists
+     容忍 Error 1061 補上 —— 見 TestMigrateMySQLIsSafeWithConcurrentStartup。
  3. 全部資料表統一 ENGINE=InnoDB（交易與外鍵語意）與 DEFAULT CHARSET=utf8mb4。utf8mb4 是
     完整 Unicode（含 emoji 與 4-byte supplementary 平面），論壇內文屬使用者輸入，用舊的 utf8
     （MySQL 的 3-byte utf8mb3）會在寫入時直接報錯。
@@ -44,13 +47,83 @@ package data
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
-	// 以底線匯入（blank import）只為了註冊 "mysql" 這個 database/sql 驅動名稱；
-	// 實際連線行為完全由下面傳入的 DSN 字串決定。
-	_ "github.com/go-sql-driver/mysql"
+	// 這裡不再用底線匯入：除了註冊驅動，還要用 mysql.MySQLError 判斷
+	// 「索引已存在」（Error 1061）—— 見 indexAlreadyExists。
+	mysql "github.com/go-sql-driver/mysql"
 )
+
+// indexAlreadyExists 判斷一個 ALTER TABLE … ADD INDEX 的錯誤是不是
+// 「索引已經存在」（MySQL Error 1061）。
+//
+// 為什麼需要它：MySQL 沒有 ADD INDEX IF NOT EXISTS（唯一索引也沒有），因此本檔
+// 所有索引建立都是「information_schema 探測 + 建立」的兩步。兩步之間有窗口，
+// 而兩個實例同時啟動（重複部署、滾動更新、負載平衡器把兩個連線分到新版本）時
+// 那個窗口會被命中：兩邊都探到「不存在」、兩邊都建立、後者拿 1061 並讓整個遷移
+// 失敗 —— 服務起不來，而這正是 mysql.go 檔頭第 1 點與
+// TestMigrateMySQLIsSafeWithConcurrentStartup 釘住的承諾。
+//
+// 「已經存在」是探測想得到的答案，只是別人先建好了，因此它必須走成功而不是失敗。
+//
+// 反面：Error 1062（唯一索引撞到重複資料）仍然必須失敗並中止啟動。見第 17 步
+// 的說明 —— 靜默留下重複暱稱比啟動失敗更糟，而那正是這個索引存在的理由。
+func indexAlreadyExists(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1061
+}
+
+// addIndexIfNotExists 以「探測 + 建立 + 容忍併發 1061」補上一個索引。
+//
+// 取代各步驟手寫的 information_schema 探測：探測的兩個步驟在兩處以上之後就會
+// 開始出現「其中一處忘了容忍 1061」這種只會在並發部署時出現的差異。冪等性
+// 由這一個函式負責，呼叫端只描述「我要哪個索引」。
+func addIndexIfNotExists(db *sql.DB, table, index, columns string) error {
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+	`, table, index).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	// 1061 = 另一個實例在探測與建立之間先建好了，那正是我們要的結果。
+	if _, err := db.Exec("ALTER TABLE " + table + " ADD INDEX " + index + " (" + columns + ")"); err != nil {
+		if indexAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// addUniqueIndexIfNotExists 是 addIndexIfNotExists 的唯一索引版。
+//
+// MySQL 的唯一索引同樣沒有 IF NOT EXISTS，而它與非唯一索引的差別只在失敗的
+// 理由：1061（已存在）容忍，1062（既有資料重複）必須讓啟動失敗（第 17 步）。
+func addUniqueIndexIfNotExists(db *sql.DB, table, index, columns string) error {
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+	`, table, index).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec("ALTER TABLE " + table + " ADD UNIQUE INDEX " + index + " (" + columns + ")"); err != nil {
+		if indexAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
 
 // OpenMySQL 依傳入的 DSN 建立 *sql.DB 連線池，並設定連線池的容量與存活期限。
 //
@@ -175,6 +248,8 @@ func MigrateMySQL(db *sql.DB) error {
 	//    決定是否連帶清除，避免誤刪。
 	//    idx_forum_post_comments_post_id 服務於「取某篇文章的留言」與留言數統計子查詢；
 	//    idx_forum_post_comments_created_at 則服務於管理員以時間排序瀏覽留言。
+	//    parent_id / depth（留言的層級）在第 31 步補上：彼時所有既有留言都是第一層，
+	//    而那個預設值正是它們在沒有回覆功能之前的樣子。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_post_comments (
 			id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -404,28 +479,17 @@ func MigrateMySQL(db *sql.DB) error {
 	}
 
 	// 17) 暱稱唯一索引。
-	//     為什麼需要探測：MySQL 沒有「ADD UNIQUE INDEX IF NOT EXISTS」語法，重複執行會得到
-	//     Error 1061（重複的 key 名稱）。information_schema.STATISTICS 是索引的中繼資料表，
-	//     以 INDEX_NAME 比對存在與否即可安全地做到冪等。
 	//     為什麼要這個約束：公開頁面以 nickname 顯示作者，重複暱稱會讓身分無法辨識；
 	//     加上唯一索引後，競態下的重複寫入會由資料庫擋下（1062），handler 據此回 409。
 	//     已知風險：若既有資料本身就有重複暱稱，這一步會讓整個遷移失敗並中止啟動，
 	//     必須先人工清理重複值 —— 這是刻意選擇「寧可啟動失敗也不靜默產生重複暱稱」。
-	var nicknameIndexCount int
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_profiles' AND INDEX_NAME = 'uq_forum_profiles_nickname'
-	`).Scan(&nicknameIndexCount); err != nil {
+	//
+	//     建立走 addUniqueIndexIfNotExists：MySQL 沒有「ADD UNIQUE INDEX IF NOT
+	//     EXISTS」，而它內部對 Error 1061（別的實例剛建好）與 1062（資料本身重複）
+	//     的差別對待 —— 前者通過、後者中止 —— 見該函式與 indexAlreadyExists 的說明。
+	if err := addUniqueIndexIfNotExists(db, "forum_profiles",
+		"uq_forum_profiles_nickname", "nickname"); err != nil {
 		return err
-	}
-	if nicknameIndexCount == 0 {
-		// 注意：PRIMARY KEY 之外的 UNIQUE INDEX 在 MySQL 中無法用 IF NOT EXISTS 建立，
-		// 因此上方的 information_schema 探測是不可省略的前置步驟。
-		if _, err := db.Exec(`
-			ALTER TABLE forum_profiles ADD UNIQUE INDEX uq_forum_profiles_nickname (nickname)
-		`); err != nil {
-			return err
-		}
 	}
 
 	// 18) 資料遷移：forum_posts.image_url 由「完整網址」改為「純檔名」。
@@ -493,21 +557,11 @@ func MigrateMySQL(db *sql.DB) error {
 	//     理論上不會重複，但把服務的可啟動性押在這個假設上不划算 ——
 	//     索引的唯一性對這個查詢毫無幫助（等值比對本來就只會有一列）。
 	//
-	//     探測寫法照第 17 步：MySQL 沒有 ADD INDEX IF NOT EXISTS，重複執行會得到
-	//     Error 1061（重複的 key 名稱）。
-	var publicKeyIndexCount int
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_profiles' AND INDEX_NAME = 'idx_forum_profiles_public_key'
-	`).Scan(&publicKeyIndexCount); err != nil {
+	//     建立走 addIndexIfNotExists（探測 + 容忍併發的 Error 1061），理由見
+	//     indexAlreadyExists：兩邊同時探到「不存在」時，後者拿 1061 不是失敗。
+	if err := addIndexIfNotExists(db, "forum_profiles",
+		"idx_forum_profiles_public_key", "public_key"); err != nil {
 		return err
-	}
-	if publicKeyIndexCount == 0 {
-		if _, err := db.Exec(`
-			ALTER TABLE forum_profiles ADD INDEX idx_forum_profiles_public_key (public_key)
-		`); err != nil {
-			return err
-		}
 	}
 
 	// 21) 為 forum_posts.author_email 補索引。
@@ -523,22 +577,10 @@ func MigrateMySQL(db *sql.DB) error {
 	//          只有索引項的讀取量 —— 對一位從未設定暱稱的早期使用者按追蹤鈕
 	//          會走這條路徑，而它掛在內容寫入限流之下，本來就不該更貴。
 	//
-	//     探測寫法與第 20 步相同（MySQL 沒有 ADD INDEX IF NOT EXISTS，重複執行
-	//     會得到 1061）。非唯一索引：這個欄位本來就有重複值，而且我們要的只是
-	//     「等值過濾 + 前綴去重」，唯一性對這兩件事都沒有幫助。
-	var postsAuthorIndexCount int
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_posts' AND INDEX_NAME = 'idx_forum_posts_author_email'
-	`).Scan(&postsAuthorIndexCount); err != nil {
+	//     建立走 addIndexIfNotExists（非唯一索引，理由同第 20 步）。
+	if err := addIndexIfNotExists(db, "forum_posts",
+		"idx_forum_posts_author_email", "author_email"); err != nil {
 		return err
-	}
-	if postsAuthorIndexCount == 0 {
-		if _, err := db.Exec(`
-			ALTER TABLE forum_posts ADD INDEX idx_forum_posts_author_email (author_email)
-		`); err != nil {
-			return err
-		}
 	}
 
 	// 22) 分鐘級請求統計（監控頁 /admin/monitor 的持久化來源）。
@@ -642,24 +684,11 @@ func MigrateMySQL(db *sql.DB) error {
 	//     用到它，而它並不屬於「最近 30 天」的量，會隨**全站累積按讚數**成長。
 	//     該索引已在第 27 步補上，這裡保留原始推理作為「前提被推翻」的紀錄。
 	//
-	//     探測寫法照第 17、20、21 步：MySQL 沒有「ADD INDEX IF NOT EXISTS」，
-	//     重複執行同一句會得到 Error 1061（重複的 key 名稱），而整個
-	//     MigrateMySQL 的回傳錯誤會讓主流程 Fatal —— 症狀是「第一次啟動成功、
-	//     第二次之後每次啟動都死」，且錯誤訊息只有一個索引名，極難聯想到是
-	//     遷移本身不冪等。因此索引一律先以 information_schema 確認不存在才建立。
-	var usersCreatedAtIndexCount int
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_users' AND INDEX_NAME = 'idx_forum_users_created_at'
-	`).Scan(&usersCreatedAtIndexCount); err != nil {
+	//     建立走 addIndexIfNotExists（探測 + 容忍併發的 Error 1061），理由見
+	//     indexAlreadyExists：兩邊同時探到「不存在」時，後者拿 1061 不是失敗。
+	if err := addIndexIfNotExists(db, "forum_users",
+		"idx_forum_users_created_at", "created_at"); err != nil {
 		return err
-	}
-	if usersCreatedAtIndexCount == 0 {
-		if _, err := db.Exec(`
-			ALTER TABLE forum_users ADD INDEX idx_forum_users_created_at (created_at)
-		`); err != nil {
-			return err
-		}
 	}
 
 	// 25) 站內公告與文章置頂。
@@ -711,28 +740,21 @@ func MigrateMySQL(db *sql.DB) error {
 	//     那些地方不該為了支援置頂而多付一個無法命中的索引。
 	//
 	//     欄位與索引拆成兩句：欄位用 ADD COLUMN IF NOT EXISTS（同第 14、15 步），
-	//     索引則先探測 information_schema —— MySQL 沒有 ADD INDEX IF NOT EXISTS，
-	//     兩者混在一句 ALTER 裡的話，第二次啟動會因重複的 key 名稱（1061）
-	//     讓整個遷移失敗，而主流程會因此 Fatal。
+	//     索引則交給 addIndexIfNotExists —— 兩者混在一句 ALTER 裡的話，第二次
+	//     啟動會因重複的 key 名稱（1061）讓整個遷移失敗，而主流程會因此 Fatal。
 	if _, err := db.Exec(`
 		ALTER TABLE forum_posts
 			ADD COLUMN IF NOT EXISTS pinned TINYINT NOT NULL DEFAULT 0 AFTER image_url;
 	`); err != nil {
 		return err
 	}
-	var postsFeedIndexCount int
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_posts' AND INDEX_NAME = 'idx_forum_posts_feed'
-	`).Scan(&postsFeedIndexCount); err != nil {
+	//     索引同樣走 addIndexIfNotExists：探測與建立之間的窗口在兩個實例同時
+	//     啟動時會被命中，而 Error 1061 在那個情境下是「別人先建好了」而不是
+	//     失敗（見 indexAlreadyExists）—— 這正是本檔第 1 點宣稱的
+	//     「兩個實例同時啟動不會互相卡死」的落點。
+	if err := addIndexIfNotExists(db, "forum_posts",
+		"idx_forum_posts_feed", "pinned DESC, created_at DESC, id DESC"); err != nil {
 		return err
-	}
-	if postsFeedIndexCount == 0 {
-		if _, err := db.Exec(`
-			ALTER TABLE forum_posts ADD INDEX idx_forum_posts_feed (pinned DESC, created_at DESC, id DESC)
-		`); err != nil {
-			return err
-		}
 	}
 
 	// 27) 補上被新查詢推翻的「刻意不加」判斷（修正第 24 步的結論）。
@@ -760,8 +782,9 @@ func MigrateMySQL(db *sql.DB) error {
 	//        沒有可用索引的子查詢，成本隨**全站累積按讚數**（而非最近 N 天）
 	//        成長。
 	//
-	//     探測寫法照第 17、20、21、24、26 步：MySQL 沒有 ADD INDEX IF NOT EXISTS，
-	//     重複執行會得到 Error 1061 而讓整個 MigrateMySQL 失敗（主流程 Fatal）。
+	//     建立走 addIndexIfNotExists：探測與建立之間的窗口在兩個實例同時啟動時
+	//     會被命中，而 Error 1061 在那個情境下是「別人先建好了」而不是失敗
+	//     （見 indexAlreadyExists）。
 	//
 	//     注意 b) 的索引成本：每新增一筆按讚多寫一個 B-tree 節點。按讚是
 	//     這個站最熱的寫入，但它的寫入量遠小於 forum_request_metrics 那類
@@ -770,32 +793,18 @@ func MigrateMySQL(db *sql.DB) error {
 	//     a) 的兩個索引成本同理但更低：forum_posts 的寫入量遠低於按讚，
 	//     而 author_email 是單欄索引（B-tree 節點數 = 該欄相異值數 × 深度），
 	//     不隨該作者的貼文數成長。
-	addIndexIfMissing := func(table, index, columns string) error {
-		var count int
-		if err := db.QueryRow(`
-			SELECT COUNT(*) FROM information_schema.STATISTICS
-			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
-		`, table, index).Scan(&count); err != nil {
-			return err
-		}
-		if count > 0 {
-			return nil
-		}
-		_, err := db.Exec("ALTER TABLE " + table + " ADD INDEX " + index + " (" + columns + ")")
-		return err
-	}
-	if err := addIndexIfMissing("forum_post_comments",
+	if err := addIndexIfNotExists(db, "forum_post_comments",
 		"idx_forum_post_comments_author_email", "author_email"); err != nil {
 		return err
 	}
 	// 保留既有的 idx_forum_posts_created_at（搜尋結果、profile 貼文列表與
 	// 管理端的多處查詢只按 created_at 排序），這一個是為了 author_email
 	// 等值查詢而存在 —— 兩者服務不同的存取樣式，不是同一件事的兩種寫法。
-	if err := addIndexIfMissing("forum_posts",
+	if err := addIndexIfNotExists(db, "forum_posts",
 		"idx_forum_posts_author_email", "author_email"); err != nil {
 		return err
 	}
-	if err := addIndexIfMissing("forum_post_likes",
+	if err := addIndexIfNotExists(db, "forum_post_likes",
 		"idx_forum_post_likes_created_at", "created_at"); err != nil {
 		return err
 	}
@@ -904,6 +913,51 @@ func MigrateMySQL(db *sql.DB) error {
 	if _, err := db.Exec(`
 		ALTER TABLE forum_posts
 			ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL AFTER updated_at;
+	`); err != nil {
+		return err
+	}
+
+	// 31) 留言的層級：forum_post_comments.parent_id 與 depth。
+	//
+	//     為什麼需要：留言原本只有「貼文 → 留言」一層，而討論串裡的回覆對象經常是
+	//     另一則留言（「我同意三樓」「你第二點不對」）。少了 parent_id 就無法回答
+	//     「這則在回覆誰」，也沒有辦法把同一篇的留言收斂成樹；介面因此只能把所有
+	//     留言排成一條時間線，讀者要自己從內容推測誰在跟誰說話。
+	//
+	//     最多三層（forumCommentMaxDepth）是產品決定，而它在 schema 上的落點是
+	//     depth：寫入時取「父留言的 depth + 1」，因此第四層在 handler 就被擋掉，
+	//     不會進到資料庫。depth 是衍生值（理論上可以沿著 parent_id 鏈現算），但
+	//     它不可能漂移 —— 沒有任何端點會改寫父留言（parent_id 寫入後即固定），
+	//     而刪除留言是連同整個子樹一起刪（見 handleForumCommentDelete 的說明），
+	//     所以「子留言比父留言深」這個不變式只有建立時會被檢查一次，之後不會被
+	//     任何路徑破壞。
+	//
+	//     兩個表示的選擇：
+	//       - parent_id 用 0 而不是 NULL 表示「沒有父留言」：掃描進 int64 即可，
+	//         NULL 要動用 sql.NullInt64，而「第一層」是多數列。0 同時讓「是不是
+	//         回覆」變成一個 > 0 的比較。
+	//       - depth 用 TINYINT：上限 3，而它唯一的用途是「還能不能再往下一層」。
+	//
+	//     不加索引：parent_id 的唯一讀法是「拿著父留言的 id 找那一列」，走主鍵；
+	//     列表端一次取出整篇貼文的留言（WHERE post_id = ?），層級由前端組樹，
+	//     資料庫不需要知道誰的子孫是誰。為此在留言這種最熱的表上加索引，與第 28
+	//     步不為 updated_at 加索引是同一個判斷。
+	//
+	//     NOT NULL + DEFAULT 讓既有資料自動成為「depth=1 的第一層留言」—— 那正是
+	//     它們在這個功能之前的樣子，回填作業等於不存在。
+	//
+	//     各自一句 ALTER 而非併成一句：兩條都用 ADD COLUMN IF NOT EXISTS，分開寫
+	//     讓「只補了其中一欄」的狀態可被敘述（下次啟動會補上另一欄），合併後
+	//     其中一欄已存在時整句的行為需要另外查證。
+	if _, err := db.Exec(`
+		ALTER TABLE forum_post_comments
+			ADD COLUMN IF NOT EXISTS parent_id BIGINT NOT NULL DEFAULT 0 AFTER post_id;
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		ALTER TABLE forum_post_comments
+			ADD COLUMN IF NOT EXISTS depth TINYINT NOT NULL DEFAULT 1 AFTER parent_id;
 	`); err != nil {
 		return err
 	}

@@ -169,9 +169,12 @@ export function FeedPage() {
    * 的 token，與貼文那把不是同一把（見 useMediaTokenRelease 檔頭第 6 點）。
    * 少了它，首頁每展開一次留言就留下一把沒人刪的 key —— 而展開留言是這一頁
    * 最常見的操作，且完全不會有任何錯誤訊息。
+   *
+   * local（這個工作階段剛po出的留言）也要算：它們同樣帶著一把這次簽發的頭像
+   * 網址，而不在分頁回傳的 items 裡（見 useComments 的兩個桶）。
    */
   const commentItems = useMemo(
-    () => Object.values(comments.states).flatMap((state) => state.items),
+    () => Object.values(comments.states).flatMap((state) => [...state.items, ...state.local]),
     [comments.states],
   );
   useMediaTokenRelease(feedItems, search.state.items, commentItems);

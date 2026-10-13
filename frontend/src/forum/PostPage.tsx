@@ -130,8 +130,11 @@ export function PostPage() {
     onPosted: (id) => {
       if (id === postID) patchPost({ commentCount: (post?.commentCount || 0) + 1 });
     },
-    onRemoved: (id) => {
-      if (id === postID) patchPost({ commentCount: Math.max(0, (post?.commentCount || 0) - 1) });
+    // 第二個參數是實際移除的筆數：刪除一則留言會連同它的回覆一起刪（後端子樹
+    // 刪除），因此留言數少的不是固定 1。以 0 為下限：萬一兩邊數字已經不同步
+    // （例如留言是在別的裝置上刪的），負數的留言數比一個錯的數字更難解釋。
+    onRemoved: (id, removed) => {
+      if (id === postID) patchPost({ commentCount: Math.max(0, (post?.commentCount || 0) - removed) });
     },
     onError: setFail,
   });
@@ -142,8 +145,14 @@ export function PostPage() {
    * 第二批是這一篇的留言：它們的作者頭像來自 GET /comments 自己簽發的 token，
    * 與貼文那把不是同一把（見 useMediaTokenRelease 檔頭第 6 點）。少了它，
    * 每展開一次留言就留下一把沒人刪的 key。
+   *
+   * local 那一桶也要算進來：剛po出去的回復同樣帶著一把這次簽發的頭像網址，
+   * 而它們不在 items（分頁回傳）裡 —— 見 useComments 的兩個桶。
    */
-  const commentList = useMemo(() => (post ? comments.get(postID).items : []), [post, postID, comments]);
+  const commentList = useMemo(() => {
+    const state = comments.get(postID);
+    return post ? [...state.items, ...state.local] : [];
+  }, [post, postID, comments]);
   useMediaTokenRelease(postList, commentList);
 
   const report = useReport({ onSent: setOk, onError: setFail });

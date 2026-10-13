@@ -215,6 +215,9 @@ export const de: Record<MessageKey, string> = {
     'Kommentar konnte nicht gespeichert werden, bitte später erneut versuchen.',
   'comment.deleteFailed':
     'Kommentar konnte nicht gelöscht werden, bitte später erneut versuchen.',
+  'comment.reply': 'Antworten',
+  'comment.replyPlaceholder': '{author} antworten…',
+  'comment.pending': 'Ein anderer Kommentarvorgang läuft gerade, bitte warten.',
   'report.reasonPlaceholder':
     'Grund für die Meldung eingeben (maximal 500 Zeichen)',
   'report.note':
@@ -1078,8 +1081,7 @@ export const de: Record<MessageKey, string> = {
     'Kommentar #{id} bearbeiten',
   'posts.deleteCommentTitle':
     'Kommentar #{id} löschen',
-  'posts.deleteCommentMessage':
-    'Nach dem Löschen ist eine Wiederherstellung nicht möglich. Möchten Sie fortfahren?',
+  'posts.deleteCommentMessage': 'Nach dem Löschen ist eine Wiederherstellung nicht möglich, und alle Antworten darauf werden ebenfalls entfernt. Möchten Sie fortfahren?',
   'posts.listTitle':
     'Beitragsliste',
   'posts.clearSearch':

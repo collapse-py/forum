@@ -33,9 +33,9 @@
 引用一個不存在的 `forum_handlers_test.go`；那條引用已經改指真正存在的測試檔，
 而「路由總表與實際相符」現在由 `security_invariants_test.go` 真的數註冊來保證。）
 
-**`forum/data` 的遷移測試需要真實 MySQL**，本機執行時會全部跳過（未設
+**`forum/data` 的遷移測試與 `forum/httpapi` 的子樹刪除測試需要真實 MySQL**，本機執行時會全部跳過（未設
 `FORUM_TEST_MYSQL_DSN`）。CI 的 `migrations` job 會跑它們 —— 但那也意味著
-**本機的 `go test ./...` 不會驗證 schema 遷移**。
+**本機的 `go test ./...` 不會驗證 schema 遷移與留言子樹刪除的 SQL**。
 
 ---
 

@@ -1095,6 +1095,35 @@ body {
   background: #f7f7f7;
 }
 
+/* 一則留言與它底下的回覆。巢狀由 .comment-replies 表達，自己只是群組。 */
+.comment-branch {
+  min-width: 0;
+}
+
+/*
+ * 回覆的容器：往右縮一階，左邊一條線標出「這些是那一則底下的回覆」。
+ *
+ * 為什麼用線而不是只縮排：三層巢狀在窄窗（手機）下每層都縮排會把內容擠到只剩
+ * 幾個字，一條線帶出的層次讓「誰在回覆誰」在沒有水平空間時也讀得出來。
+ * 線用 border-inline-start 而不是 border-left：RTL 語系（ar）要鏡射到另一側，
+ * 而 inline-start 會跟著 dir 翻。
+ *
+ * gap 沿用 .comments-list 的 12px：回覆之間的距離與第一層一致，巢狀不該讓節奏
+ * 突然變密。
+ */
+.comment-replies {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 0;
+  padding-inline-start: 12px;
+  border-inline-start: 1px solid var(--line);
+}
+
+.comment-replies .comment {
+  /* 深一層的底色略淡：讓「回覆」在視覺上比它回覆的那一則退一階。 */
+  background: #fbfbfb;
+}
+
 .comment-head {
   display: flex;
   align-items: baseline;

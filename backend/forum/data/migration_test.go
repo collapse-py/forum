@@ -85,8 +85,17 @@ var requiredTables = []string{
 // 而用亂數尾巴則保證「即使名字真的撞了也不會互相干擾」。
 var dbCounter atomic.Int64
 
-// serverDB 連到 MySQL **伺服器**（不指定資料庫），測試用它建立拋棄式資料庫。
-func serverDB(t *testing.T) *sql.DB {
+// serverDSN 把 FORUM_TEST_MYSQL_DSN 剝成「只連伺服器」的形式（庫名清空、
+// 參數原樣保留），回傳清理後的字串；未設定 DSN 時直接 skip。
+//
+// 「剝掉庫名」的實作細節：DSN 的形狀是 user:pass@tcp(host:port)/dbname?params，
+// 因此正確做法是把最後一個斜線到問號之間換成空，而不是把斜線之後整段丟掉。
+// 曾經的寫法（cleaned[:i] + "/" + cleaned[i+j+1:]）丟掉了問號本身，於是
+// parseTime=true&loc=UTC 被當成**庫名**，每一次測試都以
+// 「Unknown database 'parseTime=…'」失敗 —— 而帶參數的 DSN（CI 用的就是）
+// 全部命中。剝完之後還要保留 "?params"，否則 multiStatements 與 parseTime
+// 會一起消失：前者是多陳述清理的需要，後者讓 DATETIME 掃得進 time.Time。
+func serverDSN(t *testing.T) string {
 	t.Helper()
 
 	dsn := os.Getenv("FORUM_TEST_MYSQL_DSN")
@@ -95,17 +104,23 @@ func serverDB(t *testing.T) *sql.DB {
 			"設定方式見本檔的檔頭，或見 .github/workflows/ci.yml 的 migrations job")
 	}
 
-	// 刻意剝掉 DSN 裡的庫名，讓它變成「只連伺服器」。而多Statements=true 是
-	// 讓測試能用一句 SQL 執行多個陳述（清理用的那幾句）。
 	cleaned := dsn
 	if i := strings.LastIndex(cleaned, "/"); i >= 0 {
 		if j := strings.Index(cleaned[i:], "?"); j >= 0 {
-			cleaned = cleaned[:i] + "/" + cleaned[i+j+1:]
+			// 保留問號與其後的參數，只把斜線到問號之間的庫名清空。
+			cleaned = cleaned[:i] + "/" + cleaned[i+j:]
 		} else {
 			cleaned = cleaned[:i] + "/"
 		}
 	}
+	return cleaned
+}
 
+// serverDB 連到 MySQL **伺服器**（不指定資料庫），測試用它建立拋棄式資料庫。
+func serverDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	cleaned := serverDSN(t)
 	db, err := sql.Open("mysql", cleaned)
 	if err != nil {
 		t.Fatalf("無法以 %q 開啟連線: %v", cleaned, err)
@@ -143,7 +158,20 @@ func tempDatabase(t *testing.T) (*sql.DB, string) {
 		}
 	})
 
-	dsn := strings.Replace(os.Getenv("FORUM_TEST_MYSQL_DSN"), "/?", "/"+name+"?", 1)
+	// 從已經剝成伺服器層級的 DSN 組出「連到這個拋棄式資料庫」的 DSN：
+	// 斜線之後、問號之前換上資料庫名稱。
+	//
+	// 刻意不寫 strings.Replace(dsn, "/?", "/"+name+"?", 1)：那只在 DSN 原本
+	// 就是「空庫名 + 問號」的形狀下有效。若開發者把 DSN 指向真正的論壇庫
+	// （root@…/forum?…），Replace 一個字都不換，而 MigrateMySQL 會直接在
+	// **正式資料庫**上建表與回填 —— 一個不會報錯、只在事後被發現的災難。
+	// 從剝好的 server DSN 重建，兩種形狀都得到拋棄式資料庫。
+	serverLevel := serverDSN(t)
+	base, params := serverLevel, ""
+	if q := strings.Index(serverLevel, "?"); q >= 0 {
+		base, params = serverLevel[:q], serverLevel[q:]
+	}
+	dsn := strings.TrimSuffix(base, "/") + "/" + name + params
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("開啟測試資料庫 %s 失敗: %v", name, err)
@@ -372,8 +400,11 @@ func TestUnicodeRoundTrip(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			email := "unicode-" + tc.name + "@example.com"
+			// created_at 與 image_url 顯式給值（NOT NULL 而無 DEFAULT，見
+			// seedForumPost 的說明）：只給兩個欄位的 INSERT 在嚴格模式下會 1364。
 			mustExec(t, db,
-				"INSERT INTO forum_posts (author_email, content) VALUES (?, ?)", email, tc.text)
+				"INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)",
+				email, tc.text, time.Now())
 
 			var got string
 			if err := db.QueryRow(
@@ -520,8 +551,14 @@ func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 }
 
 // seedForumPost 塞入一列貼文（用於驗證遷移不清資料）。
+//
+// created_at 與 image_url 顯式給值：兩者都是 NOT NULL 而沒有 DEFAULT 的欄位
+//（image_url 見 mysql.go 第 2 步的說明），嚴格模式下省略它們的 INSERT 會以
+// Error 1364 失敗。這支 helper 曾經只給 author_email 與 content，於是每一次
+// 執行都以 1364 收場 —— 而它要驗證的「第二次遷移不會清掉資料」從來沒被測到。
 func seedForumPost(t *testing.T, db *sql.DB, content, email string) {
 	t.Helper()
 	mustExec(t, db,
-		"INSERT INTO forum_posts (author_email, content) VALUES (?, ?)", email, content)
+		"INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)",
+		email, content, time.Now())
 }
