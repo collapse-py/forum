@@ -125,6 +125,7 @@ export const ru: Record<MessageKey, string> = {
     'Новое',
   'bottomNav.profile':
     'Профиль',
+  'bottomNav.notifications': 'Уведомления',
   'i18n.ariaLabel':
     'Выбрать язык',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const ru: Record<MessageKey, string> = {
   'title.adminSessions': 'Вход и сессии｜{brand} админка',
   'title.adminBlocks': 'Список блокировок IP｜{brand} админка',
   'title.adminAnnouncements': 'Объявления｜{brand} админка',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'Уведомления',
+  'notification.loading': 'Загрузка уведомлений…',
+  'notification.loadFailed': 'Не удалось загрузить уведомления.',
+  'notification.empty': 'Уведомлений пока нет.',
+  'notification.listLabel': 'Список уведомлений',
+  'notification.loadMore': 'Загрузить ещё уведомления',
+  'notification.markAllRead': 'Отметить все как прочитанные',
+  'notification.markAllDone': 'Все уведомления отмечены как прочитанные.',
+  'notification.markReadFailed': 'Не удалось отметить как прочитанное.',
+  'notification.comment': '{name} оставил комментарий к вашей записи',
+  'notification.reply': '{name} ответил на ваш комментарий',
+  'notification.follow': '{name} подписался на вас',
+  'notification.unknown': 'У вас новое уведомление',
+  'notification.profileEntry': 'Мои уведомления',
+  'notification.bellLabel': 'Уведомления',
+  'notification.badgeLabel': '{count} непрочитанных уведомлений',
+  'title.notifications': 'Уведомления｜{site}',
 };

@@ -174,7 +174,14 @@ export default defineConfig({
    */
   server: {
     proxy: {
-      '/api': 'http://localhost:8088',
+      /*
+       * ws: true 是給即時通知的 WebSocket（/api/forum/notifications/ws）。
+       * 升級請求（Upgrade: websocket）不會被 http-proxy 自動轉發，少了這個旗標
+       * 它會被 Vite 當成普通 HTTP 請求處理 —— 而那條路徑掛在 requireLogin 後面，
+       * 症狀是 dev 模式的連線永遠升級不了、紅點只有每次載入才會更新（前端會靜默
+       * 退回 GET，因此不會有任何錯誤）。只有 /api 需要：另外兩條是純 HTTP。
+       */
+      '/api': { target: 'http://localhost:8088', ws: true },
       '/auth': 'http://localhost:8088',
       '/healthz': 'http://localhost:8088',
     },
@@ -208,6 +215,7 @@ export default defineConfig({
         forumProfile: 'forum-profile.html',
         forumOthersProfile: 'forum-others-profile.html',
         forumFollowing: 'forum-following.html',
+        forumNotifications: 'forum-notifications.html',
         forumPost: 'forum-post.html',
         admin: 'admin.html',
         forumAdmin: 'forum-admin.html',

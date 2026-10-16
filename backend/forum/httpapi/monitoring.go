@@ -69,7 +69,15 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			s.metrics.End()
 			d := time.Since(start)
+			// 被 Hijack 的請求（協定升級，目前只有通知串流）以 101 記：升級的
+			// 狀態列是直接寫進 socket 的，StatusWriter 只看得到預填的 200。
+			// d 仍然是「進來到 handler 回傳」——升級者在升級後立刻回傳，所以
+			// 那是握手的耗時，不是連線的存續時間；監控頁的 P50/P99 因此不會
+			// 被開著的連線拉走（見 forum_notification_stream.go 的檔頭）。
 			status := rw.StatusCode()
+			if rw.Hijacked() {
+				status = http.StatusSwitchingProtocols
+			}
 			s.metrics.Observe(r.Method, r.URL.Path, status, d)
 			ip, source := s.clientIPDetail(r)
 			marker, _ := r.Context().Value(bannedRequestKey{}).(*bannedMarker)

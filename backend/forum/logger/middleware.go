@@ -175,6 +175,11 @@ type StatusWriter struct {
 	// statusCode 記錄已寫出的狀態碼。NewStatusWriter 建立時預填
 	// http.StatusOK，對應「handler 只寫內容、未呼叫 WriteHeader」的情況。
 	statusCode int
+	// hijacked 記錄這條連線是否已被 handler 取走（WebSocket 之類的協定升級）。
+	// 一旦被取走，http.ResponseWriter 就不再代表任何東西：升級的狀態列與標頭
+	// 是直接寫進 socket 的，statusCode 永遠停在預填的 200，而 handler 的回傳
+	// 時刻也與「請求處理完」無關（見 LoggingMiddleware 的說明）。
+	hijacked bool
 }
 
 // NewStatusWriter 包裝 w 並預填狀態碼為 200。
@@ -186,18 +191,32 @@ func NewStatusWriter(w http.ResponseWriter) *StatusWriter {
 }
 
 // StatusCode 回傳目前已寫出的狀態碼。在 handler 回應完之後呼叫才有意义。
+// 連線被 Hijack 取走時它沒有意義（見 Hijacked）。
 func (sw *StatusWriter) StatusCode() int {
 	return sw.statusCode
 }
 
+// Hijacked 回報這條連線是否已被 handler 取走（Hijack 成功）。
+//
+// 呼叫端（存取記錄與監控統計）據此改變記帳方式：被取走的連線不再是「一個
+// 正在處理的請求」，它的存續時間也不是請求延遲。
+func (sw *StatusWriter) Hijacked() bool {
+	return sw.hijacked
+}
+
 // Hijack 轉發給底層的 http.Hijacker 讓 WebSocket 等協定升級仍可進行。
 // 底層不支援時回傳明確錯誤，讓呼叫端知道無法升級，而不是得到 nil 造成後續 panic。
+// 成功時記下 hijacked，讓外層的記帳知道這條連線已經被 handler 接手。
 func (sw *StatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hijacker, ok := sw.ResponseWriter.(http.Hijacker)
 	if !ok {
 		return nil, nil, fmt.Errorf("response writer does not support hijacking")
 	}
-	return hijacker.Hijack()
+	conn, buf, err := hijacker.Hijack()
+	if err == nil {
+		sw.hijacked = true
+	}
+	return conn, buf, err
 }
 
 // Flush 轉發給底層的 http.Flusher，讓支援串流／SSE 的 handler 能逐段推送內容。
@@ -301,6 +320,8 @@ func isNoisyRequest(r *http.Request) bool {
 //     標頭必須在呼叫 next 之前寫入，否則 handler 一旦輸出內容就無法再補標頭。
 //  3. 以 StatusWriter 包住 w，呼叫 next。
 //  4. 依狀態碼與耗時決定日誌等級：5xx → ERROR，4xx 或逾時 3 秒 → WARN，其餘 → INFO。
+//     協定升級（Hijack）成功的請求以 101 記錄，且不套用逾時規則 —— 那條連線
+//     已經不是「一個請求」，見下方 status 與分級規則的說明。
 //
 // 錯誤處理：resolveUser 或 newRequestID 失敗都不會讓請求失敗，改以替代值繼續
 // （身分為 "anonymous"、request ID 為時間戳）。存取記錄是診斷工具，
@@ -344,6 +365,15 @@ func LoggingMiddleware(next http.Handler, resolveUser UserResolver, resolveIP Cl
 
 		// handler 回傳後才計算耗時；此時尚未記錄，因此耗時只涵蓋處理時間。
 		duration := time.Since(start)
+		// 協定升級（Hijack）：連線被 handler 取走之後，升級的狀態列與標頭是
+		// 直接寫進 socket 的，這個包裝從此什麼都不知道（statusCode 停在預填的
+		// 200）。對 WebSocket 而言 101 才是實話，因此這裡改寫狀態碼；耗時仍然
+		// 是「從進來到 handler 回傳」——本專案的升級者在升級完就回傳，所以那是
+		// 握手的耗時，而不是連線的存續時間。
+		status := rw.statusCode
+		if rw.Hijacked() {
+			status = http.StatusSwitchingProtocols
+		}
 		// 記錄 path 而非完整 RequestURI：查詢字串常帶 token 或使用者輸入，
 		// 只記路徑可大幅降低敏感資訊外洩的機會。
 		// 訊息裡刻意不再出現 request_id：它已經由 logger 的中繼欄位帶在同一行上
@@ -353,17 +383,20 @@ func LoggingMiddleware(next http.Handler, resolveUser UserResolver, resolveIP Cl
 		// 換單位（0s、850µs、2.5s），聚合端要為每種單位寫一條 parser；固定單位
 		// 讓「這一欄是數字」對人與機器都成立，也包括亞毫秒的 0.000。
 		msg := fmt.Sprintf("[HTTP] %s %s %s status=%d duration_ms=%.3f",
-			r.Method, r.URL.Path, r.Proto, rw.statusCode,
+			r.Method, r.URL.Path, r.Proto, status,
 			float64(duration)/float64(time.Millisecond))
 
 		// 分級規則：伺服器端錯誤最嚴重優先判定；4xx 與逾時並列為 WARN；
 		// 逾時門檻定在 3 秒，與前端一般互動的等待容忍度對齊，避免正常但偏慢的
 		// 資料庫或外部檔案伺服器呼叫被誤標成警告。兩者並列而非串接，是因為
 		// 5xx 一定也要被視為錯誤，即使它同時也很慢。
+		// 逾時規則排除被 Hijack 的連線：本專案的升級者在升級後立刻回傳，但
+		// 若未來有 handler 取走連線後長期服務，這裡的 duration 會變成連線的
+		// 存續時間，而那不該讓每一條正常連線都被記成慢請求。
 		switch {
-		case rw.statusCode >= 500:
+		case status >= 500:
 			ErrorContext(r.Context(), msg)
-		case rw.statusCode >= 400 || duration >= 3*time.Second:
+		case status >= 400 || (!rw.Hijacked() && duration >= 3*time.Second):
 			WarnContext(r.Context(), msg)
 		default:
 			InfoContext(r.Context(), msg)

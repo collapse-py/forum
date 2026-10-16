@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>通知｜{{FORUM_NAME}}</title>
+    <link rel="stylesheet" href="/style.css?v=202610171200" />
+    <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
+    <link rel="icon" href="/asset/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/asset/logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+TC:wght@400;500;700;900&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0..1,0&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /*
+       * 通知（/forum/notifications）樣式
+       *
+       * 共用層在 /style.css：公開頁殼層（含導覽列的鈴鐺與紅點）、.back-link、
+       * .forum-main、.empty / .loading、.avatar（40px 圓、白字深底）與後臺
+       * design tokens。本區塊只放這一頁自己渲染的東西：通知清單。
+       *
+       * html:root 必須在這裡重新宣告：--line 與 --accent 兩邊同名不同值。
+       * 寫成 html:root 而不是 :root，是為了用多一個元素選擇器贏過 style.css
+       * 第 4 節的 :root —— Vite 建置時會把 <link> 移到 <head> 最後，因此不能
+       * 靠「<style> 在 <link> 之後」取勝。理由見 style.css 的檔頭說明。
+       */
+      html:root {
+        --bg: #fff;
+        --line: #e7e7e7;
+        --text: #101010;
+        --muted: #777;
+        --accent: #111;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        color: var(--text);
+        background: var(--bg);
+        font-family: Inter, "Noto Sans TC", sans-serif;
+      }
+
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css（與追蹤頁相同）。 */
+      .eyebrow {
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+      }
+
+      .notification-title {
+        margin: 0 0 12px;
+        color: var(--text);
+        font-size: 28px;
+        font-weight: 900;
+        letter-spacing: -0.02em;
+      }
+
+      /* 「全部標為已讀」靠右：它作用於整份清單，放在標題的同一區塊右側
+         讀起來像這一頁的工具列，而不是某一列的動作。 */
+      .notification-toolbar {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 8px;
+      }
+
+      .notification-mark-all {
+        border: 1px solid #ddd;
+        border-radius: 999px;
+        padding: 6px 14px;
+        color: var(--text);
+        background: #fff;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      /* disabled 的樣態在這裡有實際意義：沒有未讀時它按下去不會有任何變化，
+         因此必須看起來按不動（見 NotificationsPage 的 hasUnread）。 */
+      .notification-mark-all:disabled {
+        color: var(--muted);
+        border-color: var(--line);
+        cursor: default;
+      }
+
+      /* --- 通知清單 ---------------------------------------------------------
+       * 一列是一則事件：頭像與句子是同一個連結，時間在右邊。未讀的列加重
+       * 字重並在開頭補一條短標記。
+       * ------------------------------------------------------------------ */
+      .notification-list {
+        margin: 0 0 24px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .notification-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 12px 12px 8px;
+        border-bottom: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      /* 未讀列。position: relative 是為了讓 ::before 的標記貼在這一行左緣。 */
+      .notification-item--unread {
+        position: relative;
+        background: #fafafa;
+      }
+
+      /* 未讀標記。用 ::before 而不是額外 DOM：它純粹是視覺提示，句子本身
+         已經說明了事件內容，不需要再打給讀屏。
+         inset-inline-start 讓 RTL 語系下標記自動換到右緣。 */
+      .notification-item--unread::before {
+        content: "";
+        position: absolute;
+        inset-inline-start: 0;
+        top: 50%;
+        width: 3px;
+        height: 60%;
+        border-radius: 999px;
+        background: var(--accent);
+        transform: translateY(-50%);
+      }
+
+      /* 頭像與句子包在同一個 <a> 裡，而不是各自一個連結：一列只給一個連結，
+         Tab 順序才與畫面上可點的範圍一致（同追蹤頁的理由）。
+         min-width: 0 讓這一欄可以收縮，長句子才不會把時間擠出列外。 */
+      .notification-item__link {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        flex: 1;
+        gap: 10px;
+        color: var(--text);
+        text-decoration: none;
+      }
+
+      /* overflow-wrap: anywhere 讓長句子換行而不是撐破版面；這與追蹤頁清單
+         的 nowrap + ellipsis 不同 —— 那些是名字（短且不宜截斷在句中），這裡
+         是一整句話，截斷會讓它讀不懂。 */
+      .notification-item__text {
+        min-width: 0;
+        font-size: 14px;
+        overflow-wrap: anywhere;
+      }
+
+      .notification-item--unread .notification-item__text {
+        font-weight: 700;
+      }
+
+      /* 時間固定寬度且不換行：句子很長時它留在最右側，而不是被折到下一行。 */
+      .notification-item__time {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 見 forum.html：整頁由 src/entries/forum-notifications.tsx 掛載。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/entries/forum-notifications.tsx"></script>
+  </body>
+</html>

@@ -297,12 +297,36 @@ func (m *Manager) IsAdmin(r *http.Request) bool {
 // 只想知道登入狀態的端點用它即可，不必多打一次 HGet。
 // 過期、已登出或 token 遭竄改都會讓 key 不存在而回傳 false。
 func (m *Manager) IsLoggedIn(r *http.Request) bool {
+	return m.Alive(m.Token(r))
+}
+
+// Token 回傳 cookie 帶來的原始 session token（沒有 cookie 時為空字串）。
+//
+// 存在的理由只有一個：升級成長連線的路徑（通知串流）必須在**握手當下**把
+// token 抄下來，因為 net/http 不保證 handler 回傳之後還能讀 *http.Request
+// （見 httpapi/forum_notification_stream.go 的檔頭）。其餘路徑請用 ResolveUser
+// 問「是誰」、IsAdmin 問「是不是管理員」—— token 本身是憑證，不該被拿來當
+// 識別或寫進日誌。
+func (m *Manager) Token(r *http.Request) string {
 	cookie, err := r.Cookie(m.cookieName)
 	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+// Alive 判斷這個 token 是否仍對應一筆存在的 session，是 IsLoggedIn 的
+// 「不帶請求」版本，語意完全相同（過期、已登出、遭竄改都回 false）。
+//
+// 為什麼需要它：長連線在 handler 回傳之後仍然活著，而那之後就不能再讀
+// *http.Request 了。因此那一條路徑在握手當下以 Token 抄下憑證，之後每隔
+// 一段時間用它重新確認「這條連線還算不算登入狀態」——session 可撤銷是這個
+// 專案選用 Redis 的主要理由，開著的連線不該成為它的例外。
+func (m *Manager) Alive(token string) bool {
+	if token == "" {
 		return false
 	}
-
-	return m.rdb.Exists(context.Background(), sessionKey(cookie.Value)).Val() == 1
+	return m.rdb.Exists(context.Background(), sessionKey(token)).Val() == 1
 }
 
 // sessionKey 把 token 組成本套件專屬的 Redis key。

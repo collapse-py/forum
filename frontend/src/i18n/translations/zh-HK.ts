@@ -125,6 +125,7 @@ export const zhHK: Record<MessageKey, string> = {
     '新增',
   'bottomNav.profile':
     '個人資料',
+  'bottomNav.notifications': '通知',
   'i18n.ariaLabel':
     '選擇語言',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const zhHK: Record<MessageKey, string> = {
   'title.adminSessions': '登入與 Session｜{brand} 後臺',
   'title.adminBlocks': 'IP 封鎖｜{brand} 後臺',
   'title.adminAnnouncements': '站內公告｜{brand} 後臺',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': '通知',
+  'notification.loading': '載入通知中…',
+  'notification.loadFailed': '通知載入失敗。',
+  'notification.empty': '暫無通知。',
+  'notification.listLabel': '通知列表',
+  'notification.loadMore': '載入更多通知',
+  'notification.markAllRead': '全部標為已讀',
+  'notification.markAllDone': '已將全部通知標為已讀。',
+  'notification.markReadFailed': '標記已讀失敗。',
+  'notification.comment': '{name} 在你的貼文留言',
+  'notification.reply': '{name} 回覆了你的留言',
+  'notification.follow': '{name} 追蹤了你',
+  'notification.unknown': '你有一則新通知',
+  'notification.profileEntry': '我的通知',
+  'notification.bellLabel': '通知',
+  'notification.badgeLabel': '{count} 則未讀通知',
+  'title.notifications': '通知｜{site}',
 };

@@ -125,6 +125,7 @@ export const hi: Record<MessageKey, string> = {
     'नया',
   'bottomNav.profile':
     'व्यक्तिगत',
+  'bottomNav.notifications': 'सूचनाएँ',
   'i18n.ariaLabel':
     'भाषा चुनें',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const hi: Record<MessageKey, string> = {
   'title.adminSessions': 'साइन-इन और सत्र｜{brand} व्यवस्थापक',
   'title.adminBlocks': 'IP अवरुद्ध सूची｜{brand} व्यवस्थापक',
   'title.adminAnnouncements': 'घोषणाएँ｜{brand} व्यवस्थापक',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'सूचनाएँ',
+  'notification.loading': 'सूचनाएँ लोड हो रही हैं…',
+  'notification.loadFailed': 'सूचनाएँ लोड नहीं हो सकीं।',
+  'notification.empty': 'अभी कोई सूचना नहीं है।',
+  'notification.listLabel': 'सूचना सूची',
+  'notification.loadMore': 'और सूचनाएँ लोड करें',
+  'notification.markAllRead': 'सभी को पढ़ा हुआ चिह्नित करें',
+  'notification.markAllDone': 'सभी सूचनाएँ पढ़ी हुई चिह्नित कर दी गईं।',
+  'notification.markReadFailed': 'पढ़ा हुआ चिह्नित नहीं कर सके।',
+  'notification.comment': '{name} ने आपकी पोस्ट पर टिप्पणी की',
+  'notification.reply': '{name} ने आपकी टिप्पणी का उत्तर दिया',
+  'notification.follow': '{name} ने आपको फ़ॉलो किया',
+  'notification.unknown': 'आपके पास एक नई सूचना है',
+  'notification.profileEntry': 'मेरी सूचनाएँ',
+  'notification.bellLabel': 'सूचनाएँ',
+  'notification.badgeLabel': '{count} अपठित सूचनाएँ',
+  'title.notifications': 'सूचनाएँ｜{site}',
 };

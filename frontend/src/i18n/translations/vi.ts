@@ -125,6 +125,7 @@ export const vi: Record<MessageKey, string> = {
     'Thêm',
   'bottomNav.profile':
     'Cá nhân',
+  'bottomNav.notifications': 'Thông báo',
   'i18n.ariaLabel':
     'Chọn ngôn ngữ',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const vi: Record<MessageKey, string> = {
   'title.adminSessions': 'Đăng nhập & phiên làm việc｜{brand} Quản trị',
   'title.adminBlocks': 'Danh sách chặn IP｜{brand} Quản trị',
   'title.adminAnnouncements': 'Thông báo｜{brand} Quản trị',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'Thông báo',
+  'notification.loading': 'Đang tải thông báo…',
+  'notification.loadFailed': 'Không tải được thông báo.',
+  'notification.empty': 'Chưa có thông báo nào.',
+  'notification.listLabel': 'Danh sách thông báo',
+  'notification.loadMore': 'Tải thêm thông báo',
+  'notification.markAllRead': 'Đánh dấu tất cả là đã đọc',
+  'notification.markAllDone': 'Đã đánh dấu tất cả thông báo là đã đọc.',
+  'notification.markReadFailed': 'Không đánh dấu được là đã đọc.',
+  'notification.comment': '{name} đã bình luận về bài viết của bạn',
+  'notification.reply': '{name} đã trả lời bình luận của bạn',
+  'notification.follow': '{name} đã theo dõi bạn',
+  'notification.unknown': 'Bạn có một thông báo mới',
+  'notification.profileEntry': 'Thông báo của tôi',
+  'notification.bellLabel': 'Thông báo',
+  'notification.badgeLabel': '{count} thông báo chưa đọc',
+  'title.notifications': 'Thông báo｜{site}',
 };

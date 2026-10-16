@@ -50,6 +50,20 @@ flowchart LR
 
    另一個方向是讓反向代理**先**把流量抽掉再轉送停止訊號，那樣排空會是瞬間完成的事。
 
+10. **代理必須放行 WebSocket 的升級標頭。** 即時通知是一條 `GET /api/forum/notifications/ws`
+    的長連線（見 [ARCHITECTURE](ARCHITECTURE.md#即時通知)），靠 `Upgrade`／`Connection` 標頭
+    升級，而自架的 nginx 預設不會轉發它們：
+
+    ```nginx
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    ```
+
+    症狀很安靜：紅點仍然在每次頁面載入時正確更新（前端有 GET 後備），只是「有人回覆時立刻
+    亮」永遠不會發生，也不會有任何錯誤訊息 —— 那條請求看起來只是一個普通的 200。同時確認
+    代理沒有對這條路徑開啟回應緩衝（`proxy_buffering` 之類）：長連線需要逐段送出的能力。
+
 ## 建置
 
 ```bash

@@ -43,11 +43,44 @@
 | GET / POST | `/api/forum/follows` | 追蹤名單 / 切換追蹤 |
 | GET | `/api/forum/following/posts` | 私密動態牆（需登入，不限流） |
 | GET | `/api/forum/my-posts` | 自己的貼文（需登入；未發過文回空清單而非 404） |
+| GET / POST | `/api/forum/notifications` | 我的通知 / 標記已讀（POST 帶 `{id}` 標一則，`id` 為 0 或缺省標全部） |
+| GET | `/api/forum/notifications/unread-count` | 未讀通知數（導覽列鈴鐺用；需登入） |
+| GET | `/api/forum/notifications/ws` | 即時通知的 WebSocket（需登入；訊息格式見下） |
 | GET | `/api/forum/public-profile?key=` | 以 `public_key` 查公開資料（無需登入） |
 | GET | `/api/forum/public-posts?user=` | 以 `public_key` 查貼文（無需登入） |
 | GET | `/api/forum/search?q=&offset=&limit=` | 全文搜尋；ES 不可用時退回 `LIKE` |
 
 > 兩個 `public-*` 端點的參數名**不一致**（`key` vs `user`），這是現況不是筆誤。
+
+### 即時通知（WebSocket）
+
+`GET /api/forum/notifications/ws` 在同源且已登入的頁面上建立一條長連線，把「剛產生的通知」
+推給瀏覽器，前端因此不必等下一次頁面載入。訊息全部是 JSON，也全部由伺服器送出：
+
+| 訊息 | 內容 |
+| --- | --- |
+| `ready` | `{"type":"ready","unreadCount":3}` —— 連線建立時送一次 |
+| `notification` | `{"type":"notification","unreadCount":4,"item":{…}}` —— 有新的通知時送 |
+
+- `item` 的欄位與 `GET /api/forum/notifications` 的單一項目**完全相同**（後端共用同一份組裝
+  程式碼），因此前端可以直接把它插進清單最前面。
+- 只推**連線期間**產生的通知；斷線期間的不補送 —— 重新連上時前端會重新載入清單（`ready`
+  送過第二次即代表這是重新連線）。
+- 瀏覽器不需要送任何訊息，送來的內容一律忽略（但仍會持續讀取，pong 是對方還活著的證據）。
+- 上限：同一使用者 8 條連線（超過時關掉**最舊**的一條，不是拒絕新的）、全站 1000 條（滿了
+  直接拒絕新連線）。兩者被關掉時都會收到一個帶原因的 close frame。單一連線的傳送佇列滿了
+  （對方讀得比我們寫得慢）也是關掉那條連線，而不是讓它拖住其他推播。
+- close frame 的應用層 code 是**契約的一部分**（前端靠它決定要不要重連）：
+
+  | code | 意思 | 前端 |
+  | --- | --- | --- |
+  | 4000 | 被同一使用者的較新連線取代 | **不重連**（重連只會讓兩條連線互相汰換） |
+  | 4001 | 全站連線數已達上限 | 照退避重連 |
+  | 4002 | 讀得比伺服器寫得慢，被關掉 | 照退避重連 |
+  | 4003 | session 失效或帳號被停權 | 照退避重連 |
+- 身分每分鐘重新確認一次：session 被撤銷或被停權就關閉連線。
+- 跨站來源回 403（與其他寫入端點共用 `TRUSTED_ORIGINS`）。
+- 反向代理必須放行 `Upgrade`／`Connection` 標頭，見[部署](DEPLOYMENT.md#部署前檢查表)。
 
 ### 頭像
 

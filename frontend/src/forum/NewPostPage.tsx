@@ -373,7 +373,7 @@ export function NewPostPage() {
         </section>
       </main>
 
-      <BottomNav active="new" />
+      <BottomNav active="new" loggedIn={loggedIn} />
     </ForumShell>
   );
 }

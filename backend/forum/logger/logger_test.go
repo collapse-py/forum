@@ -28,10 +28,12 @@ ROADMAP.md 把 logger 列為 0% 覆蓋的目標，而它值得補的原因不是
 package logger
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -917,6 +919,56 @@ func TestStatusWriterFlushIsBestEffort(t *testing.T) {
 		}()
 		NewStatusWriter(struct{ http.ResponseWriter }{httptest.NewRecorder()}).Flush()
 	})
+}
+
+// TestStatusWriterHijackForwarding 守住 Hijack 的轉發與「已升級」的紀錄。
+//
+// 症狀分兩層，而兩層都不會出現錯誤：
+//   - 轉發壞掉：WebSocket 永遠升級不了，功能靜默退回「每次載入問一次未讀數」。
+//   - hijacked 沒被記下：存取記錄與監控統計把一條開著的長連線記成「一個很慢的
+//     請求」，P99 與 inFlight 於是慢慢變成沒有意義的數字。
+func TestStatusWriterHijackForwarding(t *testing.T) {
+	t.Run("底層支援 Hijacker 時轉發並記錄", func(t *testing.T) {
+		hijacker := &fakeHijacker{ResponseWriter: httptest.NewRecorder()}
+		sw := NewStatusWriter(hijacker)
+
+		if _, _, err := sw.Hijack(); err != nil {
+			t.Fatalf("Hijack 回 %v, want nil（應轉發到底層）", err)
+		}
+		if !hijacker.hijacked {
+			t.Error("底層 writer 的 Hijack 沒有被呼叫")
+		}
+		if !sw.Hijacked() {
+			t.Error("Hijack 成功之後 Hijacked 必須為 true")
+		}
+	})
+
+	t.Run("底層不支援時回錯誤而不是 nil", func(t *testing.T) {
+		sw := NewStatusWriter(struct{ http.ResponseWriter }{httptest.NewRecorder()})
+
+		conn, buf, err := sw.Hijack()
+		if err == nil {
+			t.Fatal("底層不支援 Hijacker 時必須回錯誤，不能回 nil 讓呼叫端後續 panic")
+		}
+		if conn != nil || buf != nil {
+			t.Errorf("失敗時不得回傳 conn/buf（conn=%v buf=%v）", conn, buf)
+		}
+		if sw.Hijacked() {
+			t.Error("失敗的 Hijack 不得被記成已升級")
+		}
+	})
+}
+
+// fakeHijacker 是實作 http.Hijacker 的回應寫入器替身（httptest.ResponseRecorder
+// 沒有實作它）。這裡只需要知道「有沒有被呼叫」。
+type fakeHijacker struct {
+	http.ResponseWriter
+	hijacked bool
+}
+
+func (f *fakeHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	f.hijacked = true
+	return nil, nil, nil
 }
 
 // TestLoggingMiddlewareAssignsRequestID 守住 request ID 進了 context 與回應標頭。

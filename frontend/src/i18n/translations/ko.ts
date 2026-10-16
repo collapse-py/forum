@@ -125,6 +125,7 @@ export const ko: Record<MessageKey, string> = {
     '새로 만들기',
   'bottomNav.profile':
     '프로필',
+  'bottomNav.notifications': '알림',
   'i18n.ariaLabel':
     '언어 선택',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const ko: Record<MessageKey, string> = {
   'title.adminSessions': '로그인과 세션｜{brand} 관리자',
   'title.adminBlocks': 'IP 차단 목록｜{brand} 관리자',
   'title.adminAnnouncements': '공지｜{brand} 관리자',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': '알림',
+  'notification.loading': '알림을 불러오는 중…',
+  'notification.loadFailed': '알림을 불러오지 못했습니다.',
+  'notification.empty': '아직 알림이 없습니다.',
+  'notification.listLabel': '알림 목록',
+  'notification.loadMore': '알림 더 불러오기',
+  'notification.markAllRead': '모두 읽음으로 표시',
+  'notification.markAllDone': '모든 알림을 읽음으로 표시했습니다.',
+  'notification.markReadFailed': '읽음으로 표시하지 못했습니다.',
+  'notification.comment': '{name} 님이 회원님의 게시물에 댓글을 남겼습니다',
+  'notification.reply': '{name} 님이 회원님의 댓글에 답글을 남겼습니다',
+  'notification.follow': '{name} 님이 회원님을 팔로우했습니다',
+  'notification.unknown': '새 알림이 있습니다',
+  'notification.profileEntry': '내 알림',
+  'notification.bellLabel': '알림',
+  'notification.badgeLabel': '읽지 않은 알림 {count}개',
+  'title.notifications': '알림｜{site}',
 };

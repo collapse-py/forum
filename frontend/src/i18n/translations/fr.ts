@@ -125,6 +125,7 @@ export const fr: Record<MessageKey, string> = {
     'Nouveau',
   'bottomNav.profile':
     'Profil',
+  'bottomNav.notifications': 'Notifications',
   'i18n.ariaLabel':
     'Choisir la langue',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const fr: Record<MessageKey, string> = {
   'title.adminSessions': 'Connexions et sessions｜{brand} Admin',
   'title.adminBlocks': 'Liste de blocage d\'IP｜{brand} Admin',
   'title.adminAnnouncements': 'Annonces｜{brand} Admin',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'Notifications',
+  'notification.loading': 'Chargement des notifications…',
+  'notification.loadFailed': 'Impossible de charger les notifications.',
+  'notification.empty': 'Aucune notification pour le moment.',
+  'notification.listLabel': 'Liste des notifications',
+  'notification.loadMore': 'Charger plus de notifications',
+  'notification.markAllRead': 'Tout marquer comme lu',
+  'notification.markAllDone': 'Toutes les notifications ont été marquées comme lues.',
+  'notification.markReadFailed': 'Impossible de marquer comme lu.',
+  'notification.comment': '{name} a commenté votre publication',
+  'notification.reply': '{name} a répondu à votre commentaire',
+  'notification.follow': '{name} vous suit désormais',
+  'notification.unknown': 'Vous avez une nouvelle notification',
+  'notification.profileEntry': 'Mes notifications',
+  'notification.bellLabel': 'Notifications',
+  'notification.badgeLabel': '{count} notifications non lues',
+  'title.notifications': 'Notifications｜{site}',
 };

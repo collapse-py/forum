@@ -21,6 +21,7 @@ import { logout, readJSONObject } from '../core';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher';
 import { t } from '../i18n';
 import { SITE_SHORT_NAME } from '../site';
+import { useUnreadNotifications } from './notificationStream';
 
 /* ==========================================================================
    登入狀態
@@ -221,6 +222,18 @@ export interface ForumNavProps {
 const NO_LABELS: AuthLabels = { loggedIn: '', loggedOut: '', error: '' };
 
 export function ForumNav({ auth, labels = NO_LABELS, loginReturn, install, showAccount = true, search }: ForumNavProps) {
+  /*
+   * 未讀通知數。只在「這一頁會顯示帳號控制」且已登入時才發請求：未登入者打
+   * /api/forum/notifications/unread-count 會拿到 303，而鈴鐺不值得為它把整頁
+   * 導去登入（OthersProfilePage 刻意傳 showAccount=false，且它的 auth 恆為
+   * 未登入，因此那裡永遠不會出現鈴鐺）。
+   *
+   * auth.phase 必須是 ready：checking 時 auth.loggedIn 恆為 false，直接沿用
+   * 它會讓 hook 在真正的登入狀態揭曉前先跑一次「未登入」的分支，等 phase 變成
+   * ready 才發請求 —— 結果一樣，但多一次沒有意義的狀態切換。
+   */
+  const unread = useUnreadNotifications(showAccount && auth.phase === 'ready' && auth.loggedIn);
+
   return (
     <header className="forum-nav">
       <a className="brand" href="/forum">
@@ -234,6 +247,28 @@ export function ForumNav({ auth, labels = NO_LABELS, loginReturn, install, showA
         （justify-self: end），少了它這欄就不存在，導覽列的欄數會對不上。
       */}
       <div className="nav-actions">
+        {/* 鈴鐺放在最前面：它是「有東西在等你」的提示，應該比登入狀態文字與
+            動作按鈕更靠近品牌標誌一側，視覺上先被掃到。 */}
+        {showAccount && auth.loggedIn ? (
+          <a
+            className="notification-bell"
+            href="/forum/notifications"
+            aria-label={
+              unread > 0 ? t('notification.badgeLabel', { count: unread }) : t('notification.bellLabel')
+            }
+          >
+            <span className="material-symbols-outlined" aria-hidden="true">
+              notifications
+            </span>
+            {/* 數字本身不打給讀屏看：可及名稱已經由上面的 aria-label 說明。
+                超過 99 顯示 99+，避免三位數把紅點撐成一個長方形。 */}
+            {unread > 0 ? (
+              <span className="notification-badge" aria-hidden="true">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            ) : null}
+          </a>
+        ) : null}
         {showAccount ? <span className="user-state">{authLabel(auth, labels)}</span> : null}
         {install ? <InstallButton onInstall={install.requestInstall} standalone={install.standalone} /> : null}
         {showAccount && !auth.loggedIn ? (
@@ -255,18 +290,23 @@ export function ForumNav({ auth, labels = NO_LABELS, loginReturn, install, showA
   );
 }
 
-export type ForumTab = 'home' | 'new' | 'profile';
+export type ForumTab = 'home' | 'new' | 'notifications' | 'profile';
 
 /**
- * 底部導覽的三個項目。
+ * 底部導覽的四個項目。
  *
  * 標籤是函式裡的 t() 而非模組層的常數陣列，原因同 installFallback：常數會在
  * import 時把當下的語言固定住，切換語言後底部導覽就永遠停在第一種語言。
+ *
+ * 順序：首頁、新增、通知、個人。新增排在第二、通知插在個人之前，是為了讓
+ * 既有的首頁與「新增」維持原位（既有使用者的肌肉記憶），而個人頁仍然收在
+ * 最右緣（手機上最遠、最少誤觸，也符合「帳號放最後」的慣例）。
  */
 function bottomTabs(): { key: ForumTab; label: string; icon: string; href: string }[] {
   return [
     { key: 'home', label: t('bottomNav.home'), icon: 'home', href: '/forum' },
     { key: 'new', label: t('bottomNav.new'), icon: 'add', href: '/forum/new' },
+    { key: 'notifications', label: t('bottomNav.notifications'), icon: 'notifications', href: '/forum/notifications' },
     { key: 'profile', label: t('bottomNav.profile'), icon: 'person', href: '/forum/profile' },
   ];
 }
@@ -275,9 +315,36 @@ export interface BottomNavProps {
   active: ForumTab;
   /** 首頁在舊版是一顆按鈕（捲回頂並重載），這裡保留同樣的行為。 */
   onHome?: (() => void) | undefined;
+  /**
+   * 是否已登入。通知紅點只在登入後出現（未登入時那一格是登入頁的入口），
+   * 而未讀數端點掛在 requireLogin 之後 —— 傳入而不是在 shell 內重新讀取登入
+   * 狀態：每一頁都已經有一份 useAuth 的結果，再讀一次會多打一次 /api/check。
+   */
+  loggedIn: boolean;
 }
 
-export function BottomNav({ active, onHome }: BottomNavProps) {
+export function BottomNav({ active, onHome, loggedIn }: BottomNavProps) {
+  /*
+   * 未讀紅點。未讀數與頂部鈴鐺共用同一份模組層快照（見 useNotifications），
+   * 因此這一頁只會有一次 /unread-count 請求，標記已讀時兩邊也一起更新。
+   *
+   * 這裡只放一個點而不是數字：底部導覽的字級小，塞進「99+」會讓四個項目的
+   * 寬度不一致。數字由頂部鈴鐺負責。
+   */
+  const unread = useUnreadNotifications(loggedIn);
+  const hasUnread = unread > 0;
+
+  /* 圖示外多一層 .bottom-nav-icon 是紅點的定位基準：點要貼在圖示的右上角，
+     而不是格子（比圖示寬得多）的角落。 */
+  const icon = (tab: { key: ForumTab; icon: string }) => (
+    <span className="bottom-nav-icon">
+      <span className="material-symbols-outlined" aria-hidden="true">
+        {tab.icon}
+      </span>
+      {tab.key === 'notifications' && hasUnread ? <span className="bottom-nav-dot" aria-hidden="true" /> : null}
+    </span>
+  );
+
   return (
     <nav className="bottom-nav" aria-label={t('bottomNav.label')}>
       {bottomTabs().map((tab) =>
@@ -288,21 +355,24 @@ export function BottomNav({ active, onHome }: BottomNavProps) {
             type="button"
             onClick={onHome}
           >
-            <span className="material-symbols-outlined" aria-hidden="true">
-              {tab.icon}
-            </span>
-            <span>{tab.label}</span>
+            {icon(tab)}
+            <span className="bottom-nav-label">{tab.label}</span>
           </button>
         ) : (
           <a
             key={tab.key}
             className={`bottom-nav-item${tab.key === active ? ' active' : ''}${tab.key === 'new' ? ' nav-add' : ''}`}
             href={tab.href}
+            /* 有未讀時把可及名稱換成「N 則未讀通知」（與頂部鈴鐺同一個說法）：
+               紅點本身是裝飾，讀屏使用者只從這裡知道「有幾則」。 */
+            aria-label={
+              tab.key === 'notifications' && hasUnread
+                ? t('notification.badgeLabel', { count: unread })
+                : undefined
+            }
           >
-            <span className="material-symbols-outlined" aria-hidden="true">
-              {tab.icon}
-            </span>
-            <span>{tab.label}</span>
+            {icon(tab)}
+            <span className="bottom-nav-label">{tab.label}</span>
           </a>
         ),
       )}

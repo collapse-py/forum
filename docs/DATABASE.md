@@ -21,6 +21,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_user_tags` | 標籤字典 | `name` 唯一 |
 | `forum_user_tag_assignments` | 標籤指派 | 複合 PK `(user_email, tag_id)` |
 | `forum_follows` | 追蹤關係 | 複合 PK `(follower_email, target_email)` |
+| `forum_notifications` | 站內通知 | `recipient_email` / `actor_email` 皆為 email（無外鍵，應用層維護）；`kind` 為 `comment` / `reply` / `follow`；`read_at` 可空＝未讀；`post_id` / `comment_id` 為 0 ＝該事件沒有這個目標 |
 | `forum_request_metrics` | 分鐘級請求統計 | PK `(bucket_minute)`；純衍生資料，可整表刪除 |
 | `forum_admin_actions` | 管理員操作稽核 | `changes` 存欄位級 diff JSON；只能由時間清理 |
 | `forum_announcements` | 站內公告 | 同時只有一列 `active`；`expires_at` 可空＝永不自動過期 |

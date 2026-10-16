@@ -94,6 +94,7 @@ export const zhCN: Record<MessageKey, string> = {
   'bottomNav.home': '首页',
   'bottomNav.new': '新增',
   'bottomNav.profile': '我的',
+  'bottomNav.notifications': '通知',
 
   /* ==========================================================================
      i18n
@@ -955,4 +956,22 @@ export const zhCN: Record<MessageKey, string> = {
   'title.adminSessions': '登入与 Session｜{brand} 后台',
   'title.adminBlocks': 'IP 封锁｜{brand} 后台',
   'title.adminAnnouncements': '站内公告｜{brand} 后台',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': '通知',
+  'notification.loading': '正在加载通知…',
+  'notification.loadFailed': '通知加载失败。',
+  'notification.empty': '暂无通知。',
+  'notification.listLabel': '通知列表',
+  'notification.loadMore': '加载更多通知',
+  'notification.markAllRead': '全部标为已读',
+  'notification.markAllDone': '已将全部通知标为已读。',
+  'notification.markReadFailed': '标为已读失败。',
+  'notification.comment': '{name} 评论了你的帖子',
+  'notification.reply': '{name} 回复了你的评论',
+  'notification.follow': '{name} 关注了你',
+  'notification.unknown': '你有一条新通知',
+  'notification.profileEntry': '我的通知',
+  'notification.bellLabel': '通知',
+  'notification.badgeLabel': '{count} 条未读通知',
+  'title.notifications': '通知｜{site}',
 };

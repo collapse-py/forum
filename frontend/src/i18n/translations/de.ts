@@ -125,6 +125,7 @@ export const de: Record<MessageKey, string> = {
     'Neu',
   'bottomNav.profile':
     'Profil',
+  'bottomNav.notifications': 'Benachrichtigungen',
   'i18n.ariaLabel':
     'Sprache auswählen',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const de: Record<MessageKey, string> = {
   'title.adminSessions': 'Anmeldungen & Sessions｜{brand} Verwaltung',
   'title.adminBlocks': 'IP-Sperrliste｜{brand} Verwaltung',
   'title.adminAnnouncements': 'Ankündigungen｜{brand} Verwaltung',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'Benachrichtigungen',
+  'notification.loading': 'Benachrichtigungen werden geladen…',
+  'notification.loadFailed': 'Benachrichtigungen konnten nicht geladen werden.',
+  'notification.empty': 'Noch keine Benachrichtigungen.',
+  'notification.listLabel': 'Benachrichtigungsliste',
+  'notification.loadMore': 'Weitere Benachrichtigungen laden',
+  'notification.markAllRead': 'Alle als gelesen markieren',
+  'notification.markAllDone': 'Alle Benachrichtigungen als gelesen markiert.',
+  'notification.markReadFailed': 'Konnte nicht als gelesen markiert werden.',
+  'notification.comment': '{name} hat deinen Beitrag kommentiert',
+  'notification.reply': '{name} hat auf deinen Kommentar geantwortet',
+  'notification.follow': '{name} folgt dir jetzt',
+  'notification.unknown': 'Du hast eine neue Benachrichtigung',
+  'notification.profileEntry': 'Meine Benachrichtigungen',
+  'notification.bellLabel': 'Benachrichtigungen',
+  'notification.badgeLabel': '{count} ungelesene Benachrichtigungen',
+  'title.notifications': 'Benachrichtigungen｜{site}',
 };

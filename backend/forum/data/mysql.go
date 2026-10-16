@@ -23,6 +23,7 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 	forum_request_metrics        分鐘級請求統計（監控頁的持久化來源；純衍生資料，可整表刪除）
 	forum_admin_actions           管理員操作稽核紀錄（欄位級 diff；只能由時間清理，不可透過 API 刪除）
 	forum_announcements           站內公告（同時只有一列 active；expires_at 可空＝永不自動過期）
+	forum_notifications           站內通知（留言／回覆／追蹤；read_at 可空＝未讀）
 
 關鍵設計決策
 
@@ -958,6 +959,58 @@ func MigrateMySQL(db *sql.DB) error {
 	if _, err := db.Exec(`
 		ALTER TABLE forum_post_comments
 			ADD COLUMN IF NOT EXISTS depth TINYINT NOT NULL DEFAULT 1 AFTER parent_id;
+	`); err != nil {
+		return err
+	}
+
+	// 32) 站內通知（forum_notifications）。
+	//
+	//     為什麼需要：留言、回覆與追蹤過去都是「單向」的 —— 有人回應了你的貼文、
+	//     回覆了你的留言、或追蹤了你，除了自己回去翻動態之外沒有任何提示。通知把
+	//     這三件事變成收件者看得到的事件。
+	//
+	//     一列是一則通知，形狀刻意「反正規化」：recipient_email 是收件者、
+	//     actor_email 是觸發者，兩者都是 email（理由同第 19 步的 forum_follows：
+	//     用 public_key 當關聯鍵會讓查詢變成 SHA2(...) 而無法走索引）。
+	//     post_id 與 comment_id 一起放進同一張表，而不是「看 kind 決定去哪張表
+	//     查目標」—— 那會讓列表端必須為每一列各自 JOIN，而這裡的三種 kind
+	//     都只需要「點了要跳到哪裡」這一個數字，多一欄的成本遠低於一次 JOIN。
+	//
+	//     kind 目前有三種值：comment（有人在你貼文留言）、reply（有人回覆你的
+	//     留言）、follow（有人追蹤你）。用 VARCHAR 而非 ENUM：新增一種事件時
+	//     ENUM 要 ALTER TABLE 改型別，而這裡沒有任何 CHECK 依賴它。
+	//
+	//     read_at 允許 NULL，NULL 的語意是「未讀」。與 updated_at（第 28 步）、
+	//     deleted_at（第 30 步）同一個約定：NULL 代表「這件事還沒發生」，
+	//     因此既有列一律是未讀，回填作業等於不存在。刻意不用 TINYINT 旗標：
+	//     時間戳同時回答「讀過沒」與「什麼時候讀的」。
+	//
+	//     索引兩個方向：
+	//       idx_forum_notifications_recipient (recipient_email)
+	//         「我的通知」列表（WHERE recipient_email = ? ORDER BY id DESC）。
+	//         InnoDB 會把主鍵（id）接在二級索引之後，因此這個索引本身就能
+	//         服務 id 的遞減排序，不需要額外的排序欄位。
+	//       idx_forum_notifications_unread (recipient_email, read_at)
+	//         未讀計數（WHERE recipient_email = ? AND read_at IS NULL）——
+	//         導覽列的鈴鐺每個頁面載入都會問一次，它必須只碰索引不碰資料列。
+	//
+	//     沒有外鍵、沒有 ON DELETE CASCADE：關聯由應用層維護，理由同
+	//     forum_follows 與 forum_post_comments。收件者帳號只有停權、沒有刪除路徑，
+	//     而指向的貼文／留言被刪除時，通知仍然保留（它記錄的是「當時發生過」）。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_notifications (
+			id BIGINT NOT NULL AUTO_INCREMENT,
+			recipient_email VARCHAR(255) NOT NULL,
+			actor_email VARCHAR(255) NOT NULL,
+			kind VARCHAR(16) NOT NULL,
+			post_id BIGINT NOT NULL DEFAULT 0,
+			comment_id BIGINT NOT NULL DEFAULT 0,
+			read_at DATETIME NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (id),
+			KEY idx_forum_notifications_recipient (recipient_email),
+			KEY idx_forum_notifications_unread (recipient_email, read_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 	`); err != nil {
 		return err
 	}

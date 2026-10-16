@@ -77,6 +77,7 @@ var requiredTables = []string{
 	"forum_request_metrics",
 	"forum_admin_actions",
 	"forum_announcements",
+	"forum_notifications",
 }
 
 // dbCounter 讓每個測試的資料庫名稱都不相同。
@@ -315,7 +316,7 @@ func TestMigrateMySQLOnExistingDatabaseWithData(t *testing.T) {
 	t.Parallel()
 	db, name := tempDatabase(t)
 
-	// 一份刻意落後的 schema：少了三張新表，且一個現有表少了兩個欄位。
+	// 一份刻意落後的 schema：只有一張表，且它少了兩個後來才加的欄位。
 	// 這是「舊版本」的真實形狀 —— 欄位與資料表是隨著功能一起長出來的。
 	mustExec(t, db, `
 		CREATE TABLE forum_posts (
@@ -345,8 +346,9 @@ func TestMigrateMySQLOnExistingDatabaseWithData(t *testing.T) {
 		t.Errorf("舊資料的內容被改了: %q", content)
 	}
 
-	// 缺的三張表應該被補上。
-	for _, table := range []string{"forum_announcements", "forum_admin_actions", "forum_user_tags"} {
+	// 缺的表應該被補上，其中包括這個功能新增的 forum_notifications
+	// —— 升級路徑就是它第一次被建立的地方（正式站的資料庫不是空的）。
+	for _, table := range []string{"forum_announcements", "forum_admin_actions", "forum_user_tags", "forum_notifications"} {
 		if !tableExists(t, db, table) {
 			t.Errorf("遷移沒有補上舊資料庫缺的 %s（資料庫 %s）", table, name)
 		}

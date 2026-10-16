@@ -25,10 +25,12 @@ Origin 檢查在 csrf.go。
 	GET  /api/forum/my-posts                  -> handleForumMyPosts      讀取自己的貼文分頁
 	GET|POST /api/forum/follows               -> listForumFollows / toggleForumFollow 追蹤清單與切換
 	GET  /api/forum/following/posts           -> handleForumFollowingPosts 追蹤者的貼文動態
+	GET|POST /api/forum/notifications         -> handleForumNotifications 我的通知／標記已讀
+	GET  /api/forum/notifications/unread-count -> handleForumNotificationUnreadCount 未讀數
 	GET  /forum/login                         -> handleForumLoginPage    登入頁殼
 	GET  /forum, /forum/new,
 	     /forum/profile, /forum/others-profile,
-	     /forum/following                     -> handleForumPage         論壇前端 SPA 殼
+	     /forum/following, /forum/notifications -> handleForumPage         論壇前端 SPA 殼
 
 子資源（comments / like / report）都掛在同一個 /api/forum/posts/ 註冊點上，
     由 handleForumPostAction 依路徑後綴分派，詳見該函式說明。
@@ -996,10 +998,14 @@ func forumParentDepthAllowsReply(parentDepth int) bool {
 	return parentDepth < forumCommentMaxDepth
 }
 
-// forumParentCommentDepth 回傳「某一篇貼文下某一則留言的層級」。
+// forumParentCommentInfo 回傳「某一篇貼文下某一則留言的層級與作者」。
 //
-// 只有在「要回覆它」的時候才需要這個數字（見 handleForumComments 的 POST 分支：
-// 新留言的 depth = 父留言的 depth + 1，而父留言已經在最深層時不能再回）。
+// 只有在「要回覆它」的時候才需要這兩個值（見 handleForumComments 的 POST 分支：
+// 新留言的 depth = 父留言的 depth + 1，而父留言已經在最深層時不能再回；
+// 作者則是回覆通知的收件者）。
+//
+// 兩個值用同一句查詢取回而不是分兩次：兩者都掛在同一列上，而那個函式已經
+// 因為層級上限的存在而必須被呼叫一次。
 //
 // post_id 放進條件而不是只查 id：留言的層級只在同一篇貼文內有意義，而少了這個
 // 條件，任何人只要知道別篇的任何留言 id 就能把自己的回覆掛到那則留言底下 ——
@@ -1011,12 +1017,28 @@ func forumParentDepthAllowsReply(parentDepth int) bool {
 //
 // 不需要軟刪除檢查：forum_post_comments 沒有 deleted_at（刪除是真刪除，見
 // handleForumCommentDelete），因此「存在」就只是「那一列在」。
-func (s *Server) forumParentCommentDepth(ctx context.Context, postID, parentID int64) (int, error) {
+func (s *Server) forumParentCommentInfo(ctx context.Context, postID, parentID int64) (int, string, error) {
 	var depth int
+	var author string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT depth FROM forum_post_comments WHERE id = ? AND post_id = ?`,
-		parentID, postID).Scan(&depth)
-	return depth, err
+		`SELECT depth, author_email FROM forum_post_comments WHERE id = ? AND post_id = ?`,
+		parentID, postID).Scan(&depth, &author)
+	return depth, author, err
+}
+
+// forumPostAuthorEmail 回傳某一篇「還活著」的貼文作者 email。
+//
+// 用途是「有人對這篇貼文留言時，通知應該寄給誰」。條件帶上 deleted_at IS NULL
+// 與 forumPostVisibleByID 一致：對一篇已刪除的貼文留言本來就會被前一關擋成 404，
+// 這裡多帶一次只是讓「收件者是誰」與「這篇可不可見」用同一個判斷。
+//
+// 回傳 sql.ErrNoRows 代表這篇不存在或已刪除。
+func (s *Server) forumPostAuthorEmail(ctx context.Context, postID int64) (string, error) {
+	var author string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT author_email FROM forum_posts WHERE id = ? AND deleted_at IS NULL`,
+		postID).Scan(&author)
+	return author, err
 }
 
 // handleForumComments 同時處理留言列表（GET）與新增留言（POST）。
@@ -1242,8 +1264,11 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	 * 交易要付出的是每次留言都多兩次往返。
 	 */
 	parentDepth := 0
+	// parentAuthor 只在「這是一則回覆」時有意義：它是回覆通知的收件者。
+	// 空字串代表「沒有父留言」，也就是這是一則頂層留言。
+	parentAuthor := ""
 	if req.ParentID > 0 {
-		parentDepth, err = s.forumParentCommentDepth(r.Context(), postID, req.ParentID)
+		parentDepth, parentAuthor, err = s.forumParentCommentInfo(r.Context(), postID, req.ParentID)
 		if err == sql.ErrNoRows {
 			writeError(w, http.StatusNotFound, "parent comment not found")
 			return
@@ -1282,6 +1307,10 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	// 這裡再呼叫一次 ResolveUser 會多一次 Redis 往返；因為上一次的值不在作用域內，
 	// 沿用現狀以免改動行為。兩次呼叫讀的是同一個 session cookie，結果必然一致。
 	author := s.sessions.ResolveUser(r)
+	// 通知：頂層留言通知貼文作者，回覆則通知父留言作者（見
+	// notifyForumCommentCreated）。刻意放在寫入成功之後、回應之前，且是
+	// best-effort —— 通知失敗不會讓這則已經寫進資料庫的留言變成 500。
+	s.notifyForumCommentCreated(r, postID, id, author, parentAuthor)
 	// 作者頭像也帶上：這一則會被前端插進留言列表頭端，少了它會出現「剛po的
 	// 那則沒有頭像、重新載入後就有了」（與 createForumPost 的同一個理由）。
 	authorAvatarURL, _, err := s.forumAuthorAvatarURL(r.Context(), author, "")
@@ -2636,6 +2665,10 @@ func (s *Server) handleForumPage(frontendDir string) http.HandlerFunc {
 			// 刻意不在 server.go 另註冊一條：ServeMux 取最具體的樣式，
 			// 另註一條只會多一份要同步的路由規則。
 			page = "forum-following.html"
+		case "/forum/notifications", "/forum/notifications/":
+			// 通知頁同樣落在 /forum/ 子樹（掛 requireLogin），理由與追蹤頁
+			// 完全相同。
+			page = "forum-notifications.html"
 		default:
 			/*
 			 * 永久連結頁是唯一一個「id 在路徑裡」的公開頁，因此不能用上面的

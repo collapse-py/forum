@@ -345,7 +345,7 @@ export function OthersProfilePage() {
         </p>
       </main>
 
-      <BottomNav active="home" />
+      <BottomNav active="home" loggedIn={loggedIn} />
     </ForumShell>
   );
 }

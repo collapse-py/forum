@@ -125,6 +125,7 @@ export const th: Record<MessageKey, string> = {
     'เพิ่ม',
   'bottomNav.profile':
     'โปรไฟล์',
+  'bottomNav.notifications': 'การแจ้งเตือน',
   'i18n.ariaLabel':
     'เลือกภาษา',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const th: Record<MessageKey, string> = {
   'title.adminSessions': 'การเข้าสู่ระบบและเซสชัน｜{brand} ผู้ดูแล',
   'title.adminBlocks': 'รายชื่อ IP ที่ถูกบล็อก｜{brand} ผู้ดูแล',
   'title.adminAnnouncements': 'ประกาศ｜{brand} ผู้ดูแล',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'การแจ้งเตือน',
+  'notification.loading': 'กำลังโหลดการแจ้งเตือน…',
+  'notification.loadFailed': 'โหลดการแจ้งเตือนไม่สำเร็จ',
+  'notification.empty': 'ยังไม่มีการแจ้งเตือน',
+  'notification.listLabel': 'รายการการแจ้งเตือน',
+  'notification.loadMore': 'โหลดการแจ้งเตือนเพิ่มเติม',
+  'notification.markAllRead': 'ทำเครื่องหมายว่าอ่านทั้งหมด',
+  'notification.markAllDone': 'ทำเครื่องหมายการแจ้งเตือนทั้งหมดว่าอ่านแล้ว',
+  'notification.markReadFailed': 'ทำเครื่องหมายว่าอ่านไม่สำเร็จ',
+  'notification.comment': '{name} แสดงความคิดเห็นในโพสต์ของคุณ',
+  'notification.reply': '{name} ตอบกลับความคิดเห็นของคุณ',
+  'notification.follow': '{name} ติดตามคุณ',
+  'notification.unknown': 'คุณมีการแจ้งเตือนใหม่',
+  'notification.profileEntry': 'การแจ้งเตือนของฉัน',
+  'notification.bellLabel': 'การแจ้งเตือน',
+  'notification.badgeLabel': 'การแจ้งเตือนที่ยังไม่ได้อ่าน {count} รายการ',
+  'title.notifications': 'การแจ้งเตือน｜{site}',
 };

@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/oauth2 v0.36.0
 )

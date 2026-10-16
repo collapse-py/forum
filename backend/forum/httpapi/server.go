@@ -92,6 +92,13 @@ type Server struct {
 	// 允許為 nil：nil 與「未設定」語意相同（退回標頭優先的舊行為），因此
 	// 測試以 struct literal 構造 Server 時不需要填它。
 	trustedProxies *trustedProxySet
+	// notifyStream 是即時通知的推播中心（WebSocket 連線的集合），見
+	// forum_notification_stream.go 的檔頭。
+	//
+	// 允許為 nil：測試以 struct literal 構造 Server 時不會有它，而 nil 對
+	// 所有操作都是 no-op（attach 只回「這條連線沒有推播能力」、publish 回 0）。
+	// 推播是附加效果，不該讓留言／追蹤的寫入路徑依賴它才能運作。
+	notifyStream *notificationStreamHub
 }
 
 // NewServer 以依賴注入的方式組裝 Server。cfg、db、sessions、redisClient 都由
@@ -130,6 +137,11 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 		// 「這次請求來自哪裡」的地方共用同一份判斷，讓限流、封鎖與稽核紀錄
 		// 不可能對同一個請求得出不同的答案。
 		trustedProxies: parseTrustedProxyCIDRs(cfg.TrustedProxyCIDRs),
+		// 即時通知的推播中心。刻意建在 NewServer（而不是延後到第一次推送時
+		// 才建立）：它只是一個 map，而「這個 Server 有沒有推播能力」不該是
+		// 執行期的問題。它也不啟動任何 goroutine —— 連線各自的 goroutine
+		// 由 upgrade 之後的 handler 啟動（見 forum_notification_stream.go）。
+		notifyStream: newNotificationStreamHub(),
 		metrics: metrics.New(metrics.Options{
 			// 記憶體視窗刻意比資料庫保留期長：頁面重整時看到的是「自上次
 			// 重新整理以來」的完整曲線，而不是只有最後 24 分鐘。時間軸的實際
@@ -331,7 +343,7 @@ func (s *Server) requireLogin(next http.HandlerFunc) http.HandlerFunc {
 			// 停權檢查只擋非管理員：管理員必須仍能進入系統，才能處理被停權
 			// 使用者的檢舉與解封。session 的 is_admin 在登入當下就由
 			// cfg.AllowedAdminEmail 決定，不會因為使用者被設為 SUSPENDED 而改變。
-			suspended, err := s.isForumUserSuspended(r, email)
+			suspended, err := s.isForumUserSuspended(r.Context(), email)
 			if err != nil {
 				// 查不到狀態不代表可以放行。DB 故障是伺服器問題而非授權結果，
 				// 此時回 500 讓呼叫端重試，絕不能因為「查不到」就當成已驗證。
@@ -371,10 +383,14 @@ func (s *Server) requireLoginForWrite(next http.HandlerFunc) http.HandlerFunc {
 // 邊界情況：查無此列（sql.ErrNoRows）視為「非停權」而不是錯誤，因為管理員帳號
 // 與尚未完成首次登入的使用者都可能還不存在於該表，requireLogin 不該因此失敗。
 // 其他資料庫錯誤一律上浮，由呼叫端回 500。
-func (s *Server) isForumUserSuspended(r *http.Request, email string) (bool, error) {
+//
+// 參數是 context.Context 而不是 *http.Request：除了 requireLogin（傳
+// r.Context()，client 斷線時可一併取消查詢）之外，通知串流的巡檢 goroutine
+// 也會呼叫它，而那條路徑上已經沒有任何請求可讀（見
+// forum_notification_stream.go 的檔頭）。
+func (s *Server) isForumUserSuspended(ctx context.Context, email string) (bool, error) {
 	var status string
-	// 以 request context 執行，client 斷線時可一併取消查詢，避免佔用連線。
-	err := s.db.QueryRowContext(r.Context(), `SELECT status FROM forum_users WHERE email = ?`, email).Scan(&status)
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM forum_users WHERE email = ?`, email).Scan(&status)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -516,6 +532,9 @@ func (s *Server) Handler() http.Handler {
 		                                 （GET 回追蹤清單、POST 切換追蹤）
 		  /api/forum/following/posts      requireLogin → handleForumFollowingPosts（私有唯讀）
 		  /api/forum/my-posts              requireLogin → handleForumMyPosts（自己的貼文，私有唯讀）
+		  /api/forum/notifications        requireLogin → handleForumNotifications（列表／標記已讀）
+		  /api/forum/notifications/unread-count requireLogin → handleForumNotificationUnreadCount（私有唯讀）
+		  /api/forum/notifications/ws     requireLogin → handleForumNotificationStream（即時推播）
 		  /api/forum/public-profile       handleForumPublicProfile（刻意公開且不限流）
 		  /api/forum/public-posts         handleForumPublicPosts（依金鑰讀取某人貼文，公開且不限流）
 		  /api/forum/search               handleForumSearch（公開唯讀；ES 不可用時降級 MySQL LIKE）
@@ -608,6 +627,22 @@ func (s *Server) Handler() http.Handler {
 	// 那條路徑對「還沒發過文的帳號」會回 404，而個人頁必須把「還沒發過文」顯示成
 	// 空狀態而不是錯誤（理由見 handleForumMyPosts）。
 	mux.HandleFunc("/api/forum/my-posts", s.requireLogin(s.handleForumMyPosts))
+	// 通知：GET 讀取列表、POST 標記已讀（一則或全部）。全部掛 requireLogin ——
+	// 通知是純私有資料，每一條查詢都以 recipient_email = ? 收斂在「自己」。
+	// 未讀數是獨立的一條路由：導覽列的鈴鐺在每個頁面載入時只取一個整數，
+	// 不該為此拉回整份清單。兩條都不掛限流，理由與 my-posts 相同（GET 不吃
+	// write 額度，而 POST 只是一次索引更新，頻率遠低於留言與發文）。
+	// 先註冊較具體的 unread-count，讓路由的意圖一眼可辨。
+	mux.HandleFunc("/api/forum/notifications/unread-count", s.requireLogin(s.handleForumNotificationUnreadCount))
+	// 即時推播（WebSocket）。同樣只掛 requireLogin：
+	//  - 它是 GET，掛 rateLimit 等於不掛（見該函式為什麼放行 GET），而
+	//    requireLogin 已經把匿名者擋在升級之前。
+	//  - 不在路由層限流的理由與其他私有 GET 相同（見 following/posts 的註解），
+	//    連線數的上限改由 handler 自己的同一使用者／全域額度控管，那個額度
+	//    才是長連線真正需要的資源邊界（見 forum_notification_stream.go）。
+	// 掛在 requireLogin 之後也讓「停權帳號」在升級前就被擋下。
+	mux.HandleFunc("/api/forum/notifications/ws", s.requireLogin(s.handleForumNotificationStream))
+	mux.HandleFunc("/api/forum/notifications", s.requireLogin(s.handleForumNotifications))
 	// 公開個人頁刻意不掛任何認證中介層，因為它就是設計給未登入訪客看的。
 	mux.HandleFunc("/api/forum/public-profile", s.handleForumPublicProfile)
 	// 貼文搜尋。唯讀且刻意不限流：與貼文列表同一個道理，匿名訪客也要能搜尋。

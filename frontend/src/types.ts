@@ -826,3 +826,51 @@ export interface LikeResponse {
 export interface CommentResponse {
   item: ForumComment;
 }
+
+/* ==========================================================================
+   通知
+   ========================================================================== */
+
+/**
+ * GET /api/forum/notifications 的單一通知。
+ *
+ * 與 ForumPost 同一個隱私契約：actorEmail 從不離開後端，前端拿到的身分只有
+ * actor（顯示名稱）與 actorKey（publicKey）。Actor 由後端算好（暱稱或匿名代號），
+ * 因此它一定是可直接顯示的字串，不像 FollowTarget.nickname 可能為空。
+ */
+export interface ForumNotificationItem {
+  id: number;
+  /** comment（有人在我的貼文留言）／reply（有人回覆我的留言）／follow（有人追蹤我）。 */
+  kind: string;
+  actor: string;
+  actorKey: string;
+  /** 觸發者頭像網址（含 media token）；省略＝沒有頭像。 */
+  actorAvatar?: string;
+  /**
+   * 相關貼文／留言編號。後端對「這一種通知沒有這個目標」的欄位用 omitempty
+   * 省略（kind=follow 沒有 postId、kind=comment 沒有 commentId），因此讀到的
+   * undefined 就是「沒有」，不必再判斷 0。
+   */
+  postId?: number;
+  commentId?: number;
+  read: boolean;
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /api/forum/notifications。
+ *
+ * unreadCount 與列表一起回：前端在同一次請求裡更新導覽列的紅點，不必再問一次
+ * 未讀數端點。hasMore 與其他列表端點同一套「滿頁即猜還有下一頁」。
+ */
+export interface NotificationListResponse {
+  items: ForumNotificationItem[];
+  hasMore?: boolean;
+  unreadCount?: number;
+}
+
+/** GET /api/forum/notifications/unread-count、POST /api/forum/notifications */
+export interface NotificationUnreadResponse {
+  unreadCount?: number;
+}

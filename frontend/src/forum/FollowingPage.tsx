@@ -342,7 +342,7 @@ export function FollowingPage() {
         </section>
       </main>
 
-      <BottomNav active="profile" />
+      <BottomNav active="profile" loggedIn={canInteract} />
       <InstallHint hint={install.hint} />
     </ForumShell>
   );

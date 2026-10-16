@@ -201,6 +201,59 @@ body {
   gap: 12px;
 }
 
+/* 導覽列的通知鈴鐺。登入後才渲染（見 src/forum/shell.tsx 的 ForumNav）。
+   刻意不套 .login-link 那組藥丸外框：它是一個「狀態入口」，紅點才是要看
+   的東西，加上外框會讓它和旁邊真正的動作按鈕（登入／登出／安裝）搶注意力。
+   它固定放在 .nav-actions 的最前面，因此不論右側有哪些按鈕，鈴鐺永遠在
+   最左邊、與登入狀態文字之間隔著 .nav-actions 的 gap。 */
+.notification-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.notification-bell:hover {
+  background: #f2f2f2;
+}
+
+.notification-bell .material-symbols-outlined {
+  font-size: 22px;
+}
+
+/* 紅點：絕對定位貼在鈴鐺角落，文字置中。min-width 讓「1」與「99+」都得到一顆
+   看起來正常的圓形，而不是隨數字長寬變化。
+
+   位置用 inset-inline-end 而不是 right：RTL 語系（ar）下它會自動翻到另一側，
+   與 .notification-bell 的圖示方向一致，不必在 RTL 節另外寫一條。
+
+   pointer-events: none 讓紅點本身不吃點擊 —— 它只是裝飾，真正可點的是整個
+   連結；少了這一行，紅點覆蓋的區域點下去不會有任何反應。 */
+.notification-badge {
+  position: absolute;
+  top: 1px;
+  inset-inline-end: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  color: #fff;
+  background: #e5484d;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  pointer-events: none;
+}
+
 /* 膠囊按鈕的共用外框。公開頁的動作按鈕都是同一顆藥丸：登入、安裝 App、送出
    貼文、登出。差別只在填色（下一條）與內距。 */
 .login-link,
@@ -568,6 +621,45 @@ body {
   font-variation-settings: "FILL" 0, "wght" 450, "GRAD" 0, "opsz" 24;
 }
 
+/* 標籤單行、放不下就省略號。四個項目共用一條導覽列之後，通知的譯名在部分
+   語言裡很長（de 的「Benachrichtigungen」、th 的「การแจ้งเตือน」），窄機上
+   難免放不下。沒有這一條時，長標籤會撐破自己的格子並把整列推出版面；有它
+   就退化成「Benachrichti…」，而不是讓最左與最右兩格被螢幕邊緣切掉。
+   能生效的前提是外層 .bottom-nav-item 可以被 flex 壓縮（min-width 是 58px
+   的地板），於是 max-width: 100% 真的比內容窄，ellipsis 才有東西可截。 */
+.bottom-nav-label {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 圖示的定位容器。紅點要貼在圖示的右上角，而不是整個格子（比圖示寬得多）
+   的角落，因此多一層包住圖示的 relative 元素。 */
+.bottom-nav-icon {
+  position: relative;
+  display: flex;
+}
+
+/* 未讀紅點（.bottom-nav-item 的通知那一格）。只是一個點而不是數字：底部
+   導覽字級小，塞「99+」會讓四個項目寬度不一；數字由頂部導覽列的鈴鐺負責。
+
+   白框與底部的白色導覽融在一起（與 .notification-badge 同一個做法），讓點
+   讀起來是浮在圖示上而不是第二個圖示。pointer-events: none 與鈴鐺的紅點
+   同一個理由：它是裝飾，可及名稱已經在連結上說明「N 則未讀通知」。 */
+.bottom-nav-dot {
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #e5484d;
+  pointer-events: none;
+}
+
 .bottom-nav-item.active {
   color: var(--text);
 }
@@ -664,7 +756,10 @@ body {
   }
 
   .bottom-nav {
-    gap: 28px;
+    /* 28px 是三個項目的間距；底部導覽加入通知成為四個之後，窄機（360px 級）
+       上 28px 會讓長譯名放不下，因此收窄到 16px，四個項目連同省略號一起
+       擠進一行。 */
+    gap: 16px;
   }
 }
 

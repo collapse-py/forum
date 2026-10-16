@@ -15,7 +15,7 @@
     <meta name="forum-name" content="{{FORUM_NAME}}" />
     <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
     <title>個人資料｜{{FORUM_NAME}}</title>
-    <link rel="stylesheet" href="/style.css?v=202610091755" />
+    <link rel="stylesheet" href="/style.css?v=202610171200" />
     <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
     <link rel="icon" href="/asset/logo.png" type="image/png" />
     <link rel="apple-touch-icon" href="/asset/logo.png" />
@@ -123,9 +123,9 @@
         overflow-wrap: anywhere;
       }
 
-      /* --- 追蹤入口 -----------------------------------------------------------
-       * 上面兩個 block 是「資料欄」（標題在上、值在下），這一個是「前往另一頁
-       * 的連結」。刻意不做成資料欄的樣子：它沒有值可顯示（不顯示追蹤人數的
+      /* --- 個人頁入口連結（我的追蹤／我的通知） --------------------------------
+       * 上面兩個 block 是「資料欄」（標題在上、值在下），這幾個是「前往另一頁
+       * 的連結」。刻意不做成資料欄的樣子：它們沒有值可顯示（不顯示追蹤人數的
        * 理由見 src/forum/ProfilePage.tsx），硬做成「標題＋空值」只會像一格
        * 填錯了的欄位。
        *
@@ -133,7 +133,7 @@
        * 對齊上面兩欄的值（16px），但加重到 700，讓它在同一個 block 裡讀起來
        * 是一個動作而不只是一段文字。
        * ------------------------------------------------------------------ */
-      .profile-following-link {
+      .profile-entry-link {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -154,13 +154,13 @@
         transition: background-color 140ms var(--ease);
       }
 
-      .profile-following-link:hover {
+      .profile-entry-link:hover {
         background: #f7f7f7;
       }
 
       /* 箭頭用既有的 Material Symbols 字型，與 .back-link 的 arrow_back 同一套
          （字型在 style.css 與各頁的 <link> 預先載入，不新增資產）。 */
-      .profile-following-link .material-symbols-outlined {
+      .profile-entry-link .material-symbols-outlined {
         color: var(--muted);
         font-size: 22px;
       }
@@ -169,7 +169,7 @@
          RTL 節「▸ 這個字形本身方向固定，展開/收起的三角要在 RTL 換成 ◂」是同一個
          問題，這裡用旋轉解決而不是換字形（換字形要改 React 端的內容，會讓這個
          方向判斷散到兩處）。 */
-      [dir="rtl"] .profile-following-link .material-symbols-outlined {
+      [dir="rtl"] .profile-entry-link .material-symbols-outlined {
         transform: rotate(180deg);
       }
 

@@ -297,6 +297,24 @@ func (s *Server) toggleForumFollow(w http.ResponseWriter, r *http.Request, follo
 		return
 	}
 
+	// 通知：只有「新增追蹤」才通知，取消追蹤不產生通知 —— 否則反覆追蹤／取消
+	// 就能拿來洗版對方的收件匣，而一則「某人取消追蹤你」的通知對收件者也沒有
+	// 任何可採取的行動。
+	//
+	// 放在 Commit 之後而非交易內：通知指向的是一個「已成立的追蹤關係」，
+	// 交易若在最後關頭失敗，收件者不該收到一則指向不存在關係的通知。
+	// 也因為它在交易外，它是 best-effort：寫不進去只記日誌，不影響已經
+	// 提交的追蹤本身（與留言通知同一個取捨，見 createForumNotification）。
+	if !following {
+		id, err := s.createForumNotification(r.Context(), target, follower, forumNotificationFollow, 0, 0)
+		if err != nil {
+			logger.WarnfContext(r.Context(), "[FORUM] 建立追蹤通知失敗: %v", err)
+		} else {
+			// 推播給對方開著的頁面（非同步，理由見 notifyForumNotificationCreated）。
+			s.notifyForumNotificationCreated(target, id)
+		}
+	}
+
 	writeOK(w, forumFollowToggleResponse{Key: key, Following: !following})
 }
 

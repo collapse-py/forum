@@ -125,6 +125,7 @@ export const id: Record<MessageKey, string> = {
     'Buat baru',
   'bottomNav.profile':
     'Profil',
+  'bottomNav.notifications': 'Notifikasi',
   'i18n.ariaLabel':
     'Pilih bahasa',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const id: Record<MessageKey, string> = {
   'title.adminSessions': 'Masuk & sesi｜{brand} Admin',
   'title.adminBlocks': 'Daftar blokir IP｜{brand} Admin',
   'title.adminAnnouncements': 'Pengumuman｜{brand} Admin',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'Notifikasi',
+  'notification.loading': 'Memuat notifikasi…',
+  'notification.loadFailed': 'Gagal memuat notifikasi.',
+  'notification.empty': 'Belum ada notifikasi.',
+  'notification.listLabel': 'Daftar notifikasi',
+  'notification.loadMore': 'Muat lebih banyak notifikasi',
+  'notification.markAllRead': 'Tandai semua sudah dibaca',
+  'notification.markAllDone': 'Semua notifikasi ditandai sudah dibaca.',
+  'notification.markReadFailed': 'Gagal menandai sudah dibaca.',
+  'notification.comment': '{name} mengomentari postingan Anda',
+  'notification.reply': '{name} membalas komentar Anda',
+  'notification.follow': '{name} mengikuti Anda',
+  'notification.unknown': 'Anda punya notifikasi baru',
+  'notification.profileEntry': 'Notifikasi saya',
+  'notification.bellLabel': 'Notifikasi',
+  'notification.badgeLabel': '{count} notifikasi belum dibaca',
+  'title.notifications': 'Notifikasi｜{site}',
 };

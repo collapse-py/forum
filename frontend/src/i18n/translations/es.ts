@@ -125,6 +125,7 @@ export const es: Record<MessageKey, string> = {
     'Nuevo',
   'bottomNav.profile':
     'Perfil',
+  'bottomNav.notifications': 'Notificaciones',
   'i18n.ariaLabel':
     'Seleccionar idioma',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const es: Record<MessageKey, string> = {
   'title.adminSessions': 'Inicios de sesión y sesiones｜{brand} Administración',
   'title.adminBlocks': 'Lista de bloqueo de IP｜{brand} Administración',
   'title.adminAnnouncements': 'Anuncios｜{brand} Administración',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'Notificaciones',
+  'notification.loading': 'Cargando notificaciones…',
+  'notification.loadFailed': 'No se pudieron cargar las notificaciones.',
+  'notification.empty': 'Aún no hay notificaciones.',
+  'notification.listLabel': 'Lista de notificaciones',
+  'notification.loadMore': 'Cargar más notificaciones',
+  'notification.markAllRead': 'Marcar todo como leído',
+  'notification.markAllDone': 'Todas las notificaciones marcadas como leídas.',
+  'notification.markReadFailed': 'No se pudo marcar como leído.',
+  'notification.comment': '{name} comentó tu publicación',
+  'notification.reply': '{name} respondió a tu comentario',
+  'notification.follow': '{name} te empezó a seguir',
+  'notification.unknown': 'Tienes una notificación nueva',
+  'notification.profileEntry': 'Mis notificaciones',
+  'notification.bellLabel': 'Notificaciones',
+  'notification.badgeLabel': '{count} notificaciones sin leer',
+  'title.notifications': 'Notificaciones｜{site}',
 };

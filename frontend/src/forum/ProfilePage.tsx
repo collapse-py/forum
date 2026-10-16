@@ -462,20 +462,27 @@ export function ProfilePage() {
                 <p id="profile-bio-view">{bio.trim() || t('profile.notSetBio')}</p>
               </div>
               {/*
-                追蹤的入口放在個人資料頁而不是底部導覽：底部那三格是最高頻的
-                三件事（看動態／發文／改資料），追蹤是次要瀏覽，而個人資料頁
-                本來就是「我的帳號」容器。
+                個人頁的次要入口（我的追蹤／我的通知）放在這裡而不是底部導覽：
+                底部那三格是最高頻的三件事（看動態／發文／改資料），這兩個是
+                次要瀏覽，而個人資料頁本來就是「我的帳號」容器。
 
-                純連結，因此不需要任何資料 —— 刻意不在這裡讀追蹤清單來顯示
-                人數：那一頁的分頁是推測式的（有下一頁只能說「N+」），一個
-                會與實際不符的數字比沒有數字更糟。
+                兩者都是純連結，因此不需要任何資料 —— 刻意不在這裡讀追蹤清單來
+                顯示人數：那一頁的分頁是推測式的（有下一頁只能說「N+」），一個
+                會與實際不符的數字比沒有數字更糟。通知的未讀數同理不由這裡顯示：
+                它掛在導覽列的鈴鐺上，只在載入時問一次，不該再多一條查詢路徑。
 
                 版面刻意不做成上面兩欄那種「標題在上、值在下」：沒有值可填的
-                欄位看起來只會像填錯了。箭頭是裝飾，標成 aria-hidden，讓這個
-                連結的可及名稱就是「我的追蹤」四個字。
+                欄位看起來只會像填錯了。箭頭是裝飾，標成 aria-hidden，讓每個
+                連結的可及名稱就是「我的追蹤」「我的通知」。
               */}
-              <a className="profile-following-link" href="/forum/following">
+              <a className="profile-entry-link" href="/forum/following">
                 <span>{t('profile.followingEntry')}</span>
+                <span className="material-symbols-outlined" aria-hidden="true">
+                  chevron_right
+                </span>
+              </a>
+              <a className="profile-entry-link" href="/forum/notifications">
+                <span>{t('notification.profileEntry')}</span>
                 <span className="material-symbols-outlined" aria-hidden="true">
                   chevron_right
                 </span>
@@ -613,7 +620,7 @@ export function ProfilePage() {
         ) : null}
       </main>
 
-      <BottomNav active="profile" />
+      <BottomNav active="profile" loggedIn={loggedIn} />
     </ForumShell>
   );
 }

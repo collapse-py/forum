@@ -61,6 +61,10 @@ CSP 的組成與取捨
 	                           https://cloudflareinsights.com/cdn-cgi/rum，
 	                           connect-src 沒放行的話指令碼雖然會跑，但每次回報
 	                           都會被擋下，等於拿到一份沒有資料的 RUM。
+	                           即時通知的 WebSocket（/api/forum/notifications/ws）
+	                           是同源連線，因此已經落在 'self' 裡面（CSP3 的
+	                           'self' 涵蓋同源的 ws:／wss:），不需要為了它加
+	                           ws: —— 加了反而會多一條沒有作用的來源。
 	manifest-src 'self'        PWA manifest 來自本站。
 
   刻意不使用的指令：
@@ -121,6 +125,7 @@ var frontendShellFiles = []string{
 	"forum-profile.html",
 	"forum-others-profile.html",
 	"forum-following.html",
+	"forum-notifications.html",
 	"forum-post.html",
 	"admin.html",
 	"forum-admin.html",

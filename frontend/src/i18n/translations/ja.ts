@@ -93,6 +93,7 @@ export const ja: Record<MessageKey, string> = {
   'bottomNav.home': 'ホーム',
   'bottomNav.new': '新規',
   'bottomNav.profile': 'プロフィール',
+  'bottomNav.notifications': '通知',
 
   /* ==========================================================================
      i18n
@@ -952,4 +953,22 @@ export const ja: Record<MessageKey, string> = {
   'title.adminSessions': 'ログインとセッション｜{brand} 管理画面',
   'title.adminBlocks': 'IP ブロックリスト｜{brand} 管理画面',
   'title.adminAnnouncements': '站内公告｜{brand} 管理画面',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': '通知',
+  'notification.loading': '通知を読み込み中…',
+  'notification.loadFailed': '通知を読み込めませんでした。',
+  'notification.empty': '通知はまだありません。',
+  'notification.listLabel': '通知一覧',
+  'notification.loadMore': 'さらに通知を読み込む',
+  'notification.markAllRead': 'すべて既読にする',
+  'notification.markAllDone': 'すべての通知を既読にしました。',
+  'notification.markReadFailed': '既読にできませんでした。',
+  'notification.comment': '{name} があなたの投稿にコメントしました',
+  'notification.reply': '{name} があなたのコメントに返信しました',
+  'notification.follow': '{name} があなたをフォローしました',
+  'notification.unknown': '新しい通知があります',
+  'notification.profileEntry': '自分の通知',
+  'notification.bellLabel': '通知',
+  'notification.badgeLabel': '未読の通知 {count} 件',
+  'title.notifications': '通知｜{site}',
 };

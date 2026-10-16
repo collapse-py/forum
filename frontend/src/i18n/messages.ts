@@ -133,6 +133,7 @@ export const zhTW = {
   'bottomNav.home': '首頁',
   'bottomNav.new': '新增',
   'bottomNav.profile': '個人',
+  'bottomNav.notifications': '通知',
 
   /* ==========================================================================
      i18n 切換器
@@ -1173,6 +1174,34 @@ export const zhTW = {
   'title.adminSessions': '登入與 Session｜{brand} 後臺',
   'title.adminBlocks': 'IP 封鎖｜{brand} 後臺',
   'title.adminAnnouncements': '站內公告｜{brand} 後臺',
+
+  /* ==========================================================================
+     notification：站內通知（/forum/notifications）
+     ==========================================================================
+     三種事件（留言／回覆／追蹤）各自一句，`{name}` 是觸發者的顯示名稱 ——
+     它由後端算好（暱稱或匿名代號），因此是插值而不是另立一個鍵。
+     `{count}` 只用在鈴鐺紅點的可及名稱上（.notification-badge 本身不顯示數字以外
+     的內容，但那顆點對讀屏使用者必須有話可說）。
+     ========================================================================== */
+
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': '通知',
+  'notification.loading': '載入通知中…',
+  'notification.loadFailed': '通知載入失敗。',
+  'notification.empty': '目前沒有通知。',
+  'notification.listLabel': '通知列表',
+  'notification.loadMore': '載入更多通知',
+  'notification.markAllRead': '全部標為已讀',
+  'notification.markAllDone': '已將全部通知標為已讀。',
+  'notification.markReadFailed': '標記已讀失敗。',
+  'notification.comment': '{name} 在你的貼文留言',
+  'notification.reply': '{name} 回覆了你的留言',
+  'notification.follow': '{name} 追蹤了你',
+  'notification.unknown': '你有一則新通知',
+  'notification.profileEntry': '我的通知',
+  'notification.bellLabel': '通知',
+  'notification.badgeLabel': '{count} 則未讀通知',
+  'title.notifications': '通知｜{site}',
 } as const;
 
 /**

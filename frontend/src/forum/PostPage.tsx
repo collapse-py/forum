@@ -260,7 +260,7 @@ export function PostPage() {
         ) : null}
       </main>
 
-      <BottomNav active="home" />
+      <BottomNav active="home" loggedIn={canInteract} />
       <InstallHint hint={install.hint} />
     </ForumShell>
   );

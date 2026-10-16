@@ -125,6 +125,7 @@ export const ar: Record<MessageKey, string> = {
     'إنشاء',
   'bottomNav.profile':
     'الملف الشخصي',
+  'bottomNav.notifications': 'الإشعارات',
   'i18n.ariaLabel':
     'اختيار اللغة',
   'i18n.current':
@@ -1298,4 +1299,22 @@ export const ar: Record<MessageKey, string> = {
   'title.adminSessions': 'الدخول والجلسات｜{brand} الإدارة',
   'title.adminBlocks': 'قائمة حظر العناوين｜{brand} الإدارة',
   'title.adminAnnouncements': 'الإعلانات｜{brand} الإدارة',
+  'notification.eyebrow': 'NOTIFICATIONS',
+  'notification.title': 'الإشعارات',
+  'notification.loading': 'جارٍ تحميل الإشعارات…',
+  'notification.loadFailed': 'تعذَّر تحميل الإشعارات.',
+  'notification.empty': 'لا توجد إشعارات بعد.',
+  'notification.listLabel': 'قائمة الإشعارات',
+  'notification.loadMore': 'تحميل المزيد من الإشعارات',
+  'notification.markAllRead': 'تحديد الكل كمقروء',
+  'notification.markAllDone': 'تم تحديد جميع الإشعارات كمقروءة.',
+  'notification.markReadFailed': 'تعذَّر التحديد كمقروء.',
+  'notification.comment': '{name} علَّق على منشورك',
+  'notification.reply': '{name} ردَّ على تعليقك',
+  'notification.follow': '{name} بدأ متابعتك',
+  'notification.unknown': 'لديك إشعار جديد',
+  'notification.profileEntry': 'إشعاراتي',
+  'notification.bellLabel': 'الإشعارات',
+  'notification.badgeLabel': '{count} إشعارات غير مقروءة',
+  'title.notifications': 'الإشعارات｜{site}',
 };

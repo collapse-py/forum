@@ -400,7 +400,7 @@ export function FeedPage() {
         )}
       </main>
 
-      <BottomNav active="home" onHome={handleHome} />
+      <BottomNav active="home" onHome={handleHome} loggedIn={canInteract} />
 
       <footer>
         <a href="/forum">{t('common.backToForumHome')}</a>
