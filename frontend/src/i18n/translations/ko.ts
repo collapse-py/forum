@@ -1306,8 +1306,6 @@ export const ko: Record<MessageKey, string> = {
   'notification.empty': '아직 알림이 없습니다.',
   'notification.listLabel': '알림 목록',
   'notification.loadMore': '알림 더 불러오기',
-  'notification.markAllRead': '모두 읽음으로 표시',
-  'notification.markAllDone': '모든 알림을 읽음으로 표시했습니다.',
   'notification.markReadFailed': '읽음으로 표시하지 못했습니다.',
   'notification.comment': '{name} 님이 회원님의 게시물에 댓글을 남겼습니다',
   'notification.reply': '{name} 님이 회원님의 댓글에 답글을 남겼습니다',

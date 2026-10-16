@@ -1,9 +1,9 @@
 /*
  * 通知（src/forum/useNotifications.ts）
  *
- * 一頁一份的通知狀態：清單、未讀數，以及「標記已讀」的兩個動作
- * （單則與全部）。兩條導覽列（頂部鈴鐺、底部通知紅點）的未讀數也從這裡讀，
- * 理由見下。
+ * 一頁一份的通知清單：載入、分頁，以及「標記已讀」的兩個動作（單則，與進頁
+ * 時的自動全部已讀）。未讀數本身不在這裡 —— 它是共享快照，住
+ * notificationStream.ts（見下）。
  *
  * 為什麼通知沒有「一頁一份」以外的選擇
  * ------------------------------------
@@ -29,17 +29,17 @@
  *
  * 推播來的通知一定是未讀的，也不受這一趟的自動已讀影響：使用者正在看著通知頁
  * 時又來了一則，它不該被吞掉，否則使用者永遠不會知道多了一則。紅點因此會重新
- * 亮起來，「全部標為已讀」也重新可以按。
+ * 亮起來（那是共享快照的事，見 notificationStream.ts）。
  *
  * 進入頁面就自動已讀（而清單仍看得到「新」的樣式）
  * ----------------------------------------------
  * 第一頁載入完成、後端也回報還有未讀時，就直接送出「全部已讀」：鈴鐺與底部
- * 導覽的紅點立刻消失，使用者不必再按「全部標為已讀」。
+ * 導覽的紅點立刻消失，使用者不必動手。頁面上因此沒有那顆按鈕 —— 它與這裡做的
+ * 是同一件事，見 NotificationsPage 的檔頭。
  *
  * 但清單上的列不跟著變成已讀樣式。這裡的 item.read 是「這一趟進來時哪些是
  * 新的」的快照，留著它使用者才看得出這次進來有哪些新通知；重新載入後才回到
- * 後端的權威狀態（全部已讀）。也因此「全部標為已讀」按鈕在自動已讀之後就是
- * 停用狀態（見 NotificationsPage 的 hasUnread）。
+ * 後端的權威狀態（全部已讀）。
  *
  * 代價是翻頁載入的較舊通知不會有這個樣式：那些列是自動已讀之後才向後端拿
  * 的，後端已經把它們標成已讀（要留住「當時是否未讀」得在後端另存一份）。
@@ -58,9 +58,9 @@ const PAGE_SIZE = 20;
 /**
  * 送出「全部已讀」，並把後端回報的未讀數寫回共享快照；回傳剩下的未讀數。
  *
- * 兩個呼叫端共用：進入通知頁時的自動已讀與使用者按下的「全部標為已讀」。差別
- * 只在事後怎麼處理清單 —— 自動已讀刻意不動列的 read 旗標（見檔頭），按鈕則把
- * 已載入的列一起標成已讀。
+ * 唯一的呼叫端是進入通知頁時的自動已讀（見檔頭）。獨立成函式而不是寫進
+ * autoMarkAllRead：它同時負責「POST 的形狀」與「寫回共享快照」，而快照是
+ * 導覽列紅點的來源 —— 這件事與 hook 的 state 無關。
  */
 async function postMarkAllRead(): Promise<number> {
   const data = await requestJSON<NotificationUnreadResponse>('/api/forum/notifications', {
@@ -82,8 +82,6 @@ export interface NotificationsState {
   items: ForumNotificationItem[];
   /** 還有沒有下一頁。 */
   hasMore: boolean;
-  /** 未讀數。與列表一起由後端回，也是導覽列紅點的來源（進頁自動已讀後即為 0）。 */
-  unreadCount: number;
   /** 伺服器或網路的錯誤訊息；null 代表沒有。 */
   error: Message | string | null;
 }
@@ -97,21 +95,16 @@ export interface NotificationsController {
    * （全部已讀），見檔頭。
    */
   reload: () => void;
-  /** 把一則標成已讀。成功後就地更新那一列與未讀數。 */
+  /** 把一則標成已讀。成功後就地更新那一列，並把未讀數寫回共享快照。 */
   markRead: (id: number) => Promise<void>;
-  /** 把全部未讀標成已讀，並清掉清單上的「新」樣式。 */
-  markAllRead: () => Promise<void>;
-  /** 是否有一則「全部已讀」請求在途（按鈕據此顯示忙碌狀態）。 */
-  markingAll: boolean;
 }
 
 function initialState(): NotificationsState {
-  return { phase: 'loading', items: [], hasMore: false, unreadCount: 0, error: null };
+  return { phase: 'loading', items: [], hasMore: false, error: null };
 }
 
 export function useNotifications({ autoLoad = true }: { autoLoad?: boolean } = {}): NotificationsController {
   const [state, setState] = useState<NotificationsState>(initialState);
-  const [markingAll, setMarkingAll] = useState(false);
 
   /*
    * offset / hasMore / loading 放 ref 而不是 state，理由與 useFollow 完全相同：
@@ -130,31 +123,24 @@ export function useNotifications({ autoLoad = true }: { autoLoad?: boolean } = {
    */
   const maxSeenIdRef = useRef(0);
 
-  /** 防止連點「全部已讀」送出兩次（第二次沒有可更新的列，但仍是多餘請求）。 */
-  const markingAllRef = useRef(false);
-
   /**
    * 進入通知頁的自動已讀（見檔頭）。
    *
-   * 寫後端、共享快照與頁面自己的未讀數，但刻意不動 items 的 read 旗標：那些旗標
-   * 是「這一趟進來時哪些是新的」的快照，清單要留著才看得出新通知。失敗時把錯誤
-   * 放進 state.error 而不是吞掉 —— 後果是可見的（紅點不會消失），而且使用者可以
-   * 直接按「全部標為已讀」重試。
+   * 寫後端與共享快照，但刻意不動 items 的 read 旗標：那些旗標是「這一趟進來時
+   * 哪些是新的」的快照，清單要留著才看得出新通知。失敗時把錯誤放進 state.error
+   * 而不是吞掉 —— 後果是可見的（紅點不會消失，錯誤列會說明原因），而重試就是
+   * 重新載入這一頁（或連線重新同步）。
    */
   const autoMarkAllRead = useCallback((): void => {
-    void postMarkAllRead()
-      .then((unread) => {
-        // 頁面自己的未讀數也要歸零：按鈕的停用狀態看它（見 NotificationsPage
-        // 的 hasUnread）。清單的 read 旗標刻意不動，見上。
-        setState((current) => ({ ...current, unreadCount: unread }));
-      })
-      .catch((error: unknown) => {
-        if (error instanceof LoginRequiredError) {
-          goToLogin();
-          return;
-        }
-        setState((current) => ({ ...current, error: errorText(error, msg('notification.markReadFailed')) }));
-      });
+    // 成功的部分沒有事要做：未讀數只有共享快照一份，而 postMarkAllRead 已經
+    // 寫進去了；清單的 read 旗標刻意不動（見上）。這裡只處理失敗。
+    void postMarkAllRead().catch((error: unknown) => {
+      if (error instanceof LoginRequiredError) {
+        goToLogin();
+        return;
+      }
+      setState((current) => ({ ...current, error: errorText(error, msg('notification.markReadFailed')) }));
+    });
   }, []);
 
   const load = useCallback((reset: boolean) => {
@@ -199,9 +185,6 @@ export function useNotifications({ autoLoad = true }: { autoLoad?: boolean } = {
             phase: 'ready',
             items: reset ? items : [...current.items, ...appended],
             hasMore,
-            // 未讀數只在第一頁（reset）時採用：翻頁時後端回的是同一個數字，
-            // 但列表新增的列不會改變未讀數，沿用目前的即可。
-            unreadCount: reset ? Math.max(0, data.unreadCount ?? 0) : current.unreadCount,
             error: null,
           };
         });
@@ -234,19 +217,17 @@ export function useNotifications({ autoLoad = true }: { autoLoad?: boolean } = {
   const reload = useCallback(() => load(true), [load]);
 
   useEffect(() => {
-    const unsubscribePush = subscribeNotificationPushes((item, unreadCount) => {
-      // 這一則已經在清單裡（例如清單請求比推播晚到）：只要更新未讀數，不要
-      // 插入第二列。id 遞增且列表遞減，因此「大於看過的最大 id」就等價於「新的一則」。
-      if (item.id <= maxSeenIdRef.current) {
-        setState((current) => ({ ...current, unreadCount }));
-        return;
-      }
+    const unsubscribePush = subscribeNotificationPushes((item) => {
+      // 這一則已經在清單裡（例如某次重新載入已經把它帶回來了）：什麼都不必做，
+      // 未讀數是共享快照的事（推播處理常式已經寫過）。id 遞增且列表遞減，因此
+      // 「大於看過的最大 id」就等價於「新的一則」。
+      if (item.id <= maxSeenIdRef.current) return;
       maxSeenIdRef.current = item.id;
       // 清單頂端多了一列，接下來翻頁的起點也要跟著 +1：後端以 offset（位置）
       // 分頁，而新的通知會把它後面每一則的位置往後推一格。少了這一行，
       // 「載入更多」會把已經在畫面上的那一列再拿回來一次。
       offsetRef.current += 1;
-      setState((current) => ({ ...current, items: [item, ...current.items], unreadCount }));
+      setState((current) => ({ ...current, items: [item, ...current.items] }));
     });
 
     return unsubscribePush;
@@ -276,8 +257,8 @@ export function useNotifications({ autoLoad = true }: { autoLoad?: boolean } = {
       setState((current) => ({
         ...current,
         items: current.items.map((item) => (item.id === id ? { ...item, read: true } : item)),
-        unreadCount: unread,
       }));
+      // 未讀數只有共享快照一份：導覽列的紅點據此更新，頁面自己不留。
       publishUnreadCount(unread);
     } catch (error) {
       if (error instanceof LoginRequiredError) {
@@ -289,30 +270,5 @@ export function useNotifications({ autoLoad = true }: { autoLoad?: boolean } = {
     }
   }, []);
 
-  const markAllRead = useCallback(async (): Promise<void> => {
-    if (markingAllRef.current) return;
-    markingAllRef.current = true;
-    setMarkingAll(true);
-    try {
-      const unread = await postMarkAllRead();
-      setState((current) => ({
-        ...current,
-        items: current.items.map((item) => (item.read ? item : { ...item, read: true })),
-        unreadCount: unread,
-        error: null,
-      }));
-    } catch (error) {
-      if (error instanceof LoginRequiredError) {
-        goToLogin();
-        return;
-      }
-      setState((current) => ({ ...current, error: errorText(error, msg('notification.markReadFailed')) }));
-      throw error;
-    } finally {
-      markingAllRef.current = false;
-      setMarkingAll(false);
-    }
-  }, []);
-
-  return { state, loadMore, reload, markRead, markAllRead, markingAll };
+  return { state, loadMore, reload, markRead };
 }

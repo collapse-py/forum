@@ -963,8 +963,6 @@ export const zhCN: Record<MessageKey, string> = {
   'notification.empty': '暂无通知。',
   'notification.listLabel': '通知列表',
   'notification.loadMore': '加载更多通知',
-  'notification.markAllRead': '全部标为已读',
-  'notification.markAllDone': '已将全部通知标为已读。',
   'notification.markReadFailed': '标为已读失败。',
   'notification.comment': '{name} 评论了你的帖子',
   'notification.reply': '{name} 回复了你的评论',

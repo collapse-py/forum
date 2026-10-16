@@ -1306,8 +1306,6 @@ export const ptBR: Record<MessageKey, string> = {
   'notification.empty': 'Ainda não há notificações.',
   'notification.listLabel': 'Lista de notificações',
   'notification.loadMore': 'Carregar mais notificações',
-  'notification.markAllRead': 'Marcar todas como lidas',
-  'notification.markAllDone': 'Todas as notificações foram marcadas como lidas.',
   'notification.markReadFailed': 'Não foi possível marcar como lida.',
   'notification.comment': '{name} comentou na sua publicação',
   'notification.reply': '{name} respondeu ao seu comentário',

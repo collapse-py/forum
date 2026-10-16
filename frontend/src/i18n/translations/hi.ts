@@ -1306,8 +1306,6 @@ export const hi: Record<MessageKey, string> = {
   'notification.empty': 'अभी कोई सूचना नहीं है।',
   'notification.listLabel': 'सूचना सूची',
   'notification.loadMore': 'और सूचनाएँ लोड करें',
-  'notification.markAllRead': 'सभी को पढ़ा हुआ चिह्नित करें',
-  'notification.markAllDone': 'सभी सूचनाएँ पढ़ी हुई चिह्नित कर दी गईं।',
   'notification.markReadFailed': 'पढ़ा हुआ चिह्नित नहीं कर सके।',
   'notification.comment': '{name} ने आपकी पोस्ट पर टिप्पणी की',
   'notification.reply': '{name} ने आपकी टिप्पणी का उत्तर दिया',

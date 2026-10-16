@@ -1306,8 +1306,6 @@ export const vi: Record<MessageKey, string> = {
   'notification.empty': 'Chưa có thông báo nào.',
   'notification.listLabel': 'Danh sách thông báo',
   'notification.loadMore': 'Tải thêm thông báo',
-  'notification.markAllRead': 'Đánh dấu tất cả là đã đọc',
-  'notification.markAllDone': 'Đã đánh dấu tất cả thông báo là đã đọc.',
   'notification.markReadFailed': 'Không đánh dấu được là đã đọc.',
   'notification.comment': '{name} đã bình luận về bài viết của bạn',
   'notification.reply': '{name} đã trả lời bình luận của bạn',

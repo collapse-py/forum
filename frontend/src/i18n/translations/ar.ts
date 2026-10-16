@@ -1306,8 +1306,6 @@ export const ar: Record<MessageKey, string> = {
   'notification.empty': 'لا توجد إشعارات بعد.',
   'notification.listLabel': 'قائمة الإشعارات',
   'notification.loadMore': 'تحميل المزيد من الإشعارات',
-  'notification.markAllRead': 'تحديد الكل كمقروء',
-  'notification.markAllDone': 'تم تحديد جميع الإشعارات كمقروءة.',
   'notification.markReadFailed': 'تعذَّر التحديد كمقروء.',
   'notification.comment': '{name} علَّق على منشورك',
   'notification.reply': '{name} ردَّ على تعليقك',

@@ -1306,8 +1306,6 @@ export const th: Record<MessageKey, string> = {
   'notification.empty': 'ยังไม่มีการแจ้งเตือน',
   'notification.listLabel': 'รายการการแจ้งเตือน',
   'notification.loadMore': 'โหลดการแจ้งเตือนเพิ่มเติม',
-  'notification.markAllRead': 'ทำเครื่องหมายว่าอ่านทั้งหมด',
-  'notification.markAllDone': 'ทำเครื่องหมายการแจ้งเตือนทั้งหมดว่าอ่านแล้ว',
   'notification.markReadFailed': 'ทำเครื่องหมายว่าอ่านไม่สำเร็จ',
   'notification.comment': '{name} แสดงความคิดเห็นในโพสต์ของคุณ',
   'notification.reply': '{name} ตอบกลับความคิดเห็นของคุณ',

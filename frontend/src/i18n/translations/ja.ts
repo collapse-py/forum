@@ -960,8 +960,6 @@ export const ja: Record<MessageKey, string> = {
   'notification.empty': '通知はまだありません。',
   'notification.listLabel': '通知一覧',
   'notification.loadMore': 'さらに通知を読み込む',
-  'notification.markAllRead': 'すべて既読にする',
-  'notification.markAllDone': 'すべての通知を既読にしました。',
   'notification.markReadFailed': '既読にできませんでした。',
   'notification.comment': '{name} があなたの投稿にコメントしました',
   'notification.reply': '{name} があなたのコメントに返信しました',

@@ -268,7 +268,7 @@ export function FollowingPage() {
     <ForumShell>
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum/following" install={install} />
 
-      <main className="forum-main">
+      <main className="forum-main following-main">
         <p className={`status${status.isError ? ' error' : ''}`} role="status" aria-live="polite">
           {status.message === null ? null : tr(status.message)}
         </p>

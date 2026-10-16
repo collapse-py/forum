@@ -1306,8 +1306,6 @@ export const ru: Record<MessageKey, string> = {
   'notification.empty': 'Уведомлений пока нет.',
   'notification.listLabel': 'Список уведомлений',
   'notification.loadMore': 'Загрузить ещё уведомления',
-  'notification.markAllRead': 'Отметить все как прочитанные',
-  'notification.markAllDone': 'Все уведомления отмечены как прочитанные.',
   'notification.markReadFailed': 'Не удалось отметить как прочитанное.',
   'notification.comment': '{name} оставил комментарий к вашей записи',
   'notification.reply': '{name} ответил на ваш комментарий',

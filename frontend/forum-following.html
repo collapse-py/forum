@@ -57,6 +57,21 @@
         font-family: Inter, "Noto Sans TC", sans-serif;
       }
 
+      /*
+       * 頁面外框。與 .new-post-main / .post-page-main / .profile-main /
+       * .notification-main 同一組邊界（28px / 16px / 100px）：這一頁是同一家族
+       * 的「有標題的內容頁」。
+       *
+       * 橫向的 16px 不能省 —— .forum-shell 與 .forum-main 都沒有橫向內距，
+       * 而這一頁的列（.following-person）也只有縱向內距，少了它，區塊標題、
+       * 人名與取消追蹤按鈕會直接貼齊螢幕邊緣（手機上最明顯），列的底線還會
+       * 一路畫到邊。16px 也讓內容與上方導覽列的標誌左緣對齊：.forum-nav 在
+       * 640px 以下是 padding: 10px 16px。
+       */
+      .following-main {
+        padding: 28px 16px 100px;
+      }
+
       /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
       .eyebrow {
         margin-bottom: 4px;

@@ -151,8 +151,8 @@ interface NotificationStreamMessage {
 /** 後端 close frame 的應用層 code：被同一使用者的較新連線取代（見檔頭的重連策略）。 */
 const STREAM_CLOSE_REPLACED = 4000;
 
-/** 推播訂閱者（通知頁的清單）。unreadCount 是後端一起送來的最新未讀數。 */
-const pushSubscribers = new Set<(item: ForumNotificationItem, unreadCount: number) => void>();
+/** 推播訂閱者（通知頁的清單）。只傳 item：未讀數在下面已經先寫進共享快照。 */
+const pushSubscribers = new Set<(item: ForumNotificationItem) => void>();
 
 /** 「重新連上了，請重新同步」的訂閱者（通知頁的清單）。 */
 const resyncSubscribers = new Set<() => void>();
@@ -191,12 +191,10 @@ export function ensureNotificationStream(loggedIn: boolean): void {
 /**
  * 通知頁訂閱「有人推了一則新通知」。回傳取消訂閱的函式。
  *
- * unreadCount 與推播一起送來（後端在推播時順便查了一次未讀數），因此通知頁不必
- * 為了按鈕的停用狀態自己再問一次。
+ * 只傳 item：未讀數是共享快照的事，處理常式在通知訂閱者之前就寫好了（導覽列的
+ * 紅點據此更新）；清單只負責把那一列插到最前面。
  */
-export function subscribeNotificationPushes(
-  subscriber: (item: ForumNotificationItem, unreadCount: number) => void,
-): () => void {
+export function subscribeNotificationPushes(subscriber: (item: ForumNotificationItem) => void): () => void {
   pushSubscribers.add(subscriber);
   return () => {
     pushSubscribers.delete(subscriber);
@@ -279,10 +277,9 @@ function handleStreamMessage(raw: unknown): void {
     const item = message.item;
     // id 是清單的唯一鍵（去重與就地更新都靠它），沒有它的訊息沒有用處。
     if (item && typeof item.id === 'number' && item.id > 0) {
-      const unreadCount = typeof message.unreadCount === 'number' ? Math.max(0, message.unreadCount) : 0;
       // 未讀數先寫進共享快照（導覽列立刻亮），再交給清單訂閱者插入那一列。
-      publishUnreadCount(unreadCount);
-      for (const subscriber of pushSubscribers) subscriber(item, unreadCount);
+      if (typeof message.unreadCount === 'number') publishUnreadCount(message.unreadCount);
+      for (const subscriber of pushSubscribers) subscriber(item);
     }
   }
 }

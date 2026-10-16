@@ -1191,8 +1191,6 @@ export const zhTW = {
   'notification.empty': '目前沒有通知。',
   'notification.listLabel': '通知列表',
   'notification.loadMore': '載入更多通知',
-  'notification.markAllRead': '全部標為已讀',
-  'notification.markAllDone': '已將全部通知標為已讀。',
   'notification.markReadFailed': '標記已讀失敗。',
   'notification.comment': '{name} 在你的貼文留言',
   'notification.reply': '{name} 回覆了你的留言',

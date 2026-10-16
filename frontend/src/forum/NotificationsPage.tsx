@@ -13,15 +13,23 @@
  * 未讀數的來源
  * ------------
  * 這一頁的未讀數來自 GET /api/forum/notifications 的回應（與列表一起回），
- * 標記已讀後由 useNotifications 就地更新，並寫回共享快照給導覽列 —— 因此
- * 「全部已讀」之後鈴鐺與底部導覽的紅點會立刻消失，不必等重新載入。
+ * useNotifications 把它寫進共享快照給導覽列 —— 因此標記已讀之後鈴鐺與底部
+ * 導覽的紅點會立刻消失，不必等重新載入。這一頁自己刻意不留一份：畫面上沒有
+ * 任何地方需要那個數字（見下）。
  *
  * 進入頁面就自動已讀
  * ----------------
- * 清單一載入完，useNotifications 就直接把全部標成已讀（見該檔檔頭），所以
- * 「進來這一頁」就等於按過「全部標為已讀」：紅點立刻消失，使用者不必動手。
- * 清單上保留的是「進來時哪些是新的」樣式；下方「全部標為已讀」按鈕在這之後
- * 是停用狀態，因為後端已經沒有未讀了（見 hasUnread）。
+ * 清單一載入完、後端也回報還有未讀時，useNotifications 就直接把全部標成已讀
+ * （見該檔檔頭），所以「進來這一頁」就等於把全部標成已讀：紅點立刻消失，
+ * 使用者不必動手。
+ *
+ * 頁面上因此沒有「全部標為已讀」按鈕：它與自動已讀做的是同一件事，而自動已讀
+ * 成功時它永遠是按不動的 —— 一個常駐卻幾乎永遠停用的按鈕。它唯一還有作用的
+ * 時刻是自動已讀失敗，而那種情況的重試路徑有兩條，都不需要它：重新載入這一頁，
+ * 或斷線後重新連上時的重新同步（兩者都會再送一次自動已讀）。
+ *
+ * 清單上保留的是「進來時哪些是新的」樣式（item.read）；重新載入之後才回到後端
+ * 的權威狀態。自動已讀失敗仍然是看得見的：訊息會出現在下方的錯誤列。
  *
  * 為什麼整列是一個連結
  * ------------------
@@ -30,10 +38,10 @@
  * 連結給一列，Tab 順序才與畫面上可點的範圍一致。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type MouseEvent } from 'react';
 
 import { formatDateTime, text } from '../core';
-import { msg, t, tr, usePageTitle, type Message } from '../i18n';
+import { t, tr, usePageTitle } from '../i18n';
 import type { ForumNotificationItem } from '../types';
 import { ForumAvatar } from './ForumAvatar';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
@@ -83,22 +91,12 @@ export function NotificationsPage() {
 
   const auth = useAuth();
   const install = usePwaInstall();
-  const { state, loadMore, markRead, markAllRead, markingAll } = useNotifications();
+  const { state, loadMore, markRead } = useNotifications();
 
   // 底部導覽的通知紅點（見 shell.tsx 的 BottomNav）。與 ForumNav 用同一個
   // 「已確定登入」判斷：checking 期間 loggedIn 恆為 false，紅點不需要在
   // 身分揭曉前搶先出現。
   const loggedIn = auth.phase === 'ready' && auth.loggedIn;
-
-  // 存 key+參數或後端回的字串，render 時才用 tr() 解析（見 i18n/runtime.ts）。
-  const [status, setStatus] = useState<{ message: Message | string | null; isError: boolean }>({
-    message: null,
-    isError: false,
-  });
-  const setOk = useCallback(
-    (message: Message | string) => setStatus({ message, isError: false }),
-    [],
-  );
 
   /*
    * 頭像 token 釋放。通知的頭像來自 GET /api/forum/notifications 逐請求簽發的
@@ -130,12 +128,6 @@ export function NotificationsPage() {
 
   /* --- 動作 --------------------------------------------------------------- */
 
-  const handleMarkAll = useCallback(() => {
-    void markAllRead()
-      .then(() => setOk(msg('notification.markAllDone')))
-      .catch(() => undefined);
-  }, [markAllRead, setOk]);
-
   /*
    * 點一列。已讀的直接讓瀏覽器正常導覽；未讀的攔下導覽，先把「標記已讀」送出
    * 再跳頁 —— 若不等它完成，導覽會取消那個 POST，於是使用者點過的紅點下次
@@ -157,19 +149,11 @@ export function NotificationsPage() {
     [markRead],
   );
 
-  /*
-   * 「全部標為已讀」的停用條件看的是「後端還有未讀」。進頁時已經自動已讀，
-   * 因此這裡幾乎總是 false —— 這是對的：該做的事已經做了，按下去不會有任何
-   * 變化（自動已讀失敗時才會保持可按，那就是它的重試路徑）。清單上的未讀
-   * 樣式是這一趟進來的提示，不代表還有東西要標（見 useNotifications 檔頭）。
-   */
-  const hasUnread = state.unreadCount > 0;
-
   return (
     <ForumShell>
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum/notifications" install={install} />
 
-      <main className="forum-main">
+      <main className="forum-main notification-main">
         <a className="back-link" href="/forum">
           <span className="material-symbols-outlined" aria-hidden="true">
             arrow_back
@@ -179,21 +163,6 @@ export function NotificationsPage() {
 
         <p className="eyebrow">{t('notification.eyebrow')}</p>
         <h1 className="notification-title">{t('notification.title')}</h1>
-
-        <div className="notification-toolbar">
-          <button
-            className="notification-mark-all"
-            type="button"
-            onClick={handleMarkAll}
-            disabled={!hasUnread || markingAll}
-          >
-            {t('notification.markAllRead')}
-          </button>
-        </div>
-
-        <p className={`status${status.isError ? ' error' : ''}`} role="status" aria-live="polite">
-          {status.message === null ? null : tr(status.message)}
-        </p>
 
         {/* 伺服器／網路的錯誤（載入或標記）獨立成一行，理由與追蹤頁相同。 */}
         {state.error !== null ? (

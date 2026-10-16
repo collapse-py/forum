@@ -1306,8 +1306,6 @@ export const id: Record<MessageKey, string> = {
   'notification.empty': 'Belum ada notifikasi.',
   'notification.listLabel': 'Daftar notifikasi',
   'notification.loadMore': 'Muat lebih banyak notifikasi',
-  'notification.markAllRead': 'Tandai semua sudah dibaca',
-  'notification.markAllDone': 'Semua notifikasi ditandai sudah dibaca.',
   'notification.markReadFailed': 'Gagal menandai sudah dibaca.',
   'notification.comment': '{name} mengomentari postingan Anda',
   'notification.reply': '{name} membalas komentar Anda',

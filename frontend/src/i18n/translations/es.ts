@@ -1306,8 +1306,6 @@ export const es: Record<MessageKey, string> = {
   'notification.empty': 'Aún no hay notificaciones.',
   'notification.listLabel': 'Lista de notificaciones',
   'notification.loadMore': 'Cargar más notificaciones',
-  'notification.markAllRead': 'Marcar todo como leído',
-  'notification.markAllDone': 'Todas las notificaciones marcadas como leídas.',
   'notification.markReadFailed': 'No se pudo marcar como leído.',
   'notification.comment': '{name} comentó tu publicación',
   'notification.reply': '{name} respondió a tu comentario',

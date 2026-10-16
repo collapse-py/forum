@@ -901,8 +901,6 @@ export const en: Record<MessageKey, string> = {
   'notification.empty': 'No notifications yet.',
   'notification.listLabel': 'Notification list',
   'notification.loadMore': 'Load more notifications',
-  'notification.markAllRead': 'Mark all as read',
-  'notification.markAllDone': 'All notifications marked as read.',
   'notification.markReadFailed': 'Could not mark as read.',
   'notification.comment': '{name} commented on your post',
   'notification.reply': '{name} replied to your comment',
