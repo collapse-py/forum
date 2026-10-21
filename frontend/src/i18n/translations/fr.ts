@@ -93,6 +93,10 @@ export const fr: Record<MessageKey, string> = {
     'Utilisateur introuvable',
   'error.fallbackFollow':
     'Échec du suivi',
+  'error.fallbackBookmark':
+    'Échec de la mise à jour des favoris',
+  'error.fallbackImageDelete':
+    'Échec de la suppression de l’image',
   'auth.checking':
     'Vérification de la connexion en cours…',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const fr: Record<MessageKey, string> = {
     'Contenu de la publication',
   'post.editMax':
     'Maximum : 10 000 caractères',
+  'post.bookmark':
+    'Ajouter aux favoris',
+  'post.unbookmark':
+    'Retirer des favoris',
+  'post.imageEdit':
+    'Changer l’image',
+  'post.imageRemove':
+    'Retirer l’image',
+  'post.imageSelectedNote':
+    'Nouvelle image sélectionnée (appliquée à l’enregistrement).',
+  'post.imageWillRemoveNote':
+    'L’image sera retirée à l’enregistrement.',
   'comment.loading':
     'Chargement des commentaires…',
   'comment.none':
@@ -313,6 +329,8 @@ export const fr: Record<MessageKey, string> = {
     'Échec du chargement. Veuillez réessayer plus tard.',
   'profile.followingEntry':
     'Mes abonnements',
+  'profile.bookmarksEntry':
+    'Mes favoris',
   'profile.postsLabel':
     'Mes publications',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const fr: Record<MessageKey, string> = {
     'Échec du chargement des abonnements.',
   'following.postsFailed':
     'Échec du chargement des publications.',
+  'bookmarks.label':
+    'Publications enregistrées',
+  'bookmarks.empty':
+    'Vous n’avez pas encore de favoris. Touchez « Ajouter aux favoris » sur une publication pour la retrouver ici.',
+  'bookmarks.failed':
+    'Impossible de charger les favoris.',
+  'bookmarks.removed':
+    'Retiré des favoris.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const fr: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Message créé',
   'log.actionPostUpdate': 'Message modifié',
   'log.actionPostDelete': 'Message supprimé',
+  'log.actionPostRestore':
+    'Publication restaurée',
   'log.actionCommentCreate': 'Commentaire créé',
   'log.actionCommentUpdate': 'Commentaire modifié',
   'log.actionCommentDelete': 'Commentaire supprimé',
@@ -1166,6 +1194,24 @@ export const fr: Record<MessageKey, string> = {
   'posts.pinDone': 'Épinglé',
   'posts.unpinDone': 'Désépinglé',
   'posts.pinFailed': 'L\'opération d\'épinglage a échoué.',
+  'posts.onlyDeleted':
+    'Afficher uniquement les supprimées',
+  'posts.deletedBadge':
+    'Supprimée',
+  'posts.restore':
+    'Restaurer',
+  'posts.restoreTitle':
+    'Restaurer la publication n° {id}',
+  'posts.restoreMessage':
+    'Après restauration, la publication réapparaîtra sur les pages publiques ; ses commentaires et son image sont conservés.',
+  'posts.restoreDone':
+    'Publication restaurée.',
+  'posts.restoreFailed':
+    'Échec de la restauration.',
+  'posts.emptyDeletedTitle':
+    'Aucune publication supprimée',
+  'posts.emptyDeletedBody':
+    'Aucune publication supprimée pour le moment.',
   'reports.title':
     'Gestion des signalements',
   'reports.listSummary':
@@ -1273,17 +1319,19 @@ export const fr: Record<MessageKey, string> = {
   'title.forum':
     '{site}',
   'title.login':
-    'Connexion | {site}',
+    'Connexion｜{site}',
   'title.newPost':
-    'Nouveau message | {site}',
+    'Nouveau message｜{site}',
   'title.profile':
-    'Profil personnel | {site}',
+    'Profil personnel｜{site}',
   'title.publicProfile':
-    'Profil public | {site}',
+    'Profil public｜{site}',
   'title.post':
     'Publication｜{site}',
   'title.following':
-    'Abonnements | {site}',
+    'Abonnements｜{site}',
+  'title.bookmarks':
+    'Favoris｜{site}',
   'title.adminUsers':
     'Gestion des utilisateurs | Back-office {brand}',
   'title.adminLogin':

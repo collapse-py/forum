@@ -62,6 +62,10 @@ export const ja: Record<MessageKey, string> = {
   'error.fallbackUpload': '画像のアップロード形式が不正です',
   'error.fallbackNotFound': 'ユーザーが見つかりません',
   'error.fallbackFollow': 'フォローに失敗しました',
+  'error.fallbackBookmark':
+    '保存に失敗しました',
+  'error.fallbackImageDelete':
+    '画像の削除に失敗しました',
 
   /* ==========================================================================
      auth
@@ -141,6 +145,18 @@ export const ja: Record<MessageKey, string> = {
   'post.editedBadge': '編集済み',
   'post.editContentLabel': '投稿内容',
   'post.editMax': '最大 10000 文字',
+  'post.bookmark':
+    '保存',
+  'post.unbookmark':
+    '保存を解除',
+  'post.imageEdit':
+    '画像を変更',
+  'post.imageRemove':
+    '画像を削除',
+  'post.imageSelectedNote':
+    '新しい画像を選択しました（保存時に反映されます）。',
+  'post.imageWillRemoveNote':
+    '保存すると画像が削除されます。',
 
   /* ==========================================================================
      comment
@@ -224,6 +240,8 @@ export const ja: Record<MessageKey, string> = {
   'profile.saveFailed': '保存に失敗しました。時間をおいてお試しください。',
   'profile.loadFailed': '読み込みに失敗しました。時間をおいてお試しください。',
   'profile.followingEntry': 'マイフォロー',
+  'profile.bookmarksEntry':
+    '保存した投稿',
   'profile.postsLabel': 'マイ投稿',
   'profile.emptyPosts': 'まだ投稿していません。',
 
@@ -257,6 +275,14 @@ export const ja: Record<MessageKey, string> = {
   'following.emptyPosts': 'フォロー中のユーザーの投稿はまだありません。',
   'following.peopleFailed': 'フォロー一覧の読み込みに失敗しました。',
   'following.postsFailed': 'フォロー中のユーザーの投稿を読み込めませんでした。',
+  'bookmarks.label':
+    '保存した投稿',
+  'bookmarks.empty':
+    '保存した投稿はまだありません。投稿の「保存」を押すと、ここに表示されます。',
+  'bookmarks.failed':
+    '保存した投稿を読み込めませんでした。',
+  'bookmarks.removed':
+    '保存を解除しました。',
 
   /* ==========================================================================
      login
@@ -455,6 +481,8 @@ export const ja: Record<MessageKey, string> = {
   'log.actionPostCreate': '投稿作成',
   'log.actionPostUpdate': '投稿編集',
   'log.actionPostDelete': '投稿削除',
+  'log.actionPostRestore':
+    '投稿を復元',
   'log.actionCommentCreate': 'コメント作成',
   'log.actionCommentUpdate': 'コメント編集',
   'log.actionCommentDelete': 'コメント削除',
@@ -873,6 +901,24 @@ export const ja: Record<MessageKey, string> = {
   'posts.pinDone': '固定しました',
   'posts.unpinDone': '固定を解除しました',
   'posts.pinFailed': '固定の操作に失敗しました。',
+  'posts.onlyDeleted':
+    '削除済みのみ表示',
+  'posts.deletedBadge':
+    '削除済み',
+  'posts.restore':
+    '復元',
+  'posts.restoreTitle':
+    '投稿 #{id} を復元',
+  'posts.restoreMessage':
+    '復元すると、この投稿は公開ページに再び表示されます。コメントと画像は保持されます。',
+  'posts.restoreDone':
+    '投稿を復元しました。',
+  'posts.restoreFailed':
+    '復元に失敗しました。',
+  'posts.emptyDeletedTitle':
+    '削除済みの投稿はありません',
+  'posts.emptyDeletedBody':
+    '現在、削除済みの投稿はありません。',
 
   /* ==========================================================================
      reports
@@ -942,6 +988,8 @@ export const ja: Record<MessageKey, string> = {
   'title.publicProfile': '公開プロフィール｜{site}',
   'title.post': '投稿｜{site}',
   'title.following': 'フォロー｜{site}',
+  'title.bookmarks':
+    '保存した投稿｜{site}',
   'title.adminUsers': 'ユーザー管理｜{brand} 管理画面',
   'title.adminLogin': 'ログイン｜{brand} 管理画面',
   'title.adminPosts': '投稿｜{brand} 管理画面',

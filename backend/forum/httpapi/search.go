@@ -258,9 +258,10 @@ const searchBackfillRounds = 3
 // 筆數；挑掉之後這一頁短了就向 ES 多要幾筆補齊（輪數上限見 searchBackfillRounds）。
 //
 // 這個修正只涵蓋「已經載入到這一頁」的幽靈：坐在更後面、從未被要出來的幽靈仍會
-// 讓 total 多算幾筆。要根除得讓 ES 與 MySQL 定期對帳 —— 而啟動時的全量重建
-// （RebuildSearchIndex）做不到這件事，它只補索引、不刪多出來的文件。在對帳機制
-// 出現之前，這裡保證的是「回應與畫面一致」，不是「total 永遠精確」。
+// 讓 total 多算幾筆。根除機制是定期對帳（ReconcileSearchIndex，見本檔下方與
+// main.go 的對帳排程）—— 它把索引裡多出的文件刪掉，但對帳有週期，兩輪之間
+// 仍可能出現幽靈，所以這裡的校正與組裝階段的兩道過濾仍是第二線防線，不是
+// 對帳之後就可以移除的程式碼。
 func (s *Server) searchForumPostIDsElasticsearch(ctx context.Context, query string, offset, limit int, includeAuthor bool) ([]int64, int, error) {
 	ids := make([]int64, 0, limit)
 	total := 0
@@ -429,10 +430,12 @@ func escapeLikePattern(value string) string {
 // 多（前端收到一份對不上數字的清單），而那不會有任何錯誤。
 func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost, error) {
 	placeholders := make([]string, 0, len(ids))
-	args := make([]interface{}, 0, len(ids)+1)
-	// 使用者的 email 放在第一位，對應 SELECT 裡第一個問號（liked_by_me 的
-	// EXISTS 子查詢）。未登入時是空字串，該子查詢恆為 false。
-	args = append(args, s.sessions.ResolveUser(r))
+	args := make([]interface{}, 0, len(ids)+2)
+	// 使用者的 email 放在最前面，對應 SELECT 裡前兩個問號（liked_by_me 與
+	// bookmarked_by_me 的 EXISTS 子查詢）。未登入時是空字串，兩個子查詢恆為
+	// false。ResolveUser 只呼叫一次：兩處問號是同一個值。
+	viewer := s.sessions.ResolveUser(r)
+	args = append(args, viewer, viewer)
 	for _, id := range ids {
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
@@ -596,6 +599,12 @@ func (s *Server) esEnabled() bool {
 	return s.es != nil && s.es.Enabled()
 }
 
+// SearchEnabled 是 esEnabled 的匯出版本，供 main 決定要不要啟動索引對帳的
+// 背景排程（與 Metrics() / Blocks() 同一個分工：背景工作的啟動屬於呼叫端）。
+func (s *Server) SearchEnabled() bool {
+	return s.esEnabled()
+}
+
 // indexForumPost 在貼文建立或修改後更新 ES 索引。
 //
 // Best-effort 是刻意的：MySQL 已經寫好了，這裡失敗只代表「搜尋結果會晚一步
@@ -737,4 +746,62 @@ func (s *Server) RebuildSearchIndex(ctx context.Context) (int, error) {
 			return sent, nil
 		}
 	}
+}
+
+/* ==========================================================================
+    索引與 MySQL 的對帳
+    ========================================================================== */
+
+// ReconcileSearchIndex 把「索引裡有、MySQL 裡已不存在」的文件移除，回傳
+// 移除筆數。這是幽靈文件的根治機制（見 searchForumPostIDsElasticsearch 的
+// 說明：unindexForumPost 是 best-effort，ES 短暫不可用時刪除成功而索引留下
+// 幽靈；啟動的全量重建只補索引、不刪多出來的文件）。
+//
+// 方向刻意是「ES 減、不補」：補索引是 RebuildSearchIndex 的职责，而對帳要
+// 回答的是「索引裡多出的那些」。兩件事分开，失敗語意才清楚——重建失敗是
+// 「搜尋晚一步」，對帳失敗是「total 多算幾筆」，都不影響 MySQL 的真相。
+//
+// 呼叫時機：main 的背景排程定期執行（見 main.go 的對帳段落）。它不需要
+// 交易、不需要锁：ES 是可拋棄的衍生資料，對帳只是讓衍生資料收敛到真相。
+func (s *Server) ReconcileSearchIndex(ctx context.Context) (int, error) {
+	if !s.esEnabled() {
+		return 0, es.ErrDisabled
+	}
+
+	visible := make(map[int64]struct{})
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM forum_posts WHERE deleted_at IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		visible[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	indexed, err := s.es.ListAllIDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	removed := 0
+	for _, id := range indexed {
+		if _, ok := visible[id]; ok {
+			continue
+		}
+		// DeletePost 把 404 視為成功，所以這裡的錯誤只可能是 ES 本身故障；
+		// 記日誌後繼續，下一輪對帳會再試——對帳是收斂性的，漏一轮不累積。
+		if err := s.es.DeletePost(ctx, id); err != nil {
+			logger.WarnfContext(ctx, "[SEARCH] 對帳移除幽靈索引文件失敗 post_id=%d: %v", id, err)
+			continue
+		}
+		removed++
+	}
+	return removed, nil
 }

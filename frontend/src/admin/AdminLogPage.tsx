@@ -86,6 +86,7 @@ const ACTION_LABELS: Record<string, () => string> = {
   'post.create': () => t('log.actionPostCreate'),
   'post.update': () => t('log.actionPostUpdate'),
   'post.delete': () => t('log.actionPostDelete'),
+  'post.restore': () => t('log.actionPostRestore'),
   'comment.create': () => t('log.actionCommentCreate'),
   'comment.update': () => t('log.actionCommentUpdate'),
   'comment.delete': () => t('log.actionCommentDelete'),
@@ -124,6 +125,12 @@ const ACTION_TONES: Record<string, 'danger' | 'warn' | 'ok'> = {
   'tag.delete': 'danger',
   'report.delete': 'danger',
   'post.update': 'warn',
+  /*
+   * 還原與刪除同一組動作文（post.*），但語意完全不同：它把一篇原本只有
+   * 管理員看得見的文章放回公開頁，因此是 warn（可逆、但改變了使用者看到
+   * 的內容）而不是 danger —— 那份紅色要留給「需要人立刻處理」的事。
+   */
+  'post.restore': 'warn',
   'comment.update': 'warn',
   'user.reinstate': 'ok',
   'user.tags.update': 'ok',
@@ -569,7 +576,7 @@ function ChangeList({ changes }: { changes: AdminActionChange[] }) {
  *   - 刪除類操作（post.delete）after 是「（文章已刪除）」這種後端寫入的字面
  * 後者的顯示完全依賴那個字面值，這是刻意的：後端選擇在 audit 裡寫下
  * 「（文章已刪除）」而不是留空，是為了讓稽核紀錄單獨存在（被匯出時）
- * 仍然讀得懂。
+ * 仍然讀得懂。post.restore 同理，after 是「（已還原）」。
  */
 function ChangeValue({ value, kind }: { value: string; kind: 'before' | 'after' }) {
   if (value === '') {

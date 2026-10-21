@@ -25,7 +25,7 @@ import type { ForumPost, PostDetailResponse } from '../types';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
-import { updateForumPost, toggleLike } from './useFeed';
+import { updateForumPost, toggleLike, toggleBookmark, type PostImageChange } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -175,11 +175,34 @@ export function PostPage() {
     [patchPost, setFail],
   );
 
+  /*
+   * 收藏／取消收藏。與 handleLike 同一條路徑（見 FeedPage 的 handleBookmark
+   * 說明）：這一頁只有一篇貼文，因此 patch 的對象是整個 post 而不是列表裡
+   * 的一項。
+   */
+  const handleBookmark = useCallback(
+    (target: ForumPost) => {
+      void (async () => {
+        try {
+          const bookmarked = await toggleBookmark(target.id);
+          patchPost({ bookmarked });
+        } catch (error) {
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
+          setFail(errorMessage(error, tr(msg('error.fallbackBookmark'))));
+        }
+      })();
+    },
+    [patchPost, setFail],
+  );
+
   const handleUpdate = useCallback(
-    async (target: ForumPost, content: string) => {
+    async (target: ForumPost, content: string, imageChange?: PostImageChange) => {
       try {
-        const next = await updateForumPost(target.id, content);
-        patchPost({ content: next, edited: true });
+        const patch = await updateForumPost(target.id, content, imageChange);
+        patchPost(patch);
         setOk(msg('posts.edited'));
       } catch (error) {
         if (error instanceof LoginRequiredError) {
@@ -252,6 +275,7 @@ export function PostPage() {
               report={report}
               follow={follow}
               onLike={handleLike}
+              onBookmark={handleBookmark}
               onDelete={handleDelete}
               onUpdate={handleUpdate}
               onRequireLogin={goToLogin}

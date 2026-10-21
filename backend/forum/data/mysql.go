@@ -20,7 +20,11 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 	forum_user_tags              標籤字典
 	forum_user_tag_assignments   使用者與標籤的多對多關聯
 	forum_follows                追蹤關聯，以 (follower_email, target_email) 複合主鍵表示「一人追一人一次」
+	forum_post_bookmarks         收藏關聯，以 (post_id, author_email) 複合主鍵表示「一人一文一收藏」
+	forum_media                  上傳檔案的所有權紀錄，以檔名為主鍵（檔名是檔案伺服器上的鍵）
+	                             （第 33 步；「刪除自己的圖片」與「換圖」的授權依據）
 	forum_request_metrics        分鐘級請求統計（監控頁的持久化來源；純衍生資料，可整表刪除）
+	forum_daily_stats            日別新增量彙總（內容趨勢頁的讀取來源；純衍生資料，可整表重建）
 	forum_admin_actions           管理員操作稽核紀錄（欄位級 diff；只能由時間清理，不可透過 API 刪除）
 	forum_announcements           站內公告（同時只有一列 active；expires_at 可空＝永不自動過期）
 	forum_notifications           站內通知（留言／回覆／追蹤；read_at 可空＝未讀）
@@ -1010,6 +1014,107 @@ func MigrateMySQL(db *sql.DB) error {
 			PRIMARY KEY (id),
 			KEY idx_forum_notifications_recipient (recipient_email),
 			KEY idx_forum_notifications_unread (recipient_email, read_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 33) 上傳檔案的所有權紀錄（forum_media）。
+	//
+	//     為什麼需要：圖片上傳到檔案伺服器之後，本站對「這個檔名是誰上傳的」
+	//     沒有任何紀錄 —— forum_posts.image_url 與 forum_profiles.avatar_url
+	//     只回答「誰現在用它」。少了所有權，「刪除自己的圖片」就無法判斷
+	//     一顆檔名該不該被刪，而「換圖」時的自動回收也只能靠引用關係猜測。
+	//
+	//     一列代表「某個檔名由某個人上傳」。檔名是主鍵：檔案伺服器以此為鍵，
+	//     而本站的圖片契約也是「資料庫只存檔名」（見第 18 步），因此這裡存
+	//     同一把鍵是最自然的對應。
+	//
+	//     為什麼沒有外鍵、沒有 TTL 欄位：
+	//       - 外鍵：這個專案的關聯一律由應用層維護（同 forum_follows、
+	//         forum_notifications），而 forum_media 指向的是檔案伺服器上的
+	//         實體，不是另一張表。
+	//       - TTL：到期回收是「更舊的孤兒檔」那條線的事，而刪除端點只需要
+	//         「誰上傳的」與「還有沒有人在用」兩個問題的答案。先不猜測那個
+	//         機制會長什麼樣子。
+	//
+	//     沒有 owner_email 的索引：唯一的查詢是「by filename」（主鍵）與
+	//     「這個檔名的擁有者是誰」（也是主鍵）。「某人上傳過什麼」目前沒有
+	//     任何呼叫端，加索引只會讓每一筆寫入多一次維護。
+	//
+	//     舊資料（這個表存在之前上傳的檔案）沒有列，它們的所有權判定走
+	//     「目前被誰引用」的退路（見 forumFileAttachable）。因此這個表是
+	//     「新制」的紀錄，而不是歷史的回填 —— 回填做不到，因為過去的上傳
+	//     事件沒有任何地方留過作者。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_media (
+			filename VARCHAR(128) NOT NULL,
+			owner_email VARCHAR(255) NOT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (filename)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 34) 收藏（forum_post_bookmarks）。
+	//
+	//     為什麼需要：行動網路時代的閱讀常常是「先存著，之後再看」。既有的
+	//     按讚是公開的（讚數會顯示），而收藏是私人的備忘 —— 兩者是不同的
+	//     語意，因此是獨立的表而不是按讚的一個旗標。
+	//
+	//     形狀與 forum_post_likes 逐字相同：複合主鍵 (post_id, author_email)
+	//     表示「一人一文一收藏」，取消收藏是 DELETE 而不是旗標（沒有歷史
+	//     語意，理由同按讚與追蹤）。
+	//
+	//     索引的取捨也與按讚相同：複合主鍵的最左前綴支援「這篇有幾個人
+	//     收藏」；反方向的「我收藏了哪些」需要例外一條以 author_email 開頭
+	//     的索引（收藏頁的主查詢，見 handleForumBookmarks）。
+	//
+	//     created_at 是收藏的時間。目前**沒有**任何查詢用它排序：收藏頁刻意
+	//     沿用全站動態的排序（見 handleForumBookmarks 的說明），而「這筆是
+	//     什麼時候建立的」仍然值得留著 —— 取消再收藏會換到一個新的時間戳，
+	//     那正是它該有的行為。它不參與任何唯一性判斷。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_post_bookmarks (
+			post_id BIGINT NOT NULL,
+			author_email VARCHAR(255) NOT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (post_id, author_email),
+			KEY idx_forum_post_bookmarks_author (author_email, created_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 35) 日別新增量彙總（forum_daily_stats）。
+	//
+	//     為什麼需要：/admin/stats 的日別序列過去每次讀取都即時計算
+	//     （GROUP BY DATE(created_at)），掃描量被視窗限制住。當內容量
+	//     成長到「最近 90 天」也不再有界時，這個查詢會開始變慢——
+	//     docs/KNOWN_ISSUES.md 與 stats_handlers.go 檔頭都寫明了「那时該
+	//     加一張每日彙總表」。这张表就是那個補上。
+	//
+	//     形狀：一列一天，四个計數是「那一天新增的」使用者／貼文／留言／
+	//     按讚。貼文計數含後來被軟刪除的——它回答的是「那天產生了多少」，
+	//     不是「今天還看得到多少」（後者在用戶管理與文章列表都有）。
+	//
+	//     它是純衍生資料，與 forum_request_metrics 同一個定位：整表刪除
+	//     只会让趋势頁少一段歷史，論壇的任何功能都不依賴它。彙總由
+	//     data.RefreshDailyStats 定期重算最近几天，更早的日期由
+	//     data.BackfillDailyStats 從來源表回填一次（INSERT IGNORE，已存在的
+	//     日期不覆寫——那些日期可能已被清理排程硬刪，重算反而會少算）。
+	//
+	//     主鍵就是日期：一天一列是这张表的唯一契约，而「按日期範圍讀」
+	//     正是唯一的查詢形状，不需要其他索引。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_daily_stats (
+			day DATE NOT NULL,
+			new_users INT NOT NULL DEFAULT 0,
+			new_posts INT NOT NULL DEFAULT 0,
+			new_comments INT NOT NULL DEFAULT 0,
+			new_likes INT NOT NULL DEFAULT 0,
+			PRIMARY KEY (day)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 	`); err != nil {
 		return err

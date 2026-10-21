@@ -137,6 +137,16 @@ export interface AdminPost {
    * 而回 200 但什麼都沒做」。讓型別強制它必須存在。
    */
   pinned: boolean;
+  /**
+   * 這一篇是否處於軟刪除狀態（?deleted=1 的清單才可能為 true）。
+   *
+   * 由後端依「這個清單查的是已刪除的貼文」決定，而不是從 deletedAt 之類的
+   * 欄位推出來 —— 公開的 adminForumPost 不回 deleted_at，而列表查詢本來就
+   * 已經知道自己在查哪一邊。後端一定回這個欄位（沒有 omitempty），因此
+   * 這裡是必填：選填會讓 item.deleted 在舊回應上安靜地變成 undefined，
+   * 而「undefined 當成 false」正是把已刪除的貼文畫成正常貼文的路徑。
+   */
+  deleted: boolean;
   comments?: AdminComment[];
   [key: string]: unknown;
 }
@@ -682,8 +692,25 @@ export interface ForumPost {
   authorAvatar?: string;
   content: string;
   createdAt?: string;
-  imageUrl?: string;
+  /**
+   * 附圖的網址（含 media token）；沒有附圖時省略。
+   *
+   * 型別刻意允許明確的 undefined：編輯貼文的 patch（見 useFeed 的
+   * PostUpdatePatch）用「欄位存在且值為 undefined」表示**移除附圖**，而那個
+   * patch 是 Partial<ForumPost>。少了 `| undefined`，exactOptionalPropertyTypes
+   * 會讓那條 patch 無法套用到列表上（而它正是移除附圖的唯一表達方式）。
+   */
+  imageUrl?: string | undefined;
   liked?: boolean;
+  /**
+   * 目前登入者是否收藏了這一篇。
+   *
+   * 與 liked 同一個契約：後端一定回這個欄位（沒有 omitempty），而它只在
+   * 有登入者時才可能為 true（匿名請求的投影是 false）。因此它不能拿來
+   * 判斷「這一篇有沒有人收藏」—— 收藏是私人的，公開 API 沒有、也不該有
+   * 那個數字。
+   */
+  bookmarked?: boolean;
   /** 管理員是否置頂這一篇。省略未置頂的（見後端 forumPost 的說明）。 */
   pinned?: boolean;
   /** 作者是否編輯過這一篇。省略未編輯的（後端同樣用 omitempty）。 */
@@ -820,6 +847,17 @@ export interface UploadResponse {
 export interface LikeResponse {
   liked?: boolean;
   count?: number;
+}
+
+/**
+ * POST /api/forum/posts/:id/bookmark
+ *
+ * 只有一個欄位，沒有 count：收藏是私人的，後端刻意不回「這一篇被幾個人
+ * 收藏」—— 那會是一個只被拿來互相比較、而沒有任何功能需要它的數字
+ * （見 httpapi/forum_bookmark_handlers.go 的說明）。
+ */
+export interface BookmarkResponse {
+  bookmarked?: boolean;
 }
 
 /** POST /api/forum/posts/:id/comments */

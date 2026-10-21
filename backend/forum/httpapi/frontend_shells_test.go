@@ -1,5 +1,5 @@
 /*
-frontend_shells_test.go 守住第四條不變條件：十六個 HTML 殼檔名必須在**三處**
+frontend_shells_test.go 守住第四條不變條件：所有 HTML 殼的檔名必須在**三處**
 同步。
 
  1. frontend/src/entries/        每個殼檔對應一支入口模組
@@ -52,7 +52,7 @@ var entryScriptRe = regexp.MustCompile(`<script[^>]*\ssrc="(/src/entries/[^"]+)"
 //
 // 刻意用比對而不是解析 TypeScript：這個檔案是設定檔，而我們要問的只是
 // 「它列了哪些 .html」。用 AST 解析會帶來一個 @typescript-eslint 形式的相依
-// 或一個自製解析器 —— 兩者對「檢查 16 個檔名」這個需求都太重了。
+// 或一個自製解析器 —— 兩者對「檢查整份檔名清單」這個需求都太重了。
 var viteInputRe = regexp.MustCompile(`^\s*[A-Za-z0-9_]+\s*:\s*'([^']+\.html)'`)
 
 // TestFrontendShellsAreSyncedInThreePlaces 是這條不變條件的主測試。

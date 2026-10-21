@@ -93,6 +93,10 @@ export const id: Record<MessageKey, string> = {
     'Pengguna ini tidak ditemukan',
   'error.fallbackFollow':
     'Gagal mengikuti',
+  'error.fallbackBookmark':
+    'Gagal memperbarui simpanan',
+  'error.fallbackImageDelete':
+    'Gagal menghapus gambar',
   'auth.checking':
     'Memeriksa status masuk...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const id: Record<MessageKey, string> = {
     'Isi kiriman',
   'post.editMax':
     'Maksimal 10.000 karakter',
+  'post.bookmark':
+    'Simpan',
+  'post.unbookmark':
+    'Hapus simpanan',
+  'post.imageEdit':
+    'Ganti gambar',
+  'post.imageRemove':
+    'Hapus gambar',
+  'post.imageSelectedNote':
+    'Gambar baru dipilih (berlaku saat disimpan).',
+  'post.imageWillRemoveNote':
+    'Gambar akan dihapus saat disimpan.',
   'comment.loading':
     'Sedang memuat komentar...',
   'comment.none':
@@ -313,6 +329,8 @@ export const id: Record<MessageKey, string> = {
     'Gagal memuat. Silakan coba lagi nanti.',
   'profile.followingEntry':
     'Yang Saya Ikuti',
+  'profile.bookmarksEntry':
+    'Simpanan saya',
   'profile.postsLabel':
     'Postingan saya',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const id: Record<MessageKey, string> = {
     'Gagal memuat daftar mengikuti.',
   'following.postsFailed':
     'Gagal memuat postingan dari yang kamu ikuti.',
+  'bookmarks.label':
+    'Postingan tersimpan',
+  'bookmarks.empty':
+    'Kamu belum menyimpan postingan apa pun. Ketuk “Simpan” pada postingan untuk menemukannya di sini.',
+  'bookmarks.failed':
+    'Gagal memuat simpanan.',
+  'bookmarks.removed':
+    'Dihapus dari simpanan.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const id: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Postingan dibuat',
   'log.actionPostUpdate': 'Postingan diedit',
   'log.actionPostDelete': 'Postingan dihapus',
+  'log.actionPostRestore':
+    'Postingan dipulihkan',
   'log.actionCommentCreate': 'Komentar dibuat',
   'log.actionCommentUpdate': 'Komentar diedit',
   'log.actionCommentDelete': 'Komentar dihapus',
@@ -1166,6 +1194,24 @@ export const id: Record<MessageKey, string> = {
   'posts.pinDone': 'Disematkan',
   'posts.unpinDone': 'Sematan dilepas',
   'posts.pinFailed': 'Operasi menyematkan gagal.',
+  'posts.onlyDeleted':
+    'Tampilkan hanya yang dihapus',
+  'posts.deletedBadge':
+    'Dihapus',
+  'posts.restore':
+    'Pulihkan',
+  'posts.restoreTitle':
+    'Pulihkan postingan #{id}',
+  'posts.restoreMessage':
+    'Setelah dipulihkan, postingan akan muncul kembali di halaman publik; komentar dan gambarnya tetap ada.',
+  'posts.restoreDone':
+    'Postingan dipulihkan.',
+  'posts.restoreFailed':
+    'Gagal memulihkan.',
+  'posts.emptyDeletedTitle':
+    'Tidak ada postingan yang dihapus',
+  'posts.emptyDeletedBody':
+    'Saat ini tidak ada postingan yang dihapus.',
   'reports.title':
     'Manajemen laporan',
   'reports.listSummary':
@@ -1284,6 +1330,8 @@ export const id: Record<MessageKey, string> = {
     'Kiriman｜{site}',
   'title.following':
     'Mengikuti｜{site}',
+  'title.bookmarks':
+    'Simpanan｜{site}',
   'title.adminUsers':
     'Manajemen Pengguna｜{brand} Halaman Admin',
   'title.adminLogin':

@@ -2,7 +2,7 @@
  * 站名（src/site.ts）
  *
  * 站名是部署者的設定（backend/config/config.conf 的 FORUM_NAME 與
- * FORUM_SHORT_NAME），不是寫死在程式裡的字串。九個頁面殼的 <head> 帶著
+ * FORUM_SHORT_NAME），不是寫死在程式裡的字串。每個頁面殼的 <head> 都帶著
  * {{FORUM_NAME}} / {{FORUM_SHORT_NAME}} 佔位符，後端在送出時換成設定值
  * （backend/forum/httpapi/site.go），並把結果放進兩個 <meta>；這個模組就是
  * 讀它們的地方。

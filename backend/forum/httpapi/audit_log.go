@@ -68,6 +68,10 @@ const (
 	adminActionPostCreate  = "post.create"
 	adminActionPostUpdate  = "post.update"
 	adminActionPostDelete  = "post.delete"
+	// adminActionPostRestore 是刪文的反向（MigrateMySQL 第 30 步的軟刪除之後
+	// 有了這條路徑）。它與 post.delete 成對出現，稽核紀錄才能回答「這篇被
+	// 刪掉又救回來了嗎」，而不是只有一半的故事。
+	adminActionPostRestore = "post.restore"
 	adminActionCommentPost = "comment.create"
 	adminActionCommentPut  = "comment.update"
 	adminActionCommentDel  = "comment.delete"

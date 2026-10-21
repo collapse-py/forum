@@ -241,7 +241,7 @@ func TestRenderKeepsStyleBlocksByteIdentical(t *testing.T) {
 		`<meta name="forum-name" content="{{FORUM_NAME}}" />` + "\n" +
 		"<style>" + css + "</style></head><body>{{FORUM_SHORT_NAME}}</body></html>"
 
-	// 授權清單只從磁碟上的檔案算，因此把九個殼都以同一份內容寫進暫存目錄。
+	// 授權清單只從磁碟上的檔案算，因此把每個殼都以同一份內容寫進暫存目錄。
 	dir := t.TempDir()
 	for _, name := range frontendShellFiles {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(shell), 0o600); err != nil {

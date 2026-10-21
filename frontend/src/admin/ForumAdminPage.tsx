@@ -76,6 +76,13 @@ export function ForumAdminPage() {
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [refreshing, setRefreshing] = useState(false);
+  /*
+   * 「只顯示已刪除」的篩選（軟刪除的還原入口）。
+   *
+   * 與搜尋狀態分開放：搜尋端點不查已刪除的貼文，兩者在後端是兩條不同的
+   * 查詢路徑，因此畫面上也必須是兩種互斥的狀態（見 toggleDeletedFilter）。
+   */
+  const [showDeleted, setShowDeleted] = useState(false);
 
   /*
    * 搜尋。keyword 是輸入框（隨打隨變），activeQuery 是已送出的關鍵字
@@ -95,11 +102,13 @@ export function ForumAdminPage() {
 
   /* --- 資料載入 ----------------------------------------------------------- */
 
-  const loadPosts = useCallback(async (target: number) => {
+  const loadPosts = useCallback(async (target: number, deleted: boolean) => {
     setPosts(loadingList<AdminPost>());
     setPostsSummary(msg('common.loading'));
     try {
-      const data = await adminApi<PagedResponse<AdminPost>>(`/api/admin/forum/posts?page=${target}`);
+      const data = await adminApi<PagedResponse<AdminPost>>(
+        `/api/admin/forum/posts?page=${target}${deleted ? '&deleted=1' : ''}`,
+      );
       const total = Math.max(1, Number(data?.pages) || 1);
       // 刪到最後一頁的最後一筆時，請求的頁碼可能已經不存在；退回最後一頁
       // 而不是顯示一個空列表（與舊版的 if (page > pages) page = pages 相同）。
@@ -183,8 +192,27 @@ export function ForumAdminPage() {
   const clearPostSearch = useCallback(async () => {
     setActiveQuery('');
     setSearchMeta({ total: 0, engine: '' });
-    await loadPosts(page);
-  }, [loadPosts, page]);
+    await loadPosts(page, showDeleted);
+  }, [loadPosts, page, showDeleted]);
+
+  /*
+   * 「只顯示已刪除」的切換。
+   *
+   * 切換時刻意把搜尋狀態清掉：搜尋端點不查已刪除的貼文（見後端
+   * handleAdminForumSearch），兩者同時開著會讓畫面說「搜尋 XX」而列表其實
+   * 來自另一條查詢 —— 那種不一致沒有任何線索指出是自己按錯。
+   *
+   * 頁碼一併回到第 1 頁：兩份清單的長度無關，停在原本的第 5 頁只會讓
+   * loadPosts 把它退回最後一頁（那是一次多餘的重抓）。
+   */
+  const toggleDeletedFilter = useCallback(async () => {
+    const next = !showDeleted;
+    setShowDeleted(next);
+    setActiveQuery('');
+    setSearchMeta({ total: 0, engine: '' });
+    setPage(1);
+    await loadPosts(1, next);
+  }, [loadPosts, showDeleted]);
 
   /*
    * 動作完成後的重新載入：搜尋中就重跑搜尋，否則重抓分頁。
@@ -192,8 +220,8 @@ export function ForumAdminPage() {
    */
   const reloadPosts = useCallback(async () => {
     if (activeQuery !== '') await searchPosts(activeQuery);
-    else await loadPosts(page);
-  }, [activeQuery, loadPosts, page, searchPosts]);
+    else await loadPosts(page, showDeleted);
+  }, [activeQuery, loadPosts, page, searchPosts, showDeleted]);
 
   useEffect(() => {
     void (async () => {
@@ -203,7 +231,7 @@ export function ForumAdminPage() {
         return;
       }
       setAuthorized(true);
-      await Promise.all([loadPosts(1), loadReports()]);
+      await Promise.all([loadPosts(1, false), loadReports()]);
     })();
   }, [loadPosts, loadReports]);
 
@@ -300,6 +328,33 @@ export function ForumAdminPage() {
       await reloadPosts();
     } catch (error) {
       toast(errorMessage(error, t('posts.deleteFailed')), 'error');
+    }
+  };
+
+  /*
+   * 還原一篇軟刪除的貼文。
+   *
+   * 與 togglePin 同一個模式：動作完成後重載列表而不是就地改那一列 —— 那一列
+   * 不再滿足「已刪除」的篩選條件，而就地移除會讓分頁的 offset 與後端不一致
+   * （與 deletePost 的重載同一個理由）。
+   *
+   * 後端對「已經不是刪除狀態」的貼文回 200 + restored:false（冪等，見
+   * handleAdminPostRestore）：那不是錯誤，使用者要的狀態已經達成了，因此
+   * 不區分兩者。
+   */
+  const restorePost = async (item: AdminPost) => {
+    const ok = await dialog.confirm({
+      title: t('posts.restoreTitle', { id: item.id }),
+      message: t('posts.restoreMessage'),
+      confirmLabel: t('posts.restore'),
+    });
+    if (!ok) return;
+    try {
+      await adminApi(`/api/admin/forum/posts/${item.id}/restore`, { method: 'POST' });
+      toast(t('posts.restoreDone'), 'ok');
+      await reloadPosts();
+    } catch (error) {
+      toast(errorMessage(error, t('posts.restoreFailed')), 'error');
     }
   };
 
@@ -509,6 +564,20 @@ export function ForumAdminPage() {
                   {t('posts.clearSearch')}
                 </button>
               )}
+              {/*
+                「只顯示已刪除」的開關。放在列表標題列而不是搜尋表單裡：它與
+                搜尋互斥（後端的搜尋不查已刪除的貼文），因此不該看起來像
+                搜尋的其中一個條件。勾選後搜尋狀態會被清掉（見
+                toggleDeletedFilter）。
+              */}
+              <label className="posts-filter">
+                <input
+                  type="checkbox"
+                  checked={showDeleted}
+                  onChange={() => void toggleDeletedFilter()}
+                />
+                <span>{t('posts.onlyDeleted')}</span>
+              </label>
             </div>
           </div>
           <div className="panel__body">
@@ -578,6 +647,12 @@ export function ForumAdminPage() {
                     items.map((item) => (
                       <tr key={item.id}>
                         <td>
+                          {/*
+                            已刪除的清單裡每一列都標一個徽章，而不是靠「這一批
+                            都是已刪除的」這件事不言自明：管理員在同一個面板
+                            切換兩種模式時，「這篇是刪掉的」必須寫在列上。
+                          */}
+                          {item.deleted ? <span className="badge badge--danger">{t('posts.deletedBadge')}</span> : null}
                           <p className="cell-clamp">{item.content}</p>
                           {item.imageUrl ? (
                             <a className="post-figure" href={item.imageUrl} target="_blank" rel="noreferrer noopener">
@@ -589,12 +664,24 @@ export function ForumAdminPage() {
                           <span className="metric">{t('posts.likes', { count: formatNumber(item.likeCount) })}</span>
                         </td>
                         <td>
-                          <CommentThread
-                            post={item}
-                            onAdd={() => void addComment(item.id)}
-                            onEdit={(commentId, current) => void editComment(commentId, current)}
-                            onDelete={(commentId) => void deleteComment(commentId)}
-                          />
+                          {/*
+                            已刪除的貼文不畫留言串（那個元件帶著新增／編輯／刪除
+                            三顆會送到 /comments 的按鈕，而那些端點要求貼文存在
+                            且未刪除）。改畫一個計數：留言本身還在資料庫裡，
+                            還原之後就會回到留言串。
+                          */}
+                          {item.deleted ? (
+                            <span className="metric">
+                              {t('posts.commentCount', { count: formatNumber(item.commentCount) })}
+                            </span>
+                          ) : (
+                            <CommentThread
+                              post={item}
+                              onAdd={() => void addComment(item.id)}
+                              onEdit={(commentId, current) => void editComment(commentId, current)}
+                              onDelete={(commentId) => void deleteComment(commentId)}
+                            />
+                          )}
                         </td>
                         <td>
                           <span className="cell-sub">{text(item.authorEmail)}</span>
@@ -604,29 +691,42 @@ export function ForumAdminPage() {
                         </td>
                         <td>
                           <div className="row-actions">
-                            {/*
-                              置頂鈕的位置在「修改」之前：它改變的是這篇文章
-                              在公開頁的**位置**，而「修改」改變的是內容。從左
-                              到右是「它會出現在哪裡 → 它說什麼 → 要不要刪掉」，
-                              與管理者思考一件事的順序一致。
-                            */}
-                            <button
-                              className={`btn btn--sm${item.pinned === true ? ' btn--primary' : ''}`}
-                              type="button"
-                              onClick={() => void togglePin(item)}
-                            >
-                              {item.pinned === true ? t('posts.unpin') : t('posts.pin')}
-                            </button>
-                            <button className="btn btn--sm" type="button" onClick={() => startEditing(item)}>
-                              {t('common.edit')}
-                            </button>
-                            <button
-                              className="btn btn--sm btn--danger"
-                              type="button"
-                              onClick={() => void deletePost(item)}
-                            >
-                              {t('common.delete')}
-                            </button>
+                            {item.deleted ? (
+                              /*
+                                已刪除的貼文只有一顆「還原」：置頂、修改與刪除
+                                在刪除狀態下都送不出結果（後端過濾 deleted_at），
+                                讓它們出現只會製造三次必然失敗的操作。
+                              */
+                              <button className="btn btn--sm btn--primary" type="button" onClick={() => void restorePost(item)}>
+                                {t('posts.restore')}
+                              </button>
+                            ) : (
+                              <>
+                                {/*
+                                  置頂鈕的位置在「修改」之前：它改變的是這篇文章
+                                  在公開頁的**位置**，而「修改」改變的是內容。從左
+                                  到右是「它會出現在哪裡 → 它說什麼 → 要不要刪掉」，
+                                  與管理者思考一件事的順序一致。
+                                */}
+                                <button
+                                  className={`btn btn--sm${item.pinned === true ? ' btn--primary' : ''}`}
+                                  type="button"
+                                  onClick={() => void togglePin(item)}
+                                >
+                                  {item.pinned === true ? t('posts.unpin') : t('posts.pin')}
+                                </button>
+                                <button className="btn btn--sm" type="button" onClick={() => startEditing(item)}>
+                                  {t('common.edit')}
+                                </button>
+                                <button
+                                  className="btn btn--sm btn--danger"
+                                  type="button"
+                                  onClick={() => void deletePost(item)}
+                                >
+                                  {t('common.delete')}
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -637,13 +737,25 @@ export function ForumAdminPage() {
             </table>
           </div>
           {isEmpty(posts) ? (
-            <EmptyState title={activeQuery === '' ? t('posts.emptyTitle') : t('posts.emptySearchTitle')}>
-              {activeQuery === ''
-                ? t('posts.emptyBody')
-                : t('posts.emptySearchBody', { query: activeQuery })}
+            <EmptyState
+              title={
+                showDeleted
+                  ? t('posts.emptyDeletedTitle')
+                  : activeQuery === ''
+                    ? t('posts.emptyTitle')
+                    : t('posts.emptySearchTitle')
+              }
+            >
+              {showDeleted
+                ? t('posts.emptyDeletedBody')
+                : activeQuery === ''
+                  ? t('posts.emptyBody')
+                  : t('posts.emptySearchBody', { query: activeQuery })}
             </EmptyState>
           ) : null}
-          {activeQuery === '' ? <Pagination page={page} pages={pages} onSelect={(next) => void loadPosts(next)} /> : null}
+          {activeQuery === '' ? (
+            <Pagination page={page} pages={pages} onSelect={(next) => void loadPosts(next, showDeleted)} />
+          ) : null}
         </section>
 
         <section className="panel" aria-labelledby="reports-title">

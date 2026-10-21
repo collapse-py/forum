@@ -15,10 +15,15 @@ log 輸出格式與寫入目的地
 	檔名格式：檔名完全取自 config 的 LOG_FILE 值（config.conf 的 LOG_FILE 鍵），
 	        程式端不做任何組裝。開檔旗標為 O_CREATE|O_WRONLY|O_APPEND，
 	        0644 權限：以 append 模式寫入，進程重啟不覆寫既有內容。
-	切割（rotation）：本實作「不做」檔案切割。沒有大小上限、沒有時間輪替、沒有檔名序號，
-	        同一個 LOG_FILE 會被無限追加下去。實際運作需由外部機制（logrotate、
-	        容器 stdout 收集、或定期輪替部署環境的檔案系統）負責換檔；
-	        換檔後因為檔案句柄仍指向舊 inode，應重啟行程讓日誌重新開檔。
+	切割（rotation）：LOG_FILE 超過 LOG_MAX_SIZE_MB 時，本實作自己換檔：
+		目前檔改名為 <LOG_FILE>.1，既有 .1 改名 .2，依此推移，超過
+		LOG_MAX_FILES 個輪替檔的最舊一筆被刪除，然後重新開啟 LOG_FILE。
+		计数以「寫入的位元組數」累加，Init 時以檔案現有大小為起點，因此
+		「舊版無限增長留下的超大檔案」在第一次寫入後就會被輪替。
+		取捨：輪替是**行程內**的計數，多個行程共用同一 LOG_FILE 時各自
+		輪替各自的計數——一個日誌檔請只讓一個行程寫。刻意不呼叫外部
+		logrotate：那需要部署端安裝與排程，而「日誌無限增長」是本專案
+		自己可以解決的缺口（見 docs/KNOWN_ISSUES.md）。
 	時間格式：2006-01-02T15:04:05.000Z07:00 —— RFC 3339、毫秒精度、帶本機時區位移
 	        （例如 2026-10-13T09:22:12.123+08:00；UTC 主機上以 Z 結尾）。取自 time.Now()。
 	        帶偏移是為了讓跨主機彙整的紀錄可以直接排序與比對，不需要另外猜每台機器
@@ -133,6 +138,14 @@ type Logger struct {
 	logger *log.Logger
 	file   *os.File
 	format string
+	// 輪替狀態。logPath 是 LOG_FILE 的原始路徑（不含 .N 尾巴），maxBytes
+	// 是「目前檔寫到多少位元組就換檔」的上界（0 代表不輪替），maxFiles 是
+	// 保留的輪替檔數，written 是目前檔已寫入的位元組數——用累加而不是每次
+	// Stat，因為每次請求都要問「檔案多大」的 stat 系統呼叫不值得。
+	logPath  string
+	maxBytes int64
+	maxFiles int
+	written  int64
 }
 
 // std 是全檔唯一的預設 logger 實例。
@@ -152,16 +165,21 @@ var std = &Logger{
 //     無法辨識時 parseLevel 會退回 INFO。
 //   - logFile：LOG_FILE，空字串代表只輸出到 stdout。
 //   - format：LOG_FORMAT，"json" 走結構化輸出，其他值（含空字串）皆視為 text。
+//   - maxBytesMB：LOG_MAX_SIZE_MB，單檔輪替的大小上限（MB）。0 或負值代表
+//     不輪替——沿用舊的「無限追加」行為。
+//   - maxFiles：LOG_MAX_FILES，保留的輪替檔數（不含目前檔）。非正值時以 1
+//     處理：「輪替但不留任何舊檔」等于「每次換檔直接丟掉舊檔」，那比
+//     不輪替更糟，所以至少保留一個。
 //
 // 回傳值：只有開啟檔案失敗時才回傳錯誤（例如目錄不存在或權限不足）；
 // 設定不正確本身不視為錯誤，會安靜地退回預設值。
 //
-// 副作用：會改寫 std 的 level、format、logger 與 file。若原本已有開啟的檔案，
-// 會先關閉舊句柄再開新檔案，避免檔案描述符洩漏。
+// 副作用：會改寫 std 的 level、format、logger 與 file（以及輪替狀態）。
+// 若原本已有開啟的檔案，會先關閉舊句柄再開新檔案，避免檔案描述符洩漏。
 // 已知取捨：Init 以 mu 保護，但 logWithContext 讀取 l.level 是在鎖外；
 // 因此執行期間再呼叫 Init 會造成 level 的資料競爭。
 // 這在實務上不成問題，因為 Init 只在啟動階段、開始服務之前執行一次。
-func Init(levelStr, logFile, format string) error {
+func Init(levelStr, logFile, format string, maxBytesMB, maxFiles int) error {
 	std.mu.Lock()
 	defer std.mu.Unlock()
 
@@ -185,6 +203,23 @@ func Init(levelStr, logFile, format string) error {
 			std.file.Close()
 		}
 		std.file = f
+		std.logPath = logFile
+		if maxBytesMB > 0 {
+			std.maxBytes = int64(maxBytesMB) << 20
+		} else {
+			std.maxBytes = 0
+		}
+		if maxFiles < 1 {
+			maxFiles = 1
+		}
+		std.maxFiles = maxFiles
+		// 起點用檔案現有大小：舊版「無限追加」留下的超大檔案，第一次寫入
+		// 後就會被輪替，而不是從零開始計數讓它再長一個 maxBytes。
+		if stat, statErr := f.Stat(); statErr == nil {
+			std.written = stat.Size()
+		} else {
+			std.written = 0
+		}
 		// MultiWriter：stdout 與檔案兩邊都寫。任一邊失敗 MultiWriter 都會回傳錯誤，
 		// 但此處忽略它 —— 日誌失敗不應該讓呼叫端（每個 HTTP 請求）收到錯誤。
 		std.logger = log.New(io.MultiWriter(os.Stdout, f), "", 0)
@@ -454,11 +489,11 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 			// 改輸出一行仍具備時間與等級資訊的文字記錄，並省略 msg 以免再觸發問題。
 			// 已知取捨：這行是用 fmt 手組的 JSON，欄位值未做引號跳脫；
 			// 由於 sanitizeLogValue 已移除換行與控制字元，殘留風險僅限引號字元。
-			l.logger.Printf(`{"time":"%s","level":"%s","ip":"%s","user_email":"%s","caller":"%s","msg":"failed to encode log entry"}`,
-				now, levelNames[level], meta.IP, meta.UserEmail, caller)
+			l.writeLocked(fmt.Sprintf(`{"time":"%s","level":"%s","ip":"%s","user_email":"%s","caller":"%s","msg":"failed to encode log entry"}`,
+				now, levelNames[level], meta.IP, meta.UserEmail, caller))
 			return
 		}
-		l.logger.Print(string(encoded))
+		l.writeLocked(string(encoded))
 	} else {
 		// 純文字輸出：key=value 序列，msg 永遠在最後（見檔案頭的格式說明）。
 		// time 與 level 是固定形狀，不加引號，方便 grep level=ERROR；
@@ -482,8 +517,74 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 		}
 		b.WriteString(" msg=")
 		b.WriteString(quoteField(msg))
-		l.logger.Print(b.String())
+		l.writeLocked(b.String())
 	}
+}
+
+// writeLocked 寫出一行並更新輪替計數。必须在 mu 已鎖定的臨界區內呼叫：
+// written 與 file 的更新、以及換檔本身，都與「組裝 + 寫入」共用同一把鎖。
+//
+// 計數用「行長度 + 換行」累加，而不是每次 Stat 檔案：log.Logger.Print 會
+// 補一個 \n，所以這個累加與檔案實際增長一致（MultiWriter 的 stdout 部分
+// 不佔磁盘，只有檔案部分需要計數——而我們計的是「打算寫入的位元組數」，
+// 兩邊同值）。
+func (l *Logger) writeLocked(line string) {
+	l.logger.Print(line)
+	if l.file == nil || l.maxBytes <= 0 {
+		return
+	}
+	l.written += int64(len(line)) + 1
+	if l.written >= l.maxBytes {
+		l.rotateLocked()
+	}
+}
+
+// rotateLocked 換檔：目前檔改名 .1，既有 .1 改名 .2，依此推移；超過
+// maxFiles 個的最舊輪替檔被刪除，然後重新開啟目前檔。必须在 mu 已鎖定時
+// 呼叫。
+//
+// 順序不可簡化：不先删掉 .maxFiles，Rename 到它時會覆寫（POSIX）或失敗
+// （某些平台），而「先删最舊、再逐檔往前推」是兩邊都安全的写法。
+//
+// 換檔失敗（例如目錄被移除、磁碟滿）的處置是「退回純 stdout」：日誌不能
+// 因為檔案系統故障而讓每個請求變慢或失敗，而 stdout 在容器環境本來就是
+// 主要目的地。这里刻意不重試——下一次寫入會再尝试開檔吗？不会：句柄已
+// 為 nil，直到下一次 Init。這是可接受的退化：日誌仍完整地到 stdout，
+// 只是少了檔案副本。
+func (l *Logger) rotateLocked() {
+	if l.file == nil || l.maxFiles < 1 {
+		return
+	}
+	l.file.Close()
+
+	// 最舊的一檔（.maxFiles）先刪：不刪的話，下一步「.maxFiles-1 推移成
+	// .maxFiles」的 rename 在 POSIX 會靜默覆寫、在 Windows 會因目標已存在
+	// 而失敗 —— 「先删最舊、再逐檔往前推」是兩邊都安全的順序。
+	_ = os.Remove(l.logPath + "." + strconv.Itoa(l.maxFiles))
+	for i := l.maxFiles - 1; i >= 1; i-- {
+		source := l.logPath + "." + strconv.Itoa(i)
+		if _, err := os.Stat(source); err != nil {
+			continue
+		}
+		// 目標是 i+1 而不是 i：.1 要推移成 .2、.2 推移成 .3，依此推移。
+		// 寫成與 source 相同的 i 會讓 Rename 變成 no-op（同名改名），
+		// 症狀是永遠只存在一個輪替檔、更舊的紀錄靜默消失。
+		_ = os.Rename(source, l.logPath+"."+strconv.Itoa(i+1))
+	}
+	// 最舊的一檔（.maxFiles）在最前面已被刪掉，這裡把目前檔推移成 .1。
+
+	_ = os.Rename(l.logPath, l.logPath+".1")
+
+	f, err := os.OpenFile(l.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		l.file = nil
+		l.written = 0
+		l.logger = log.New(os.Stdout, "", 0)
+		return
+	}
+	l.file = f
+	l.written = 0
+	l.logger = log.New(io.MultiWriter(os.Stdout, f), "", 0)
 }
 
 // Debugf 輸出 DEBUG 等級的格式化日誌，使用 printf 風格格式化。

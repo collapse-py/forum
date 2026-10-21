@@ -803,7 +803,12 @@ func quantileMS(buckets []int64, total int64, q float64) float64 {
 	for i, count := range buckets {
 		cumulative += count
 		if cumulative >= target {
-			bound := overflowIndex
+			// 溢出格（i == overflowIndex）時回最後一個邊界而不是
+			// latencyBounds[overflowIndex]：後者超出陣列範圍（len ==
+			// overflowIndex），一次 ≥10s 的請求就能讓 Snapshot 索引越界
+			// panic —— 而檔頭「落在溢出格時同樣回最後一個邊界」正說明
+			// 上界語意要的是 10s 這個邊界。
+			bound := overflowIndex - 1
 			if i < overflowIndex {
 				bound = i
 			}
@@ -866,8 +871,12 @@ func (r *Registry) StartFlusher(ctx context.Context, opts FlusherOptions) error 
 	cutoff := r.now().Add(-time.Duration(opts.RetentionHours) * time.Hour)
 
 	ticker := time.NewTicker(opts.Interval)
-	defer ticker.Stop()
+	// ticker 的生命週期屬於背景 goroutine，不是外層函式：曾經寫成外層的
+	// defer ticker.Stop()，而 StartFlusher 會立刻回傳 —— ticker 在 goroutine
+	// 第一次 select 之前就被停掉，症狀是「監控時間軸永遠不落庫、直到關機
+	// 那一刻才補寫一次」，而手動呼叫 FlushPending 卻是好的。
 	go func() {
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():

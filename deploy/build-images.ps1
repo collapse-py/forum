@@ -147,7 +147,7 @@ function Test-BackendImage {
 
     $container = New-ProbeContainer 'forum-backend'
     try {
-        # 取的是各有各的理由的代表，而不是把 16 個 HTML 殼列一份 —— 那是
+        # 取的是各有各的理由的代表，而不是把每個 HTML 殼列一份 —— 那是
         # frontend_shells_test.go 的工作，在腳本裡抄一份只會多一個會漂移的來源。
         $required = @(
             @{ Path = '/app/forum'; Why = '後端執行檔' },

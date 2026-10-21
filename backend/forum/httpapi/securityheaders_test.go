@@ -112,6 +112,7 @@ func TestFrontendShellFilesMatchServerRoutes(t *testing.T) {
 		"forum-others-profile.html",
 		"forum-following.html",
 		"forum-notifications.html",
+		"forum-bookmarks.html",
 		"admin.html",
 		"forum-admin.html",
 		"forum-report.html",

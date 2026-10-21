@@ -643,7 +643,7 @@ func TestInitReportsUnopenableFile(t *testing.T) {
 	})
 
 	missing := filepath.Join(t.TempDir(), "no-such-dir", "forum.log")
-	err := Init("INFO", missing, "text")
+	err := Init("INFO", missing, "text", 0, 0)
 	if err == nil {
 		t.Fatal("Init 一個開不起來的路徑卻回 nil error，main 因此不會 Fatal —— 日誌會全部消失")
 	}
@@ -668,7 +668,7 @@ func TestInitWritesToFile(t *testing.T) {
 	})
 
 	path := filepath.Join(t.TempDir(), "forum.log")
-	if err := Init("INFO", path, "text"); err != nil {
+	if err := Init("INFO", path, "text", 0, 0); err != nil {
 		t.Fatalf("Init 回錯誤: %v", err)
 	}
 
@@ -712,12 +712,144 @@ func TestCloseIsIdempotent(t *testing.T) {
 	})
 
 	path := filepath.Join(t.TempDir(), "forum.log")
-	if err := Init("INFO", path, "text"); err != nil {
+	if err := Init("INFO", path, "text", 0, 0); err != nil {
 		t.Fatalf("Init 回錯誤: %v", err)
 	}
 
 	Close()
 	Close() // 第二次必須是安全的 no-op
+}
+
+// TestLogRotationRotatesAndCapsFiles 守住「日誌檔不再無限增長」。
+//
+// 舊版沒有輪替，LOG_FILE 以 append 模式無限追加——access log 的無限期
+// 增長是 docs/KNOWN_ISSUES.md 記錄的缺口。這支測試驗三件事：
+//
+//  1. 超過上限時目前檔被改名 .1，並重新開檔（目前檔變小）。
+//  2. 輪替檔依序推移：第二次換檔时 .1 变成 .2。
+//  3. 輪替檔數被 maxFiles 封顶：不存在 .3。
+//
+// 阈值刻意在 Init 之後直接改 std.maxBytes：Init 的參數單位是 MB，而測試
+// 不想寫一 MB 的日誌才能触发第一次輪替。改的是同一個欄位，語意與 config
+// 傳入的 MB 值经过 Init 換算後完全相同。
+func TestLogRotationRotatesAndCapsFiles(t *testing.T) {
+	dir := t.TempDir()
+	// 清理函式必須註冊在 t.TempDir() **之後**：t.Cleanup 以 LIFO 執行，
+	// 因此這個函式（Close 關掉檔案句柄）會先跑、TempDir 的 RemoveAll 才刪目錄。
+	// 順序反了在 POSIX 上無感，但在 Windows 上 RemoveAll 會以
+	//「檔案使用中」失敗 —— 症狀出現在清理階段而不是斷言階段，極易誤判。
+	t.Cleanup(func() {
+		Close()
+		std.mu.Lock()
+		std.logger = log.New(os.Stdout, "", 0)
+		std.file = nil
+		std.format = "text"
+		std.level = INFO
+		std.maxBytes = 0
+		std.maxFiles = 0
+		std.written = 0
+		std.mu.Unlock()
+	})
+	path := filepath.Join(dir, "forum.log")
+	if err := Init("INFO", path, "text", 1, 2); err != nil {
+		t.Fatalf("Init 回錯誤: %v", err)
+	}
+	std.mu.Lock()
+	std.maxBytes = 200
+	std.mu.Unlock()
+
+	line := strings.Repeat("x", 100)
+
+	// 每兩行恰好觸發一次輪替：一行（格式化後約 160~170 bytes）在任何時區
+	// 偏移下都 < 200，兩行必 ≥ 200。刻意不寫「一次寫 10 行」：那讓輪替
+	// 次數取決於格式化後的精確位元組數（時間戳長度隨時區而變），
+	// 在非預期的時區上會多轉幾圈、把尚未驗證到的內容提前封顶刪除。
+	for i := 0; i < 2; i++ {
+		Infof("%s-%d", line, i)
+	}
+
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("寫入超過上限後沒有出現輪替檔 .1: %v", err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀目前檔失敗: %v", err)
+	}
+	if len(current) > 300 {
+		t.Fatalf("目前檔沒有被重新開啟（大小 %d bytes），輪替後它應該只含最近幾行", len(current))
+	}
+
+	// 第二次換檔：.1 推移成 .2，而 maxFiles=2 代表 .2 是最舊的、不會再有 .3。
+	for i := 0; i < 2; i++ {
+		Infof("%s-%d", line, 2+i)
+	}
+	if _, err := os.Stat(path + ".2"); err != nil {
+		t.Fatalf("第二次輪替沒有推移 .1 → .2: %v", err)
+	}
+	if _, err := os.Stat(path + ".3"); err == nil {
+		t.Fatal("輪替檔數超過 maxFiles=2，出現了 .3")
+	}
+
+	// 第一輪的內容必须被保留 —— 輪替不是刪除，是保留。第二次換檔後
+	// 第一輪已在最舊的 .2（.1 → .2 是本功能的核心語意），第二輪在 .1。
+	rotated, err := os.ReadFile(path + ".2")
+	if err != nil || !strings.Contains(string(rotated), "x-0") {
+		t.Fatalf("第一輪的日誌沒有被保留到 .2: %v", err)
+	}
+	latest, err := os.ReadFile(path + ".1")
+	if err != nil || !strings.Contains(string(latest), "x-2") {
+		t.Fatalf("第二輪的日誌沒有留在 .1: %v", err)
+	}
+
+	// 第三次換檔驗證封頂：最舊的 .2（第一輪）被刪掉，第二輪推移到 .2，
+	// 全程不應出現 .3。
+	for i := 0; i < 2; i++ {
+		Infof("%s-%d", line, 4+i)
+	}
+	if _, err := os.Stat(path + ".3"); err == nil {
+		t.Fatal("第三次輪替後仍出現 .3：封頂失效")
+	}
+	capped, err := os.ReadFile(path + ".2")
+	if err != nil || !strings.Contains(string(capped), "x-2") {
+		t.Fatalf("封頂後 .2 應含第二輪日誌（更舊的第一輪已被封頂刪除）: %v", err)
+	}
+}
+
+// TestLogRotationDisabledWithZero 守住「LOG_MAX_SIZE_MB=0 等於不輪替」。
+//
+// 0 是合法的「沿用舊行為」，不是「設成 0 所以每次寫都換檔」。如果 0 被
+// 当成阈值，每一行都會觸發輪替，日誌檔會以 .1 為唯一歷史、目前檔每次
+// 都被清空——那是比無限增長更糟的資料損失。
+func TestLogRotationDisabledWithZero(t *testing.T) {
+	dir := t.TempDir()
+	// 註冊順序的理由同 TestLogRotationRotatesAndCapsFiles：Close 必須先於
+	// TempDir 的 RemoveAll，否則 Windows 上清理會因檔案句柄仍開啟而失敗。
+	t.Cleanup(func() {
+		Close()
+		std.mu.Lock()
+		std.logger = log.New(os.Stdout, "", 0)
+		std.file = nil
+		std.format = "text"
+		std.level = INFO
+		std.maxBytes = 0
+		std.maxFiles = 0
+		std.written = 0
+		std.mu.Unlock()
+	})
+	path := filepath.Join(dir, "forum.log")
+	if err := Init("INFO", path, "text", 0, 0); err != nil {
+		t.Fatalf("Init 回錯誤: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		Infof("無限追加的第 %d 行", i)
+	}
+	if _, err := os.Stat(path + ".1"); err == nil {
+		t.Fatal("maxBytes 為 0 時不应輪替，卻出現了 .1")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), "第 49 行") {
+		t.Fatalf("不輪替的日誌應完整留在同一檔: %v", err)
+	}
 }
 
 // TestConcurrentLoggingIsRaceFree 在並行寫入下使用 logger。

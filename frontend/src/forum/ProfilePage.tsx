@@ -34,7 +34,7 @@ import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, usePwaInstall, type AuthState } from './shell';
 import { useComments } from './useComments';
-import { updateForumPost, useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike, toggleBookmark, type PostImageChange } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -312,6 +312,28 @@ export function ProfilePage() {
   );
 
   /*
+   * 收藏／取消收藏。與 handleLike 同一條路徑（見 FeedPage 的 handleBookmark
+   * 說明）：收藏是私人的，因此沒有數量要同步，patch 的只有這張卡自己的狀態。
+   */
+  const handleBookmark = useCallback(
+    (post: ForumPost) => {
+      void (async () => {
+        try {
+          const bookmarked = await toggleBookmark(post.id);
+          patchPost(post.id, { bookmarked });
+        } catch (error) {
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
+          setStatus({ message: errorText(error, msg('error.fallbackBookmark')), isError: true });
+        }
+      })();
+    },
+    [patchPost],
+  );
+
+  /*
    * 刪掉自己的貼文之後就地從列表移除，而不是重新載入整頁：useFeed 的 offset 會
    * 跟著減一，因此往下的分頁不會漏讀或重讀（見 useFeed.remove 的說明）。
    */
@@ -340,10 +362,10 @@ export function ProfilePage() {
    * 相同：重新載入整頁會把捲動位置打回頂端）。
    */
   const handleUpdate = useCallback(
-    async (post: ForumPost, content: string) => {
+    async (post: ForumPost, content: string, imageChange?: PostImageChange) => {
       try {
-        const next = await updateForumPost(post.id, content);
-        patchPost(post.id, { content: next, edited: true });
+        const patch = await updateForumPost(post.id, content, imageChange);
+        patchPost(post.id, patch);
         setStatus({ message: msg('posts.edited'), isError: false });
       } catch (error) {
         if (error instanceof LoginRequiredError) {
@@ -397,6 +419,7 @@ export function ProfilePage() {
       report={report}
       follow={follow}
       onLike={handleLike}
+      onBookmark={handleBookmark}
       onDelete={handleDelete}
       onUpdate={handleUpdate}
       onRequireLogin={goToLogin}
@@ -462,21 +485,28 @@ export function ProfilePage() {
                 <p id="profile-bio-view">{bio.trim() || t('profile.notSetBio')}</p>
               </div>
               {/*
-                個人頁的次要入口（我的追蹤／我的通知）放在這裡而不是底部導覽：
-                底部那三格是最高頻的三件事（看動態／發文／改資料），這兩個是
-                次要瀏覽，而個人資料頁本來就是「我的帳號」容器。
+                個人頁的次要入口（我的追蹤／我的收藏／我的通知）放在這裡而不是
+                底部導覽：底部那三格是最高頻的三件事（看動態／發文／改資料），
+                這三個是次要瀏覽，而個人資料頁本來就是「我的帳號」容器。
 
-                兩者都是純連結，因此不需要任何資料 —— 刻意不在這裡讀追蹤清單來
-                顯示人數：那一頁的分頁是推測式的（有下一頁只能說「N+」），一個
-                會與實際不符的數字比沒有數字更糟。通知的未讀數同理不由這裡顯示：
+                三者都是純連結，因此不需要任何資料 —— 刻意不在這裡讀追蹤清單或
+                收藏來顯示筆數：追蹤清單的分頁是推測式的（有下一頁只能說
+                「N+」），而收藏清單根本沒有總數端點（它是分頁的）。一個會與
+                實際不符的數字比沒有數字更糟。通知的未讀數同理不由這裡顯示：
                 它掛在導覽列的鈴鐺上，只在載入時問一次，不該再多一條查詢路徑。
 
                 版面刻意不做成上面兩欄那種「標題在上、值在下」：沒有值可填的
                 欄位看起來只會像填錯了。箭頭是裝飾，標成 aria-hidden，讓每個
-                連結的可及名稱就是「我的追蹤」「我的通知」。
+                連結的可及名稱就是「我的追蹤」「我的收藏」「我的通知」。
               */}
               <a className="profile-entry-link" href="/forum/following">
                 <span>{t('profile.followingEntry')}</span>
+                <span className="material-symbols-outlined" aria-hidden="true">
+                  chevron_right
+                </span>
+              </a>
+              <a className="profile-entry-link" href="/forum/bookmarks">
+                <span>{t('profile.bookmarksEntry')}</span>
                 <span className="material-symbols-outlined" aria-hidden="true">
                   chevron_right
                 </span>

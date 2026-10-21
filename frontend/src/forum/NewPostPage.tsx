@@ -11,10 +11,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { LoginRequiredError, errorText, goToLogin, requestJSON } from '../core';
-import type { ForumProfile, UploadResponse } from '../types';
+import type { ForumProfile } from '../types';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import { BottomNav, ForumNav, ForumShell, useAuth, usePwaInstall } from './shell';
 import { ForumAvatar } from './ForumAvatar';
+import { deleteForumImage, uploadForumImage } from './useFeed';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 
 /* 函式而非常數：模組層的物件會把 import 時的語言固定住，切換後就不會跟著換。 */
@@ -88,6 +89,7 @@ export function NewPostPage() {
   });
   const [submitting, setSubmitting] = useState(false);
   const contentRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loggedIn = auth.phase === 'ready' && auth.loggedIn;
 
@@ -236,23 +238,27 @@ export function NewPostPage() {
       let imageURL = '';
       if (file) {
         setStatus({ message: t('newPost.uploading'), isError: false });
-        const body = new FormData();
-        body.append('file', file);
-        const uploaded = await requestJSON<UploadResponse>('/api/forum/images', {
-          method: 'POST',
-          form: body,
-          fallback: t('error.fallbackUpload'),
-        });
-        imageURL = uploaded.url ?? '';
+        imageURL = await uploadForumImage(file);
         uploadedURLRef.current = imageURL;
       }
 
       setStatus({ message: t('newPost.publishing'), isError: false });
-      await requestJSON('/api/forum/posts', {
-        method: 'POST',
-        json: { content: content.trim(), imageUrl: imageURL },
-        fallback: t('error.fallbackPublish'),
-      });
+      try {
+        await requestJSON('/api/forum/posts', {
+          method: 'POST',
+          json: { content: content.trim(), imageUrl: imageURL },
+          fallback: t('error.fallbackPublish'),
+        });
+      } catch (error) {
+        /*
+         * 上傳成功但發佈失敗時，那張圖不會被任何貼文引用 —— 不主動清掉就是
+         * 一個孤兒檔，而一般使用者沒有任何手段清掉它（刪圖端點要求「我上傳
+         * 的、且未被引用」兩個條件都成立）。清理是 best-effort，且不掩蓋
+         * 原本的錯誤：使用者要看到的是「發佈失敗」。
+         */
+        if (imageURL) void deleteForumImage(imageURL).catch(() => undefined);
+        throw error;
+      }
       // 發佈成功才清草稿：清太早的話，一旦這一步之後發生任何問題（例如導向
       // 失敗），使用者回來會看到一個空的輸入框，而內容其實還在伺服器上。
       publishedRef.current = true;
@@ -346,6 +352,7 @@ export function NewPostPage() {
                 type="file"
                 accept="image/jpeg,image/png,image/gif,image/webp"
                 hidden
+                ref={fileInputRef}
                 onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               />
               {file && previewURL ? (
@@ -353,10 +360,24 @@ export function NewPostPage() {
                   預覽圖的來源是 URL.createObjectURL（見上面的 effect），不是
                   /api/forum/images 的回傳網址：那是檔案伺服器，而圖片此刻還在
                   使用者裝置裡、根本沒上傳。objectURL 在換檔或離頁時會被 revoke。
+
+                  移除鈕只清掉本地選擇（檔案還沒上傳，沒有東西要刪）—— 但要把
+                  input 的值一併清掉：留著的話，重新選同一個檔案不會觸發 change
+                  （瀏覽器認為值沒變），使用者會覺得按了沒反應。
                 */
                 <div className="image-preview" id="forum-image-preview">
                   <img src={previewURL} alt={t('newPost.imagePreviewAlt')} />
                   <span className="image-preview__name">{file.name}</span>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => {
+                      setFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                  >
+                    {t('post.imageRemove')}
+                  </button>
                 </div>
               ) : null}
               <div className="new-post-footer">

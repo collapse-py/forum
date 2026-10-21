@@ -153,6 +153,7 @@ func TestAdminAnnouncementsRequireAdmin(t *testing.T) {
 		{"發佈", server.handleAdminAnnouncements, http.MethodPost, "/api/admin/announcements"},
 		{"修改", server.handleAdminAnnouncement, http.MethodPatch, "/api/admin/announcements/1"},
 		{"置頂", server.handleAdminPostPin, http.MethodPost, "/api/admin/forum/posts/1/pin"},
+		{"還原", server.handleAdminPostRestore, http.MethodPost, "/api/admin/forum/posts/1/restore"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,6 +278,37 @@ func TestAdminPostPinIDFromPath(t *testing.T) {
 		got, err := adminPostPinIDFromPath(tc.path)
 		if tc.wantOK != (err == nil) || (err == nil && got != tc.want) {
 			t.Errorf("adminPostPinIDFromPath(%q) = (%d, %v), want (%d, ok=%v)",
+				tc.path, got, err, tc.want, tc.wantOK)
+		}
+	}
+}
+
+// 還原路由的 id 解析（/api/admin/forum/posts/{id}/restore）。
+//
+// 表格與置頂那一組刻意同形：兩條路由的解析器是兩份程式碼（理由見
+// adminPostRestoreIDFromPath 的說明），因此必須各自被釘住 —— 只測其中一條時，
+// 另一條的 Trim 誤用不會有任何測試紅燈，而症狀與置頂那條完全相同：管理員
+// 點了一篇，實際操作的是另一篇（或整個請求 400）。
+func TestAdminPostRestoreIDFromPath(t *testing.T) {
+	cases := []struct {
+		path   string
+		want   int64
+		wantOK bool
+	}{
+		{"/api/admin/forum/posts/1/restore", 1, true},
+		{"/api/admin/forum/posts/42/restore", 42, true},
+		{"/api/admin/forum/posts/1/restore/", 0, false},
+		{"/api/admin/forum/posts/restore1/restore", 0, false},
+		{"/api/admin/forum/posts/12restore/restore", 0, false},
+		{"/api/admin/forum/posts/abc/restore", 0, false},
+		{"/api/admin/forum/posts//restore", 0, false},
+		{"/api/admin/forum/posts/-1/restore", -1, true},
+		{"/api/admin/forum/posts/0/restore", 0, true},
+	}
+	for _, tc := range cases {
+		got, err := adminPostRestoreIDFromPath(tc.path)
+		if tc.wantOK != (err == nil) || (err == nil && got != tc.want) {
+			t.Errorf("adminPostRestoreIDFromPath(%q) = (%d, %v), want (%d, ok=%v)",
 				tc.path, got, err, tc.want, tc.wantOK)
 		}
 	}

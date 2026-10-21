@@ -2,7 +2,7 @@
  * 語言切換器（src/i18n/LanguageSwitcher.tsx）
  *
  * 右上角的兩字母代碼（TW / CN / EN / JP），點開後是全部語言的下拉清單。
- * 九個頁面共用這一個元件：公開頁放在導覽列的 .nav-actions，後臺放在 topbar 的
+ * 所有頁面共用這一個元件：公開頁放在導覽列的 .nav-actions，後臺放在 topbar 的
  * .topbar__actions，兩邊的差別只有外觀（variant），互動邏輯完全相同。
  *
  * 選單自己實作而不用 <select> 或 <details> 的三個理由：

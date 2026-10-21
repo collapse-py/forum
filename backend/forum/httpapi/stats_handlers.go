@@ -14,18 +14,18 @@ package httpapi
 		輸出（熱門文章只帶前 80 字，與公開頁看到的一樣），所以不值得記。
 		反過來說，若日後這個頁面加了「清除統計」之類的按鈕，就必須接上。
 
-	2. 不預先彙總，也不新增統計表
-		與監控頁的分鐘彙總（forum_request_metrics）相反，這裡每次讀取都
-		即時算。理由是規模：這個端點觸及的每一張表的 created_at 都有索引
-		（forum_users 的是遷移第 24 步補的，forum_post_likes 的是第 27 步），
-		而查詢被 WHERE created_at >= ? 限制在 30 天內，掃描量是「最近 30 天
-		的資料量」而不是「全部資料量」。為此維護一張每日彙總表，等於用一份
-		會過期（隔天就沒人補）的資料換掉一個有界查詢。
-
-		什麼時候該改：文章總量成長到讓「最近 30 天」也不再有界的時候。那時
-		正確做法是加一張每日彙總表，並在寫入路徑上順帶更新（就像
-		forum_request_metrics 那樣），而不是把視窗縮到 7 天 —— 縮視窗會讓
-		圖上看不出季節性的起伏，而那正是這一頁存在的理由。
+	2. 日別序列讀彙總表，不每次即時計算
+		日別新增量讀 forum_daily_stats（第 35 步的彙總表），由 data 套件的
+		BackfillDailyStats / RefreshDailyStats 定期重算（見 data/rollup.go）。
+		這正是 KNOWN_ISSUES 與舊版檔頭寫明的「該改的時候」：即時計算的掃描
+		量被視窗限制住，而視窗（90 天）本身有上限——內容量成長到視窗不再有
+		界時，正確做法是加彙總表而不是縮視窗（縮視窗會讓圖上看不出季節性的
+		起伏，而那正是這一頁存在的理由）。
+		語意上的差別要誠實寫出來：彙總表記的是「那一天產生了多少」，含後來
+		被軟刪除的貼文；舊的即時查詢記的是「現在還看得到多少」。前者才是
+		「趨勢」該用的口径——一篇被刪的文章在它被寫的那一天確實發生。
+		熱門文章／活躍作者仍走即時查询：它们需要内容与互动计数，无法由日別
+		計數彙總出来，而它们的扫描同样被視窗限制住。
 
 	3. 分日以「伺服器本地時區」為準，且由 Go 補齊缺漏的日期
 		created_at 由應用層寫入 time.Now()（不是資料庫的 NOW()），所以它
@@ -46,7 +46,6 @@ package httpapi
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"strconv"
 	"strings"
@@ -159,7 +158,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
-	if payload.Series, err = s.loadStatsSeries(r, start, days); err != nil {
+	if payload.Series, err = s.loadStatsSeries(r.Context(), start, days); err != nil {
 		logger.ErrorfContext(r.Context(), "[STATS] 無法載入日別序列: %v", err)
 		internalError(w, "unable to load content trends")
 		return
@@ -204,19 +203,36 @@ func statsDays(raw string) int {
 	return days
 }
 
-// loadStatsSeries 取回三個日別序列，並補齊沒有資料的日子。
-func (s *Server) loadStatsSeries(r *http.Request, start time.Time, days int) (statsSeries, error) {
-	ctx := r.Context()
-	users, err := dailyCounts(ctx, s.db, "forum_users", start)
+// loadStatsSeries 讀回彙總表的日別新增量，並補齊沒有資料的日子。
+//
+// 讀彙總表而不是即時 GROUP BY：理由見檔頭第二點。缺資料的日子（彙總表
+// 沒有那列）照舊補 0——「那天真的是零」與「沒有資料」對前端是同一件事，
+// 而對讀者必須是一條完整的線。
+func (s *Server) loadStatsSeries(ctx context.Context, start time.Time, days int) (statsSeries, error) {
+	type dayCounts struct {
+		users    int
+		posts    int
+		comments int
+		likes    int
+	}
+	counts := make(map[string]dayCounts, days)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT day, new_users, new_posts, new_comments, new_likes
+		FROM forum_daily_stats WHERE day >= ? ORDER BY day`, start)
 	if err != nil {
 		return statsSeries{}, err
 	}
-	posts, err := dailyCounts(ctx, s.db, "forum_posts", start)
-	if err != nil {
-		return statsSeries{}, err
+	defer rows.Close()
+	for rows.Next() {
+		var day time.Time
+		var c dayCounts
+		if err := rows.Scan(&day, &c.users, &c.posts, &c.comments, &c.likes); err != nil {
+			return statsSeries{}, err
+		}
+		counts[day.Format("2006-01-02")] = c
 	}
-	comments, err := dailyCounts(ctx, s.db, "forum_post_comments", start)
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		return statsSeries{}, err
 	}
 
@@ -231,57 +247,32 @@ func (s *Server) loadStatsSeries(r *http.Request, start time.Time, days int) (st
 		series.Dates = append(series.Dates, day)
 		// 缺資料的日子給 0。map 查不到就是沒有那一列，因此 nil 切片與
 		// 稀疏結果都會走到這個分支 —— 這正是我們要呈現的。
-		series.Users = append(series.Users, users[day])
-		series.Posts = append(series.Posts, posts[day])
-		series.Comments = append(series.Comments, comments[day])
+		c := counts[day]
+		series.Users = append(series.Users, c.users)
+		series.Posts = append(series.Posts, c.posts)
+		series.Comments = append(series.Comments, c.comments)
+		// likes 刻意不進日別序列：前端只渲染三条线（使用者／貼文／留言），
+		// 按讚的視窗合計在 Totals 裡。多送一条前端不会用的序列只会让
+		// 「payload 里有但图上没有」变成新的困惑来源。
+		_ = c.likes
 	}
 	return series, nil
 }
 
-// dailyCounts 依表名取回「每日筆數」。
-//
-// table 是內部字面值（由呼叫端以白名單指定），不來自任何使用者輸入 —— 這
-// 是這個函式唯一需要用到表名的地方，因此它不能接受來自 HTTP 的字串。
-// 這與 ensureForumReportTarget 用 if/else 白名單決定表名是同一個原則。
-func dailyCounts(ctx context.Context, db *sql.DB, table string, start time.Time) (map[string]int, error) {
-	// DATE(created_at) 依賴 created_at 帶的是主機本地時區（應用層寫入
-	// time.Now()，見檔頭第三點），而 DATE() 與 now() 用的是同一個連線，
-	// 因此分組結果等於「主機上的自然日」。
-	rows, err := db.QueryContext(ctx, "SELECT DATE(created_at), COUNT(*) FROM "+table+" WHERE created_at >= ? GROUP BY DATE(created_at)", start)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	counts := make(map[string]int, 8)
-	for rows.Next() {
-		var day time.Time
-		var count int
-		if err := rows.Scan(&day, &count); err != nil {
-			return nil, err
-		}
-		counts[day.Format("2006-01-02")] = count
-	}
-	return counts, rows.Err()
-}
-
 // loadStatsTotals 取回視窗內的合計。
+//
+// 讀彙總表的 SUM，而不是四張來源表各一次 COUNT：日別序列已經讀同一張表，
+// 合計就是同一份資料的加總——兩處用不同來源会让「圖加起來不等于總數」
+// 成為可能。語意與日別序列一致：記的是「視窗內產生了多少」，含後來被
+// 軟刪除的貼文（見檔頭第二點）。
 func (s *Server) loadStatsTotals(ctx context.Context, start time.Time) (statsTotals, error) {
 	var totals statsTotals
-	// 四個計數合成一個查詢而非四個：它們都是「有索引的 created_at 範圍掃描
-	// + COUNT」，合成一個只會讓 MySQL 少開三次連線往返，程式碼也少三段
-	// 幾乎一樣的錯誤處理。
-	row := s.db.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM forum_users WHERE created_at >= ?),
-			(SELECT COUNT(*) FROM forum_posts WHERE created_at >= ? AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM forum_post_comments WHERE created_at >= ?),
-			(SELECT COUNT(*) FROM forum_post_likes WHERE created_at >= ?)
-	`, start, start, start, start)
-	if err := row.Scan(&totals.Users, &totals.Posts, &totals.Comments, &totals.Likes); err != nil {
-		return statsTotals{}, err
-	}
-	return totals, nil
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(new_users), 0), COALESCE(SUM(new_posts), 0),
+			COALESCE(SUM(new_comments), 0), COALESCE(SUM(new_likes), 0)
+		FROM forum_daily_stats WHERE day >= ?`, start).
+		Scan(&totals.Users, &totals.Posts, &totals.Comments, &totals.Likes)
+	return totals, err
 }
 
 // loadStatsTopPosts 取回視窗內互動最多的文章。

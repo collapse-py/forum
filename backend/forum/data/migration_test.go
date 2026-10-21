@@ -78,6 +78,9 @@ var requiredTables = []string{
 	"forum_admin_actions",
 	"forum_announcements",
 	"forum_notifications",
+	"forum_media",
+	"forum_post_bookmarks",
+	"forum_daily_stats",
 }
 
 // dbCounter 讓每個測試的資料庫名稱都不相同。

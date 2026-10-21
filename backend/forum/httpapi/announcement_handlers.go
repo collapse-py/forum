@@ -455,17 +455,26 @@ func (s *Server) handleAdminAnnouncement(w http.ResponseWriter, r *http.Request)
 	writeOK(w, map[string]bool{"ok": true})
 }
 
-// handleAdminPostOrPin 分流 /api/admin/forum/posts/{id}… 這個前綴下的兩件事：
-// 單篇文章的修改／刪除（既有），以及 /{id}/pin（置頂）。
+// handleAdminPostOrPin 分流 /api/admin/forum/posts/{id}… 這個前綴下的三件事：
+// 單篇文章的修改／刪除（既有）、/{id}/pin（置頂），以及 /{id}/restore（還原軟
+// 刪除的貼文）。
 //
-// 為什麼要分流而不是把 /{id}/pin 註冊成另一條路由：ServeMux 對兩條樣式
-// （"/api/admin/forum/posts/" 與 "/api/admin/forum/posts/"）的處理是一樣的
-// —— 都是「前綴比對」，後註冊的會贏。因此若把 /{id}/pin 單獨註冊，它會
+// 為什麼要分流而不是把 /{id}/pin 或 /{id}/restore 註冊成另一條路由：ServeMux
+// 對兩條樣式（"/api/admin/forum/posts/" 與 "/api/admin/forum/posts/"）的處理是
+// 一樣的 —— 都是「前綴比對」，後註冊的會贏。因此若把 /{id}/pin 單獨註冊，它會
 // **吃掉**整個 /{id} 前綴，而既有的修改與刪除就會全部 404。分流是唯一
-// 不會讓兩者互相干擾的做法。
+// 不會讓它們互相干擾的做法。
+//
+// 尾綴檢查的順序無關（"/pin" 與 "/restore" 互為不同字串），但三條路徑必須
+// 互斥：一旦有兩個 HasSuffix 同時成立，先命中者決定了行為，而那是寂靜的
+// 分歧（請求成功，只是打到另一件事）。
 func (s *Server) handleAdminPostOrPin(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/pin") {
 		s.handleAdminPostPin(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/restore") {
+		s.handleAdminPostRestore(w, r)
 		return
 	}
 	s.handleAdminForumPost(w, r)

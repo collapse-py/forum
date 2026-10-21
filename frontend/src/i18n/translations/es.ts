@@ -93,6 +93,10 @@ export const es: Record<MessageKey, string> = {
     'No se encontró esta persona.',
   'error.fallbackFollow':
     'No se pudo seguir.',
+  'error.fallbackBookmark':
+    'No se pudo actualizar el guardado',
+  'error.fallbackImageDelete':
+    'No se pudo eliminar la imagen',
   'auth.checking':
     'Comprobando el inicio de sesión…',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const es: Record<MessageKey, string> = {
     'Contenido de la publicación',
   'post.editMax':
     'Máximo 10000 caracteres',
+  'post.bookmark':
+    'Guardar',
+  'post.unbookmark':
+    'Quitar de guardados',
+  'post.imageEdit':
+    'Cambiar imagen',
+  'post.imageRemove':
+    'Quitar imagen',
+  'post.imageSelectedNote':
+    'Nueva imagen seleccionada (se aplica al guardar).',
+  'post.imageWillRemoveNote':
+    'La imagen se quitará al guardar.',
   'comment.loading':
     'Cargando comentarios…',
   'comment.none':
@@ -313,6 +329,8 @@ export const es: Record<MessageKey, string> = {
     'No se pudo cargar. Inténtalo de nuevo más tarde.',
   'profile.followingEntry':
     'A quién sigo',
+  'profile.bookmarksEntry':
+    'Mis guardados',
   'profile.postsLabel':
     'Mis publicaciones',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const es: Record<MessageKey, string> = {
     'No se pudo cargar a quién sigues.',
   'following.postsFailed':
     'No se pudieron cargar las publicaciones.',
+  'bookmarks.label':
+    'Publicaciones guardadas',
+  'bookmarks.empty':
+    'Aún no has guardado ninguna publicación. Pulsa «Guardar» en una publicación para encontrarla aquí.',
+  'bookmarks.failed':
+    'No se pudieron cargar los guardados.',
+  'bookmarks.removed':
+    'Se quitó de guardados.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const es: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Publicación creada',
   'log.actionPostUpdate': 'Publicación editada',
   'log.actionPostDelete': 'Publicación eliminada',
+  'log.actionPostRestore':
+    'Publicación restaurada',
   'log.actionCommentCreate': 'Comentario creado',
   'log.actionCommentUpdate': 'Comentario editado',
   'log.actionCommentDelete': 'Comentario eliminado',
@@ -1166,6 +1194,24 @@ export const es: Record<MessageKey, string> = {
   'posts.pinDone': 'Fijada',
   'posts.unpinDone': 'Desfijada',
   'posts.pinFailed': 'La operación de fijar falló.',
+  'posts.onlyDeleted':
+    'Mostrar solo eliminadas',
+  'posts.deletedBadge':
+    'Eliminada',
+  'posts.restore':
+    'Restaurar',
+  'posts.restoreTitle':
+    'Restaurar publicación n.º {id}',
+  'posts.restoreMessage':
+    'Al restaurar, la publicación volverá a aparecer en las páginas públicas; sus comentarios e imagen se conservan.',
+  'posts.restoreDone':
+    'Publicación restaurada.',
+  'posts.restoreFailed':
+    'No se pudo restaurar.',
+  'posts.emptyDeletedTitle':
+    'No hay publicaciones eliminadas',
+  'posts.emptyDeletedBody':
+    'Ahora mismo no hay publicaciones eliminadas.',
   'reports.title':
     'Gestión de denuncias',
   'reports.listSummary':
@@ -1273,17 +1319,19 @@ export const es: Record<MessageKey, string> = {
   'title.forum':
     '{site}',
   'title.login':
-    'Iniciar sesión | {site}',
+    'Iniciar sesión｜{site}',
   'title.newPost':
-    'Nueva publicación | {site}',
+    'Nueva publicación｜{site}',
   'title.profile':
     'Perfil｜{site}',
   'title.publicProfile':
-    'Perfil público | {site}',
+    'Perfil público｜{site}',
   'title.post':
     'Publicación｜{site}',
   'title.following':
-    'Siguiendo | {site}',
+    'Siguiendo｜{site}',
+  'title.bookmarks':
+    'Guardados｜{site}',
   'title.adminUsers':
     'Gestión de usuarios | {brand} Panel de administración',
   'title.adminLogin':

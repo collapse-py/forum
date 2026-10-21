@@ -523,14 +523,17 @@ func (s *Server) Handler() http.Handler {
 		論壇（讀取可匿名，寫入需登入並限流）
 		  /api/forum/posts                requireLoginForWrite → rateLimit(write) → handleForumPosts
 		  /api/forum/images               requireLogin → rateLimit(upload) → handleForumImageUpload
+		  /api/forum/images/delete        requireLogin → rateLimit(write) → handleForumImageDelete
+		                                 （刪除自己上傳、且未被引用的圖片）
 		  /api/forum/image-tokens/release requireLogin → rateLimit(upload) → handleForumImageTokensRelease
 		  /api/forum/posts/{id}...        requireLoginForWrite → rateLimit(write) → handleForumPostAction
 		                                 （單篇／編輯／刪除本人貼文，以及尾綴分派：
-		                                  /comments、/comments/{cid}、/like、/report）
+		                                  /comments、/comments/{cid}、/like、/bookmark、/report）
 		  /api/forum/profile              requireLogin → rateLimit(write) → handleForumProfile
 		  /api/forum/follows              requireLogin → rateLimit(write) → handleForumFollows
 		                                 （GET 回追蹤清單、POST 切換追蹤）
 		  /api/forum/following/posts      requireLogin → handleForumFollowingPosts（私有唯讀）
+		  /api/forum/bookmarks            requireLogin → handleForumBookmarks（自己收藏的貼文，私有唯讀）
 		  /api/forum/my-posts              requireLogin → handleForumMyPosts（自己的貼文，私有唯讀）
 		  /api/forum/notifications        requireLogin → handleForumNotifications（列表／標記已讀）
 		  /api/forum/notifications/unread-count requireLogin → handleForumNotificationUnreadCount（私有唯讀）
@@ -559,6 +562,8 @@ func (s *Server) Handler() http.Handler {
 		  /api/forum/announcement         handleForumAnnouncement（公開：目前生效的公告，無則 announcement:null）
 		  /api/admin/announcements[/{id}] handleAdminAnnouncements / handleAdminAnnouncement（後臺公告）
 		  /api/admin/forum/posts/{id}/pin handleAdminPostOrPin → handleAdminPostPin（置頂／取消置頂）
+		  /api/admin/forum/posts/{id}/restore handleAdminPostOrPin → handleAdminPostRestore（還原軟刪除）
+		  /feed.xml                       handleForumRSS（公開 RSS 2.0 摘要，含 ETag）
 
 		靜態頁面與資產（見下方各路由的個別說明）
 		  /forum-manifest.json、/service-worker.js、/admin*、/assets/、
@@ -603,6 +608,12 @@ func (s *Server) Handler() http.Handler {
 		s.rateLimit(s.uploadRateLimiter, s.handleForumImageUpload)))
 	mux.HandleFunc("/api/forum/image-tokens/release", s.requireLogin(
 		s.rateLimit(s.uploadRateLimiter, s.handleForumImageTokensRelease)))
+	// 刪除自己上傳的圖片。掛 write 額度而不是 upload：它不動 mediaRedis，
+	// 只有一次檔案伺服器的刪除呼叫與兩次 MySQL 查詢/刪除。真正會被濫用的
+	// 「上傳／刪除反覆」組合仍受 upload 額度（上傳那一半）約束，而刪除端點
+	// 只認自己的檔案，刪別人的檔案會被 404 擋掉。
+	mux.HandleFunc("/api/forum/images/delete", s.requireLogin(
+		s.rateLimit(s.writeRateLimiter, s.handleForumImageDelete)))
 	// 留言、按讚、檢舉都掛在 /api/forum/posts/ 之下。GET 取留言為公開讀取，
 	// 其餘寫入方法需要登入 —— 這正是 requireLoginForWrite 存在的理由。
 	// 這一條同時承載四種尾綴（/comments、/like、/report），因此一組限流同時
@@ -622,6 +633,11 @@ func (s *Server) Handler() http.Handler {
 	// 追蹤者的貼文動態。純私有讀取（沒有登入就沒有追蹤清單），因此只掛
 	// requireLogin，不掛限流 —— 限流 GET 的前提是匿名訪客也要能讀，而這裡本來就擋掉了匿名。
 	mux.HandleFunc("/api/forum/following/posts", s.requireLogin(s.handleForumFollowingPosts))
+	// 自己收藏的貼文。與上一條完全同一組判斷：純私有唯讀、只有 GET，
+	// 因此只掛 requireLogin，不掛限流（限流 GET 的前提是匿名訪客也要能讀，
+	// 而這裡本來就擋掉了匿名）。切換收藏是 POST /api/forum/posts/{id}/bookmark，
+	// 由上面那條 requireLoginForWrite 的子樹路由承載。
+	mux.HandleFunc("/api/forum/bookmarks", s.requireLogin(s.handleForumBookmarks))
 	// 自己的貼文（個人頁的「我的貼文」區塊）。與上一條同一組判斷：純私有唯讀，
 	// 因此只掛 requireLogin。刻意不讓前端改走 public-posts?user=<自己的金鑰> ——
 	// 那條路徑對「還沒發過文的帳號」會回 404，而個人頁必須把「還沒發過文」顯示成
@@ -719,6 +735,12 @@ func (s *Server) Handler() http.Handler {
 	// IP 封鎖名單。刻意**不**掛在 rateLimitAllMethods 下：那會讓管理員在
 	// 處理一個正在發生的濫用時被自己正在用的功能擋住。
 	mux.HandleFunc("/api/admin/blocks", s.handleAdminBlocks)
+
+	// RSS 摘要。刻意放在根目錄而不是 /forum/feed.xml：/forum/ 子樹路由掛了
+	// requireLogin（見下方靜態頁面的段落），而 RSS 的用途正是給未登入的
+	// 閱讀器訂閱。掛在根目錄也讓「探索連結」的相對網址單純（各頁 <head> 的
+	// rel="alternate" 直接指向 /feed.xml）。
+	mux.HandleFunc("/feed.xml", s.handleForumRSS)
 
 	// 下列 /forum/* 靜態路由都同時註冊「不帶尾斜線」與「帶尾斜線」兩個樣式，
 	// 並在 handler 內手動比對 r.URL.Path。這是 Go 1.22+ ServeMux 語意的必然結果：

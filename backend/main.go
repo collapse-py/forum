@@ -43,7 +43,7 @@ forum_request_metrics，保留 MONITOR_RETENTION_HOURS 小時（預設 24）後�
 啟動時先把保留期內的既有彙總讀回記憶體，因此監控頁的時間軸在重啟後不會變空白。
 
 【停止流程】
-背景 goroutine（限流清理、監控落盤、ES 索引重建、稽核清理、封鎖清理）共用一個
+背景 goroutine（限流清理、監控落盤、ES 索引重建、ES 索引對帳、稽核清理、軟刪除貼文清理、日別彙總刷新、封鎖清理）共用一個
 context.WithCancel 建立的 context。優雅停止的順序是「停止接受新請求 → 等在途
 請求 → 取消背景 context → 同步寫出最後一次分鐘彙總」，四步的順序本身是這段程式
 唯一需要注意的地方，理由見各步旁的註解。
@@ -57,6 +57,7 @@ forum/forum/auth Google OAuth2 授權碼流程。
 forum/forum/es Elasticsearch 傳輸層（貼文搜尋與索引重建）。
 forum/forum/metrics 請求統計容器與分鐘彙總的持久化。
 forum/forum/audit 管理員操作稽核的寫入、查詢與依時間清理。
+forum/forum/purge 軟刪除貼文的保留期清理（硬刪過期列與回收附圖）。
 forum/forum/httpapi 路由、中介層與請求/回應格式。
 github.com/redis/go-redis/v9 Redis 用戶端。
 golang.org/x/oauth2 為間接依賴，經由 forum/forum/auth 使用。
@@ -108,6 +109,7 @@ import (
 	"forum/forum/ipban"
 	"forum/forum/logger"
 	"forum/forum/metrics"
+	"forum/forum/purge"
 	"forum/forum/session"
 	"os"
 	"os/signal"
@@ -178,7 +180,7 @@ func main() {
 
 	// 必須排在所有其他初始化之前：後續每一步的失敗都會走 logger.Fatalf，
 	// 若 logger 還沒就緒，錯誤原因會被寫到預設 stdout 而不進日誌檔。
-	if err := logger.Init(cfg.LogLevel, cfg.LogFile, cfg.LogFormat); err != nil {
+	if err := logger.Init(cfg.LogLevel, cfg.LogFile, cfg.LogFormat, cfg.LogMaxSizeMB, cfg.LogMaxFiles); err != nil {
 		logger.Fatalf("[LOGGER] Failed to initialize logger: %v", err)
 	}
 	// 正常結束時關閉日誌檔句柄；Fatalf 走 os.Exit(1)，不會觸發這個 defer。
@@ -234,22 +236,21 @@ func main() {
 		logger.Fatalf("[DB] Create MySQL tables failed: %v", err)
 	}
 
-	// auth.Init 把 OAuth2 設定寫進 auth 套件的全域變數。
-	// 不呼叫的話 /auth/google 會因為 OauthConfig 為 nil 而回 500，
-	// 且 GetUserEmail 會在解參考時 panic，所以這一步不能省略也不能延後到請求期間。
-	auth.Init(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL)
+	/*
+	 * 回填日別彙總表（forum_daily_stats）。
+	 *
+	 * 同步執行、排在開始服務之前：回填的量有界（「有資料的天數」），而若
+	 * 交給背景，統計頁的頭幾次請求會看到空表——日別序列全是 0，而「全 0」
+	 * 在圖上看起來像「這站沒有內容」，不是「彙總还没建立」。
+	 * 失敗只記警告：彙總表是純衍生資料，刷新排程（下方）会在下一个 tick
+	 * 重算最近几天，更早的日期则永远由下一次启动的回填补上。
+	 */
+	if err := data.BackfillDailyStats(context.Background(), db); err != nil {
+		logger.Warnf("[STATS] 日別彙總回填失敗（內容趨勢頁將不完整，直到刷新排程追上）: %v", err)
+	}
 
-	// Session 本體存在 Redis，cookie 只承載 24 bytes 隨機 token（hex 後 48 字元），
-	// 因此伺服器端可以主動撤銷。cookieSecure 由設定檔的 COOKIE_SECURE 控制：
-	// 本機以 http 測試時必須為 false，否則瀏覽器不會回傳帶 Secure 的 cookie。
-	sessions := session.NewManager(cfg.CookieName, cfg.SessionExpire, cfg.CookieSecure, redisClient)
-
-	// Handler() 內含 session 續期、安全標頭、來源檢查（CSRF）、請求日誌
-	// 與靜態檔案掛載等中介層，因此建構 Server 後不需要再額外包一層 middleware。
-	srv := httpapi.NewServer(cfg, db, sessions, redisClient)
-
-	// 背景工作的唯一取消管道。五個背景 goroutine（限流清理、監控落盤、
-	// ES 索引重建、稽核清理、封鎖清理）共用它，因此「停止」是一個決定而不是
+	// 背景工作的唯一取消管道。八個背景 goroutine（限流清理、監控落盤、
+	// ES 索引重建、ES 索引對帳、稽核清理、軟刪除貼文清理、日別彙總刷新、封鎖清理）共用它，因此「停止」是一個決定而不是
 	// 五個。
 	//
 	// 為什麼不用 context.Background()：那會讓每個 goroutine 各自為政，而
@@ -264,172 +265,7 @@ func main() {
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 
-	// 啟動限流器的背景清理。三個限流器各自在記憶體裡保存「最近視窗內各次
-	// 請求的時間戳」，而 Allow 只會把某個 key 的 slice 縮短、不會刪掉 key，
-	// 因此沒有這道定期掃描，map 會隨時間只增不減（見 ratelimit.go 檔頭）。
-	//
-	// 清理頻率刻意等於視窗長度：視窗過了，最老那筆紀錄就會自然過期，
-	// 此刻掃一次就能把它連同 key 一起回收。再更頻繁只是徒增鎖競爭。
-	//
-	// 這裡傳入 backgroundCtx（而非 context.Background()）：優雅停止時它會被取消，
-	// 三條清理 goroutine 因此自動停止，不必修改 httpapi 套件。
-	//
-	// 延遲啟動而非在 NewServer 內啟動：NewServer 刻意不開背景 goroutine，
-	// 「何時開始有背景工作」應該是呼叫端明確的決定，而不是建構式的副作用。
-	srv.StartRateLimitCleanup(backgroundCtx, cfg.RateLimitWindow)
-
-	/*
-	 * 啟動後在背景重建 Elasticsearch 的貼文索引。
-
-	 * 為什麼要重建：ES 是可拋棄的衍生資料（內容的真相在 MySQL），
-	 * 但它不會自己知道「MySQL 多了哪些貼文」—— 服務停機期間發的文、
-	 * 索引被誤刪、或第一次接上 ES 的部署，索引都會落後於資料庫。
-	 * 每次啟動重建一次以消除這個落差，之後的增量維護由各寫入路徑即時處理
-	 * （createForumPost / handleAdminForumPost 的 PUT 與 DELETE / createAdminUserPost）。
-
-	 * 為什麼在 goroutine 裡而不是啟動流程中：重建是 O(全部貼文) 的操作，
-	 * 就算只有幾百篇也不該讓服務「啟動中」長達數秒。更重要的是它是
-	 * best-effort 的——ES 掛掉時這裡只會留下警告日誌，論壇照常服務，
-	 * 搜尋則降級為 MySQL LIKE（見 search.go）。
-
-	 * 用可取消的 backgroundCtx：優雅停止時索引重建會被中斷。這是刻意的取捨 ——
-	 * 重建是 O(全部貼文) 的工作，讓它跑完可能還要數秒，而那一刻行程本來就要
-	 * 結束；下次啟動時會再重建一次，因此中斷它不會留下永久性的落後狀態。
-	 */
-	go func() {
-		if cfg.ESURL != "" {
-			// 驗證種類先記下來：它只有三個值、不含任何機密內容。要記它是因為
-			// 「ES 開了安全性但我們沒給驗證」這個組合失效時，每個請求都只會
-			// 安靜地退回 MySQL LIKE —— 那條降級路徑本身完全正常，因此唯一的
-			// 跡象就是啟動時這一行。
-			logger.Infof("[SEARCH] Elasticsearch 索引 %s（驗證 %s）", cfg.ESIndex, esAuthFrom(cfg).Kind())
-		}
-		indexed, err := srv.RebuildSearchIndex(backgroundCtx)
-		if err != nil {
-			// errors.Is 判定 ErrDisabled：那是「設定檔沒填 ES_URL」的預期情況，
-			// 用 Info 記錄即可（等同於這台站沒有啟用搜尋），不該報錯嚇到維運。
-			if errors.Is(err, es.ErrDisabled) {
-				logger.Info("[SEARCH] 未設定 ES_URL，搜尋將使用 MySQL 關鍵字比對")
-				return
-			}
-			logger.Warnf("[SEARCH] 貼文索引重建失敗（搜尋將降級為 MySQL 關鍵字比對）: %v", err)
-			return
-		}
-		logger.Infof("[SEARCH] 貼文索引重建完成，共 %d 篇", indexed)
-	}()
-
-	/*
-	 * 「啟動完成」這行日誌只在最下面、真正進入監聽**之前**印一次（見下面
-	 * sigCh 附近）。這裡刻意不再印一次：兩行字樣完全相同的訊息會讓人以為
-	 * 站台被啟動了兩次，而它們的真正差異是 —— 第一行在監聽開始前，
-	 * 第二行（唯一的第二行）在訊號處理註冊完、ListenAndServe 之前。
-	 * 差別只對「啟動過程卡在後半段」的排查有意義，而那只需要一行。
-	 */
-
-	/*
-	 * 啟動監控統計的持久化。
-	 *
-	 * 兩件事，順序有意義：
-	 *
-	 *  1. 先讀回重啟前的分鐘彙總（LoadHistory）。它只是把資料載進記憶體，
-	 *     失敗時只會讓監控頁少了重啟前的曲線 —— 因此錯誤只記警告，不影響
-	 *     服務啟動。監控是診斷工具，它自己缺一塊資料不該讓論壇開不了。
-	 *
-	 *  2. 再啟動定期寫入（StartFlusher）。放在 Handler() 之後才啟動是刻意的：
-	 *     從這一行開始，mux 才真的開始收請求；先啟動 flusher 只會讓第一個
-	 *     分鐘的桶多一點點內容，沒有實質差別，但「服務開始服務的時刻」因此
-	 *     仍然是一個明確的分界。
-	 *
-	 * ctx 傳 backgroundCtx：優雅停止時它會被取消，StartFlusher 收到
-	 * ctx.Done() 會再做一次收尾寫入。停止流程仍會在 main 裡同步補一次
-	 * FlushPending（理由見該處），兩者不重複計數的保證來自 flushed 旗標
-	 * 是在鎖內先標記再送出。
-	 *
-	 * 寫入週期 20 秒刻意不等於一分鐘：它寫的是「已結束的分鐘」，所以週期
-	 * 只影響「資料落盤的延遲上限」與「最壞情況下重啟會遺失多久的資料」。
-	 * 20 秒讓最壞情況是一分鐘（當前分鐘）加上零到 20 秒的排隊延遲，而不是
-	 * 一分鐘加上最多一整分鐘的 tick 延遲。
-	 */
-	registry := srv.Metrics()
-	if registry != nil {
-		// since 對齊「時間軸實際會顯示的區間」，而不是 MONITOR_RETENTION_HOURS。
-		//
-		// 這個差別不是小數點：時間軸只有 TimelineMinutes 格（預設 120 分鐘），
-		// 因此讀回 24 小時的 1440 列會在 20 秒內被 pruneLocked 裁到 120 列 ——
-		// 其餘 1320 列純屬白讀（一次 DB 往返）、白佔記憶體，且沒有任何作用。
-		// 用保留期當 since 也會讓 log 裡「已讀回 N 分鐘」變成一個與畫面
-		// 完全無關的數字。
-		since := time.Now().Add(-time.Duration(registry.TimelineMinutes()) * time.Minute)
-		if loaded, err := registry.LoadHistory(context.Background(), db, since); err != nil {
-			// 表不存在（首次部署尚未跑遷移）或權限不足都會走到這裡。監控頁
-			// 仍會顯示「本次啟動以來」的即時曲線，因此這是警告而不是錯誤。
-			logger.Warnf("[MONITOR] 無法讀回歷史請求統計（監控頁將只顯示本次啟動的資料）: %v", err)
-		} else if loaded > 0 {
-			logger.Infof("[MONITOR] 已讀回 %d 分鐘的歷史請求統計", loaded)
-		}
-		if err := registry.StartFlusher(backgroundCtx, metrics.FlusherOptions{
-			DB:             db,
-			Interval:       20 * time.Second,
-			RetentionHours: cfg.MonitorRetentionHours,
-		}); err != nil {
-			// 拿不到 *sql.DB 只會發生在 main 的組裝被改動時；此時監控頁
-			// 仍可用（只是沒有重啟前的歷史），因此記警告即可。
-			logger.Warnf("[MONITOR] 請求統計持久化未啟用: %v", err)
-		}
-	}
-
-	/*
-	 * 啟動稽核紀錄的定期清理。
-	 *
-	 * 這裡刻意不設任何中斷條件：稽核紀錄的寫入發生在每個後台操作裡（有交易
-	 * 保護），清理卻與論壇功能無關 —— 它只是讓這張表不會無限長大。若清理
-	 * 因為資料庫暫時不可用而停下來，後台操作本身完全不受影響，只是紀錄會
-	 * 暫時變多。因此用獨立的 goroutine 而不併入 metrics 的 flusher：
-	 * 兩者的失敗語意不同，綁在一起會讓其中一個的問題被誤判成另一個的。
-	 *
-	 * 清理週期一小時一次。稽核紀錄的用途是「有人來查」的時候還查得到，
-	 * 而多存幾小時完全沒有差別，因此小時級的粒度對這個用途綽綽有餘。
-	 *
-	 * ctx 傳 backgroundCtx：停止時清理迴圈會立刻結束。這裡沒有像監控落盤那樣
-	 * 另做收尾寫入 —— 稽核紀錄的寫入發生在請求裡（在途請求完成後資料就已在
-	 * 資料庫），清理本身沒有任何待收的東西。
-	 */
-	go audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
-
-	/*
-	 * 啟動 IP 封鎖名單的定期清理。
-	 *
-	 * 清理的必要性：封鎖名單是 Redis sorted set，member 是 IP、score 是到期
-	 * 秒數。查詢時（ipban.IsBanned）會正確地把已過期的項目視為未封鎖，因此
-	 * **不清理不會造成功能錯誤** —— 它只會讓 ZSET 慢慢長大，而那個增長是
-	 * 單調的。一小時清理一次的寫入量可以忽略（見 ipban.NewPruner）。
-	 *
-	 * 與 session 的 StartCleanup 一樣：都交給呼叫端決定何時停止，這裡傳
-	 * backgroundCtx。
-	 *
-	 * 這裡的 go 關鍵字不可省略：Pruner.Run 與 metrics flusher 一樣是「阻塞
-	 * 在 select 上直到 ctx 被取消」的迴圈，忘了 go 會讓主流程停在這裡，
-	 * 連 http.ListenAndServe 都還沒被呼叫 —— 症狀是行程活著、日誌印出
-	 * 「Forum server started」（那行在更前面）、但埠上沒有任何監聽，
-	 * 而且接下來的啟動日誌一條都不會再出現。與上面的稽核清理同一個寫法。
-	 */
-	if srv.Blocks() != nil {
-		go ipban.NewPruner(srv.Blocks(), time.Hour).Run(backgroundCtx,
-			func(removed int, err error) {
-				if err != nil {
-					logger.Warnf("[BLOCKLIST] 無法清理過期封鎖: %v", err)
-					return
-				}
-				if removed > 0 {
-					logger.Infof("[BLOCKLIST] 已清理 %d 筆過期封鎖", removed)
-				}
-			})
-		logger.Infof("[BLOCKLIST] IP 封鎖名單已啟用")
-	} else {
-		logger.Warnf("[BLOCKLIST] 未啟用 IP 封鎖名單（缺少 Redis 連線）")
-	}
-
-	logger.Infof("[AUDIT] 稽核紀錄保留 %d 天，過期紀錄每小時清理一次", cfg.AuditRetentionDays)
+	srv, registry := startServices(backgroundCtx, cfg, db, redisClient)
 
 	// 逾時設定集中在 newHTTPServer 裡，這裡只負責組裝與啟動。
 	httpSrv := newHTTPServer(cfg, srv.Handler())
@@ -510,6 +346,285 @@ func main() {
 
 	logger.Infof("[SERVER] Forum server stopped")
 }
+/*
+startServices 組裝 HTTP handler 與所有背景工作，回傳 Server 與監控容器。
+
+【為什麼這一段要抽成函式】
+main() 的職責是「組裝與啟動」，而組裝本身沒有分支可測：它一旦離開設定檔
+載入，就會一路走到監聽或 os.Exit。把這些步驟內嵌在 main 裡時，「啟動順序
+是否正確」只能在真的連上 MySQL、Redis 之後才可能被觀察到 —— 而那正是測試
+環境最難提供的前提（沒有 MySQL 時整段連執行機會都沒有）。
+
+抽成函式之後，這一段可以在同一個行程裡以替身（假的 *sql.DB、miniredis）
+直接執行：組裝的順序、背景工作的啟動、以及 context 取消後的收尾都能被
+驗證，而且不必真的監聽任何連接埠。
+
+【行為不變】
+函式內的每一行都與原本在 main 內的版本逐字相同，差別只有「在哪裡」與
+「由誰回傳組裝結果」。啟動順序（OAuth → Session → Server → 背景工作）
+也完全一致：呼叫端在呼叫這個函式之前就已經備妥背景 context，因此背景
+工作拿到的仍是同一個可取消的 context。
+
+【回傳值】
+  - Server：主流程需要它來掛載 Handler 與組裝 HTTP server。
+  - Registry：監控容器（可能為 nil），主流程在優雅停止時要再寫出最後一次
+    分鐘彙總，因此必須把它帶回來。
+*/
+func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB, redisClient *redis.Client) (*httpapi.Server, *metrics.Registry) {
+	// auth.Init 把 OAuth2 設定寫進 auth 套件的全域變數。
+	// 不呼叫的話 /auth/google 會因為 OauthConfig 為 nil 而回 500，
+	// 且 GetUserEmail 會在解參考時 panic，所以這一步不能省略也不能延後到請求期間。
+	auth.Init(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL)
+
+	// Session 本體存在 Redis，cookie 只承載 24 bytes 隨機 token（hex 後 48 字元），
+	// 因此伺服器端可以主動撤銷。cookieSecure 由設定檔的 COOKIE_SECURE 控制：
+	// 本機以 http 測試時必須為 false，否則瀏覽器不會回傳帶 Secure 的 cookie。
+	sessions := session.NewManager(cfg.CookieName, cfg.SessionExpire, cfg.CookieSecure, redisClient)
+
+	// Handler() 內含 session 續期、安全標頭、來源檢查（CSRF）、請求日誌
+	// 與靜態檔案掛載等中介層，因此建構 Server 後不需要再額外包一層 middleware。
+	srv := httpapi.NewServer(cfg, db, sessions, redisClient)
+
+	// 啟動限流器的背景清理。三個限流器各自在記憶體裡保存「最近視窗內各次
+	// 請求的時間戳」，而 Allow 只會把某個 key 的 slice 縮短、不會刪掉 key，
+	// 因此沒有這道定期掃描，map 會隨時間只增不減（見 ratelimit.go 檔頭）。
+	//
+	// 清理頻率刻意等於視窗長度：視窗過了，最老那筆紀錄就會自然過期，
+	// 此刻掃一次就能把它連同 key 一起回收。再更頻繁只是徒增鎖競爭。
+	//
+	// 這裡傳入 backgroundCtx（而非 context.Background()）：優雅停止時它會被取消，
+	// 三條清理 goroutine 因此自動停止，不必修改 httpapi 套件。
+	//
+	// 延遲啟動而非在 NewServer 內啟動：NewServer 刻意不開背景 goroutine，
+	// 「何時開始有背景工作」應該是呼叫端明確的決定，而不是建構式的副作用。
+	srv.StartRateLimitCleanup(backgroundCtx, cfg.RateLimitWindow)
+
+	/*
+	 * 啟動後在背景重建 Elasticsearch 的貼文索引。
+
+	 * 為什麼要重建：ES 是可拋棄的衍生資料（內容的真相在 MySQL），
+	 * 但它不會自己知道「MySQL 多了哪些貼文」—— 服務停機期間發的文、
+	 * 索引被誤刪、或第一次接上 ES 的部署，索引都會落後於資料庫。
+	 * 每次啟動重建一次以消除這個落差，之後的增量維護由各寫入路徑即時處理
+	 * （createForumPost / handleAdminForumPost 的 PUT 與 DELETE / createAdminUserPost）。
+
+	 * 為什麼在 goroutine 裡而不是啟動流程中：重建是 O(全部貼文) 的操作，
+	 * 就算只有幾百篇也不該讓服務「啟動中」長達數秒。更重要的是它是
+	 * best-effort 的——ES 掛掉時這裡只會留下警告日誌，論壇照常服務，
+	 * 搜尋則降級為 MySQL LIKE（見 search.go）。
+
+	 * 用可取消的 backgroundCtx：優雅停止時索引重建會被中斷。這是刻意的取捨 ——
+	 * 重建是 O(全部貼文) 的工作，讓它跑完可能還要數秒，而那一刻行程本來就要
+	 * 結束；下次啟動時會再重建一次，因此中斷它不會留下永久性的落後狀態。
+	 */
+	go func() {
+		if cfg.ESURL != "" {
+			// 驗證種類先記下來：它只有三個值、不含任何機密內容。要記它是因為
+			// 「ES 開了安全性但我們沒給驗證」這個組合失效時，每個請求都只會
+			// 安靜地退回 MySQL LIKE —— 那條降級路徑本身完全正常，因此唯一的
+			// 跡象就是啟動時這一行。
+			logger.Infof("[SEARCH] Elasticsearch 索引 %s（驗證 %s）", cfg.ESIndex, esAuthFrom(cfg).Kind())
+		}
+		indexed, err := srv.RebuildSearchIndex(backgroundCtx)
+		if err != nil {
+			// errors.Is 判定 ErrDisabled：那是「設定檔沒填 ES_URL」的預期情況，
+			// 用 Info 記錄即可（等同於這台站沒有啟用搜尋），不該報錯嚇到維運。
+			if errors.Is(err, es.ErrDisabled) {
+				logger.Info("[SEARCH] 未設定 ES_URL，搜尋將使用 MySQL 關鍵字比對")
+				return
+			}
+			logger.Warnf("[SEARCH] 貼文索引重建失敗（搜尋將降級為 MySQL 關鍵字比對）: %v", err)
+			return
+		}
+		logger.Infof("[SEARCH] 貼文索引重建完成，共 %d 篇", indexed)
+	}()
+
+	/*
+	 * 啟動 ES 索引與 MySQL 的定期對帳。
+	 *
+	 * 存在的理由：unindexForumPost 是 best-effort，ES 短暫不可用時貼文刪除
+	 * 成功而索引留下幽靈文件；全量重建只補索引、不刪多出來的文件，所以
+	 * 幽靈只能靠「定期比較兩邊、刪多出來的」收斂（見 search.go 的
+	 * ReconcileSearchIndex）。
+	 *
+	 * 六小時一次是取捨：幽靈只影響 total 多算幾筆與「搜得到但點進去 404」
+	 * 的邊界情形，而每輪對帳是一次全表主鍵掃描加一次索引全量分页——對一個
+	 * 論壇的規模，這個成本在六小時的间隔下可以忽略，而縮短间隔換到的
+	 * 收敛速度對使用者幾乎不可見。
+	 */
+	if srv.SearchEnabled() {
+		go func() {
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-backgroundCtx.Done():
+					return
+				case <-ticker.C:
+					removed, err := srv.ReconcileSearchIndex(backgroundCtx)
+					if err != nil {
+						logger.Warnf("[SEARCH] 索引對帳失敗（下一輪再試）: %v", err)
+						continue
+					}
+					if removed > 0 {
+						logger.Infof("[SEARCH] 索引對帳完成，移除 %d 筆幽靈文件", removed)
+					}
+				}
+			}
+		}()
+	}
+
+	/*
+	 * 「啟動完成」這行日誌只在最下面、真正進入監聽**之前**印一次（見下面
+	 * sigCh 附近）。這裡刻意不再印一次：兩行字樣完全相同的訊息會讓人以為
+	 * 站台被啟動了兩次，而它們的真正差異是 —— 第一行在監聽開始前，
+	 * 第二行（唯一的第二行）在訊號處理註冊完、ListenAndServe 之前。
+	 * 差別只對「啟動過程卡在後半段」的排查有意義，而那只需要一行。
+	 */
+
+	/*
+	 * 啟動監控統計的持久化。
+	 *
+	 * 兩件事，順序有意義：
+	 *
+	 *  1. 先讀回重啟前的分鐘彙總（LoadHistory）。它只是把資料載進記憶體，
+	 *     失敗時只會讓監控頁少了重啟前的曲線 —— 因此錯誤只記警告，不影響
+	 *     服務啟動。監控是診斷工具，它自己缺一塊資料不該讓論壇開不了。
+	 *
+	 *  2. 再啟動定期寫入（StartFlusher）。放在 Handler() 之後才啟動是刻意的：
+	 *     從這一行開始，mux 才真的開始收請求；先啟動 flusher 只會讓第一個
+	 *     分鐘的桶多一點點內容，沒有實質差別，但「服務開始服務的時刻」因此
+	 *     仍然是一個明確的分界。
+	 *
+	 * ctx 傳 backgroundCtx：優雅停止時它會被取消，StartFlusher 收到
+	 * ctx.Done() 會再做一次收尾寫入。停止流程仍會在 main 裡同步補一次
+	 * FlushPending（理由見該處），兩者不重複計數的保證來自 flushed 旗標
+	 * 是在鎖內先標記再送出。
+	 *
+	 * 寫入週期 20 秒刻意不等於一分鐘：它寫的是「已結束的分鐘」，所以週期
+	 * 只影響「資料落盤的延遲上限」與「最壞情況下重啟會遺失多久的資料」。
+	 * 20 秒讓最壞情況是一分鐘（當前分鐘）加上零到 20 秒的排隊延遲，而不是
+	 * 一分鐘加上最多一整分鐘的 tick 延遲。
+	 */
+	registry := srv.Metrics()
+	if registry != nil {
+		// since 對齊「時間軸實際會顯示的區間」，而不是 MONITOR_RETENTION_HOURS。
+		//
+		// 這個差別不是小數點：時間軸只有 TimelineMinutes 格（預設 120 分鐘），
+		// 因此讀回 24 小時的 1440 列會在 20 秒內被 pruneLocked 裁到 120 列 ——
+		// 其餘 1320 列純屬白讀（一次 DB 往返）、白佔記憶體，且沒有任何作用。
+		// 用保留期當 since 也會讓 log 裡「已讀回 N 分鐘」變成一個與畫面
+		// 完全無關的數字。
+		since := time.Now().Add(-time.Duration(registry.TimelineMinutes()) * time.Minute)
+		if loaded, err := registry.LoadHistory(context.Background(), db, since); err != nil {
+			// 表不存在（首次部署尚未跑遷移）或權限不足都會走到這裡。監控頁
+			// 仍會顯示「本次啟動以來」的即時曲線，因此這是警告而不是錯誤。
+			logger.Warnf("[MONITOR] 無法讀回歷史請求統計（監控頁將只顯示本次啟動的資料）: %v", err)
+		} else if loaded > 0 {
+			logger.Infof("[MONITOR] 已讀回 %d 分鐘的歷史請求統計", loaded)
+		}
+		if err := registry.StartFlusher(backgroundCtx, metrics.FlusherOptions{
+			DB:             db,
+			Interval:       20 * time.Second,
+			RetentionHours: cfg.MonitorRetentionHours,
+		}); err != nil {
+			// 拿不到 *sql.DB 只會發生在 main 的組裝被改動時；此時監控頁
+			// 仍可用（只是沒有重啟前的歷史），因此記警告即可。
+			logger.Warnf("[MONITOR] 請求統計持久化未啟用: %v", err)
+		}
+	}
+
+	/*
+	 * 啟動稽核紀錄的定期清理。
+	 *
+	 * 這裡刻意不設任何中斷條件：稽核紀錄的寫入發生在每個後台操作裡（有交易
+	 * 保護），清理卻與論壇功能無關 —— 它只是讓這張表不會無限長大。若清理
+	 * 因為資料庫暫時不可用而停下來，後台操作本身完全不受影響，只是紀錄會
+	 * 暫時變多。因此用獨立的 goroutine 而不併入 metrics 的 flusher：
+	 * 兩者的失敗語意不同，綁在一起會讓其中一個的問題被誤判成另一個的。
+	 *
+	 * 清理週期一小時一次。稽核紀錄的用途是「有人來查」的時候還查得到，
+	 * 而多存幾小時完全沒有差別，因此小時級的粒度對這個用途綽綽有餘。
+	 *
+	 * ctx 傳 backgroundCtx：停止時清理迴圈會立刻結束。這裡沒有像監控落盤那樣
+	 * 另做收尾寫入 —— 稽核紀錄的寫入發生在請求裡（在途請求完成後資料就已在
+	 * 資料庫），清理本身沒有任何待收的東西。
+	 */
+	go audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
+
+	/*
+	 * 啟動軟刪除貼文的定期清理（保留期到期後硬刪）。
+	 *
+	 * 與稽核清理同一個形状：清理與論壇功能無關，失敗只記日誌，下一次 tick
+	 * 再試；貼文列與它的留言／按讚／收藏／檢舉在同一個交易裡消失，附圖的
+	 * 檔案回收在 Commit 之後（外部系統的故障不影響列的清理，見 purge 套件
+	 * 檔頭）。
+	 *
+	 * 檔案刪除能力來自 srv.DeleteFile（httpapi.Server 持有檔案伺服器的位址
+	 * 與 token）；沒有檔案伺服器時它仍然可用——列照刪，檔案留著。
+	 */
+	go purge.NewPruner(db, srv, time.Duration(cfg.PostRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
+
+	/*
+	 * 啟動日別彙總（forum_daily_stats）的刷新排程。
+	 *
+	 * 每十分钟重算最近三天（為什麼是「重算」而不是「累加」、窗口為什麼是
+	 * 三天，見 data/rollup.go 的檔頭）。失敗只記日誌：下一 tick 會重試，
+	 * 而彙總表缺一段只是統計頁少一段資料，不影響論壇的任何功能。
+	 */
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-backgroundCtx.Done():
+				return
+			case <-ticker.C:
+				if err := data.RefreshDailyStats(backgroundCtx, db); err != nil {
+					logger.Warnf("[STATS] 日別彙總刷新失敗（下一輪再試）: %v", err)
+				}
+			}
+		}
+	}()
+
+	/*
+	 * 啟動 IP 封鎖名單的定期清理。
+	 *
+	 * 清理的必要性：封鎖名單是 Redis sorted set，member 是 IP、score 是到期
+	 * 秒數。查詢時（ipban.IsBanned）會正確地把已過期的項目視為未封鎖，因此
+	 * **不清理不會造成功能錯誤** —— 它只會讓 ZSET 慢慢長大，而那個增長是
+	 * 單調的。一小時清理一次的寫入量可以忽略（見 ipban.NewPruner）。
+	 *
+	 * 與 session 的 StartCleanup 一樣：都交給呼叫端決定何時停止，這裡傳
+	 * backgroundCtx。
+	 *
+	 * 這裡的 go 關鍵字不可省略：Pruner.Run 與 metrics flusher 一樣是「阻塞
+	 * 在 select 上直到 ctx 被取消」的迴圈，忘了 go 會讓主流程停在這裡，
+	 * 連 http.ListenAndServe 都還沒被呼叫 —— 症狀是行程活著、日誌印出
+	 * 「Forum server started」（那行在更前面）、但埠上沒有任何監聽，
+	 * 而且接下來的啟動日誌一條都不會再出現。與上面的稽核清理同一個寫法。
+	 */
+	if srv.Blocks() != nil {
+		go ipban.NewPruner(srv.Blocks(), time.Hour).Run(backgroundCtx,
+			func(removed int, err error) {
+				if err != nil {
+					logger.Warnf("[BLOCKLIST] 無法清理過期封鎖: %v", err)
+					return
+				}
+				if removed > 0 {
+					logger.Infof("[BLOCKLIST] 已清理 %d 筆過期封鎖", removed)
+				}
+			})
+		logger.Infof("[BLOCKLIST] IP 封鎖名單已啟用")
+	} else {
+		logger.Warnf("[BLOCKLIST] 未啟用 IP 封鎖名單（缺少 Redis 連線）")
+	}
+
+	logger.Infof("[AUDIT] 稽核紀錄保留 %d 天，過期紀錄每小時清理一次", cfg.AuditRetentionDays)
+	logger.Infof("[PURGE] 軟刪除貼文保留 %d 天，過期貼文每小時清理一次", cfg.PostRetentionDays)
+	return srv, registry
+}
+
 
 // ---------------------------------------------------------------------------
 // -check：設定檔報告

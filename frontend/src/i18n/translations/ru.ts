@@ -93,6 +93,10 @@ export const ru: Record<MessageKey, string> = {
     'Пользователь не найден',
   'error.fallbackFollow':
     'Не удалось подписаться',
+  'error.fallbackBookmark':
+    'Не удалось обновить сохранённое',
+  'error.fallbackImageDelete':
+    'Не удалось удалить изображение',
   'auth.checking':
     'Проверка входа...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const ru: Record<MessageKey, string> = {
     'Текст публикации',
   'post.editMax':
     'Максимум 10000 символов',
+  'post.bookmark':
+    'Сохранить',
+  'post.unbookmark':
+    'Убрать из сохранённых',
+  'post.imageEdit':
+    'Изменить изображение',
+  'post.imageRemove':
+    'Удалить изображение',
+  'post.imageSelectedNote':
+    'Выбрано новое изображение (применится при сохранении).',
+  'post.imageWillRemoveNote':
+    'Изображение будет удалено при сохранении.',
   'comment.loading':
     'Загрузка комментариев...',
   'comment.none':
@@ -313,6 +329,8 @@ export const ru: Record<MessageKey, string> = {
     'Не удалось загрузить. Повторите попытку позже.',
   'profile.followingEntry':
     'Мои подписки',
+  'profile.bookmarksEntry':
+    'Моё сохранённое',
   'profile.postsLabel':
     'Мои публикации',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const ru: Record<MessageKey, string> = {
     'Не удалось загрузить список подписок.',
   'following.postsFailed':
     'Не удалось загрузить публикации.',
+  'bookmarks.label':
+    'Сохранённые записи',
+  'bookmarks.empty':
+    'Вы пока ничего не сохранили. Нажмите «Сохранить» на записи, чтобы найти её здесь.',
+  'bookmarks.failed':
+    'Не удалось загрузить сохранённое.',
+  'bookmarks.removed':
+    'Удалено из сохранённого.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const ru: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Запись создана',
   'log.actionPostUpdate': 'Запись изменена',
   'log.actionPostDelete': 'Запись удалена',
+  'log.actionPostRestore':
+    'Запись восстановлена',
   'log.actionCommentCreate': 'Комментарий создан',
   'log.actionCommentUpdate': 'Комментарий изменён',
   'log.actionCommentDelete': 'Комментарий удалён',
@@ -1166,6 +1194,24 @@ export const ru: Record<MessageKey, string> = {
   'posts.pinDone': 'Закреплено',
   'posts.unpinDone': 'Откреплено',
   'posts.pinFailed': 'Не удалось закрепить запись.',
+  'posts.onlyDeleted':
+    'Показывать только удалённые',
+  'posts.deletedBadge':
+    'Удалено',
+  'posts.restore':
+    'Восстановить',
+  'posts.restoreTitle':
+    'Восстановить запись № {id}',
+  'posts.restoreMessage':
+    'После восстановления запись снова появится на публичных страницах; комментарии и изображение сохранятся.',
+  'posts.restoreDone':
+    'Запись восстановлена.',
+  'posts.restoreFailed':
+    'Не удалось восстановить.',
+  'posts.emptyDeletedTitle':
+    'Удалённых записей нет',
+  'posts.emptyDeletedBody':
+    'Сейчас удалённых записей нет.',
   'reports.title':
     'Управление жалобами',
   'reports.listSummary':
@@ -1273,17 +1319,19 @@ export const ru: Record<MessageKey, string> = {
   'title.forum':
     '{site}',
   'title.login':
-    'Вход | {site}',
+    'Вход｜{site}',
   'title.newPost':
-    'Новая публикация | {site}',
+    'Новая публикация｜{site}',
   'title.profile':
-    'Профиль пользователя | {site}',
+    'Профиль пользователя｜{site}',
   'title.publicProfile':
-    'Открытый профиль пользователя | {site}',
+    'Открытый профиль пользователя｜{site}',
   'title.post':
     'Публикация｜{site}',
   'title.following':
-    'Подписки | {site}',
+    'Подписки｜{site}',
+  'title.bookmarks':
+    'Сохранённое｜{site}',
   'title.adminUsers':
     'Управление пользователями | Панель администратора {brand}',
   'title.adminLogin':

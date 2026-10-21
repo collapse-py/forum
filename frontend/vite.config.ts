@@ -124,7 +124,7 @@ function copyForumRuntimeAssets(): Plugin {
  *     的 inlineStyleHashes）。雜湊的輸入就是這裡建置出來的 dist/*.html，因此
  *     不論 Vite 有沒有改寫內聯樣式，授權都會自動跟上。
  *
- * frontendShellFiles（後端）列的十六個檔名必須與上面的 input 一致：少一個，那一頁
+ * frontendShellFiles（後端）列的檔名清單必須與上面的 input 一致：少一個，那一頁
  * 的 <style> 就沒有授權，症狀是整頁沒有版面。
  *
  * 混淆（vite-plugin-javascript-obfuscator）刻意只做最低限度的一組選項。
@@ -215,6 +215,7 @@ export default defineConfig({
         forumProfile: 'forum-profile.html',
         forumOthersProfile: 'forum-others-profile.html',
         forumFollowing: 'forum-following.html',
+        forumBookmarks: 'forum-bookmarks.html',
         forumNotifications: 'forum-notifications.html',
         forumPost: 'forum-post.html',
         admin: 'admin.html',

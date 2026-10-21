@@ -93,6 +93,10 @@ export const ar: Record<MessageKey, string> = {
     'لم يتم العثور على هذا المستخدم',
   'error.fallbackFollow':
     'تعذّرت المتابعة',
+  'error.fallbackBookmark':
+    'فشل تحديث المحفوظات',
+  'error.fallbackImageDelete':
+    'فشل حذف الصورة',
   'auth.checking':
     'جارٍ التحقق من حالة تسجيل الدخول...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const ar: Record<MessageKey, string> = {
     'محتوى المنشور',
   'post.editMax':
     'الحد الأقصى 10000 حرف',
+  'post.bookmark':
+    'إضافة إلى المحفوظات',
+  'post.unbookmark':
+    'إزالة من المحفوظات',
+  'post.imageEdit':
+    'تغيير الصورة',
+  'post.imageRemove':
+    'إزالة الصورة',
+  'post.imageSelectedNote':
+    'تم اختيار صورة جديدة (سيُطبَّق عند الحفظ).',
+  'post.imageWillRemoveNote':
+    'ستُزال الصورة عند الحفظ.',
   'comment.loading':
     'جارٍ تحميل التعليقات...',
   'comment.none':
@@ -313,6 +329,8 @@ export const ar: Record<MessageKey, string> = {
     'فشل التحميل، حاول مرة أخرى لاحقًا.',
   'profile.followingEntry':
     'متابَعون',
+  'profile.bookmarksEntry':
+    'محفوظاتي',
   'profile.postsLabel':
     'منشوراتي',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const ar: Record<MessageKey, string> = {
     'تعذّر تحميل قائمة المتابعة.',
   'following.postsFailed':
     'تعذّر تحميل منشورات المتابَعون.',
+  'bookmarks.label':
+    'المنشورات المحفوظة',
+  'bookmarks.empty':
+    'لم تحفظ أي منشور بعد. اضغط «حفظ» على أي منشور لتجده هنا لاحقًا.',
+  'bookmarks.failed':
+    'فشل تحميل المحفوظات.',
+  'bookmarks.removed':
+    'أُزيل المنشور من المحفوظات.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const ar: Record<MessageKey, string> = {
   'log.actionPostCreate': 'إنشاء منشور',
   'log.actionPostUpdate': 'تعديل منشور',
   'log.actionPostDelete': 'حذف منشور',
+  'log.actionPostRestore':
+    'استعادة منشور',
   'log.actionCommentCreate': 'إنشاء تعليق',
   'log.actionCommentUpdate': 'تعديل تعليق',
   'log.actionCommentDelete': 'حذف تعليق',
@@ -1166,6 +1194,24 @@ export const ar: Record<MessageKey, string> = {
   'posts.pinDone': 'تم التثبيت',
   'posts.unpinDone': 'أُلغي التثبيت',
   'posts.pinFailed': 'فشلت عملية التثبيت.',
+  'posts.onlyDeleted':
+    'إظهار المحذوف فقط',
+  'posts.deletedBadge':
+    'محذوف',
+  'posts.restore':
+    'استعادة',
+  'posts.restoreTitle':
+    'استعادة المنشور #{id}',
+  'posts.restoreMessage':
+    'بعد الاستعادة سيظهر المنشور مجددًا في الصفحات العامة، وستبقى تعليقاته وصورته.',
+  'posts.restoreDone':
+    'تمت استعادة المنشور.',
+  'posts.restoreFailed':
+    'فشلت الاستعادة.',
+  'posts.emptyDeletedTitle':
+    'لا توجد منشورات محذوفة',
+  'posts.emptyDeletedBody':
+    'لا يوجد حاليًا أي منشور محذوف.',
   'reports.title':
     'إدارة البلاغات',
   'reports.listSummary':
@@ -1284,6 +1330,8 @@ export const ar: Record<MessageKey, string> = {
     'منشور｜{site}',
   'title.following':
     'المتابَعون｜{site}',
+  'title.bookmarks':
+    'المحفوظات｜{site}',
   'title.adminUsers':
     'إدارة المستخدمين｜لوحة تحكم {brand}',
   'title.adminLogin':

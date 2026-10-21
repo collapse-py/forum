@@ -55,6 +55,10 @@ export const en: Record<MessageKey, string> = {
   'error.fallbackUpload': 'Couldn\'t read the image upload response',
   'error.fallbackNotFound': 'Couldn\'t find this user',
   'error.fallbackFollow': 'Failed to follow',
+  'error.fallbackBookmark':
+    'Failed to update bookmark',
+  'error.fallbackImageDelete':
+    'Failed to delete image',
 
   'auth.checking': 'Checking sign-in status...',
   'auth.statusUnknown': 'Sign-in status unknown',
@@ -111,6 +115,18 @@ export const en: Record<MessageKey, string> = {
   'post.editedBadge': 'edited',
   'post.editContentLabel': 'Post content',
   'post.editMax': 'Up to 10,000 characters',
+  'post.bookmark':
+    'Bookmark',
+  'post.unbookmark':
+    'Remove bookmark',
+  'post.imageEdit':
+    'Change image',
+  'post.imageRemove':
+    'Remove image',
+  'post.imageSelectedNote':
+    'New image selected (applied when you save).',
+  'post.imageWillRemoveNote':
+    'The image will be removed when you save.',
 
   'comment.loading': 'Loading comments...',
   'comment.none': 'No comments yet',
@@ -178,6 +194,8 @@ export const en: Record<MessageKey, string> = {
   'profile.saveFailed': 'Couldn\'t save, please try again.',
   'profile.loadFailed': 'Couldn\'t load, please try again.',
   'profile.followingEntry': 'Who I follow',
+  'profile.bookmarksEntry':
+    'My bookmarks',
   'profile.postsLabel': 'My posts',
   'profile.emptyPosts': 'You haven\'t posted anything yet.',
 
@@ -207,6 +225,14 @@ export const en: Record<MessageKey, string> = {
   'following.emptyPosts': 'Nobody you follow has posted yet.',
   'following.peopleFailed': 'Couldn\'t load who you follow.',
   'following.postsFailed': 'Couldn\'t load posts from people you follow.',
+  'bookmarks.label':
+    'Bookmarked posts',
+  'bookmarks.empty':
+    'You have not bookmarked any posts yet. Use “Bookmark” on a post to find it here later.',
+  'bookmarks.failed':
+    'Failed to load bookmarks.',
+  'bookmarks.removed':
+    'Removed from bookmarks.',
 
   'login.eyebrow': 'MEMBER ACCESS',
   'login.title': 'Welcome back',
@@ -398,6 +424,8 @@ export const en: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Created post',
   'log.actionPostUpdate': 'Edited post',
   'log.actionPostDelete': 'Deleted post',
+  'log.actionPostRestore':
+    'Restored post',
   'log.actionCommentCreate': 'Created comment',
   'log.actionCommentUpdate': 'Edited comment',
   'log.actionCommentDelete': 'Deleted comment',
@@ -816,6 +844,24 @@ export const en: Record<MessageKey, string> = {
   'posts.pinDone': 'Pinned',
   'posts.unpinDone': 'Unpinned',
   'posts.pinFailed': 'The pin operation failed.',
+  'posts.onlyDeleted':
+    'Show deleted only',
+  'posts.deletedBadge':
+    'Deleted',
+  'posts.restore':
+    'Restore',
+  'posts.restoreTitle':
+    'Restore post #{id}',
+  'posts.restoreMessage':
+    'After restoring, the post reappears on public pages; its comments and image are kept.',
+  'posts.restoreDone':
+    'Post restored.',
+  'posts.restoreFailed':
+    'Failed to restore.',
+  'posts.emptyDeletedTitle':
+    'No deleted posts',
+  'posts.emptyDeletedBody':
+    'There are no deleted posts right now.',
 
   'reports.title': 'Reports',
   'reports.listSummary': '{count} · {filter}',
@@ -883,6 +929,8 @@ export const en: Record<MessageKey, string> = {
   'title.publicProfile': 'Public profile｜{site}',
   'title.post': 'Post｜{site}',
   'title.following': 'Following｜{site}',
+  'title.bookmarks':
+    'Bookmarks｜{site}',
   'title.adminUsers': 'Users｜{brand} Admin',
   'title.adminLogin': 'Sign in｜{brand} Admin',
   'title.adminPosts': 'Posts｜{brand} Admin',

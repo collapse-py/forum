@@ -1,0 +1,79 @@
+/*
+main_extra_test.go 補齊 main.go 裡「可以被單獨呼叫而不啟動整個行程」的部分：
+Redis 探測（含降級）與 *redis.Client → mediaTokenStore 的轉換。
+
+【為什麼不測 main 本身】
+main 會讀工作目錄下的 config.conf、綁定真實埠並在錯誤時 os.Exit —— 在測試
+行程裡呼叫它等於讓測試套件自殺。它的組裝順序由各零件的測試與 shutdown.go 的
+測試共同守住；這裡只釘住那個最容易在重構時被改壞的 nil 介面陷阱。
+*/
+package main
+
+import (
+	"net"
+	"testing"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// TestMediaTokenStoreOrNil 守住「nil 指標不能變成非 nil 介面」。
+//
+// 這個陷阱的症狀是：Redis 連不上時 connectRedis 回 nil，但把 nil 塞進介面後
+// 介面本身不是 nil，於是 server.go 的 `s.redis == nil` 判斷失效，中介層仍然
+// 對一個 nil 用戶端呼叫 Exists —— 每次讀圖都 panic。而它只會在 Redis 故障時
+// 發生，正常部署永遠看不到。
+func TestMediaTokenStoreOrNil(t *testing.T) {
+	var nilClient *redis.Client
+	if got := mediaTokenStoreOrNil(nilClient); got != nil {
+		t.Errorf("nil client 變成了非 nil 介面 (%T)", got)
+	}
+
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := mediaTokenStoreOrNil(client)
+	if store == nil {
+		t.Fatal("非 nil client 被轉成了 nil 介面")
+	}
+	if _, ok := store.(*redis.Client); !ok {
+		t.Errorf("介面底層型別 = %T，want *redis.Client", store)
+	}
+}
+
+// TestConnectRedisWithoutAddr 守住「沒有設定位址 → 直接降級」。
+//
+// 這條路徑不該嘗試連線：位址是空的代表 Redis 沒有被設定，而不是「連
+// localhost」。若它真的去連，啟動會多等一個逾時。
+func TestConnectRedisWithoutAddr(t *testing.T) {
+	cfg := &Config{}
+	cfg.Redis.Addr = ""
+
+	if client := connectRedis(cfg); client != nil {
+		_ = client.Close()
+		t.Fatal("addr 是空字串卻建立了 Redis 用戶端")
+	}
+}
+
+// TestConnectRedisUnreachableDegrades 守住「連不上 → nil、不阻止啟動」。
+//
+// 用一個剛被關掉的本地埠：連線會被拒絕，不需要外部網路，也不會等滿逾時。
+// 回 nil 是刻意的降級（見 main.go 檔頭第 1 點）—— 上傳與刪除不依賴 Redis。
+func TestConnectRedisUnreachableDegrades(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("建立暫存監聽失敗: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("關閉暫存監聽失敗: %v", err)
+	}
+
+	cfg := &Config{}
+	cfg.Redis.Addr = addr
+
+	client := connectRedis(cfg)
+	if client != nil {
+		_ = client.Close()
+		t.Fatalf("連不上 %s 卻回傳了非 nil 用戶端", addr)
+	}
+}

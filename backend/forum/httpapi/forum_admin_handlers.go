@@ -88,6 +88,12 @@ adminForumPost 是管理介面使用的文章視圖模型，JSON 欄位為 camel
 			「取消置頂」會得到 200 + 「置頂成功」而狀態完全沒變（後端判定
 			「已經是目標狀態」而直接回成功），稽核紀錄裡也不會有 post.unpin。
 			症狀是「以為改了但沒改」，比直接報錯更難察覺。
+	Deleted		這一列是否為軟刪除狀態（deleted_at 不為 NULL，遷移第 30 步）。
+			只有「已刪除」篩選（?deleted=1）會回 true；預設列表恆為 false。
+			前端據此顯示「已刪除」徽章與還原按鈕，後端則用它決定要不要送
+			restore 的請求 —— 與 Pinned 同一個理由：少了它，前端只能靠
+			「這一頁是從哪個查詢來的」推測狀態，而那會在兩個列表之間切換時
+			出現一整頁按錯的按鈕。
 */
 type adminForumPost struct {
 	ID           int64               `json:"id"`
@@ -99,6 +105,7 @@ type adminForumPost struct {
 	CommentCount int                 `json:"commentCount"`
 	Comments     []adminForumComment `json:"comments"`
 	Pinned       bool                `json:"pinned"`
+	Deleted      bool                `json:"deleted"`
 }
 
 /*
@@ -1011,6 +1018,12 @@ func validateAdminForumReport(req *adminForumReportRequest) error {
 listAdminForumPosts 對應 GET /api/admin/forum/posts：分頁列出全部文章，
 並在每篇文章內嵌該文章的所有留言，讓後台列表頁能就地展開留言編輯與刪除。
 
+查詢參數
+
+	page=N		頁碼，預設 1（寬容：任何解析不出來的值都當成第 1 頁）
+	deleted=1	只列已刪除（軟刪除）的貼文，依刪除時間新到舊。
+			任何其他值都當成預設的「只列未刪除」。
+
 回應
 
 	200	{"items": [...], "total": 總文章數, "page": 目前頁碼, "pages": 總頁數}
@@ -1036,12 +1049,32 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 	const pageSize = 25
 	offset := (page - 1) * pageSize
 
+	// ?deleted=1 切換成「只看已刪除」的清單（軟刪除的還原入口）。
+	// 刻意只認字面的 "1"：這個參數是篩選器的開關，任何其他值（含拼錯的
+	// deleted=ture）都退化成預設的「只看未刪除」，與本函式對 page 參數的
+	// 寬容一致 —— 回 400 會讓整個管理頁（連帶留言與檢舉區塊）載入失敗，
+	// 而篩選器打錯字不是那種嚴重的錯誤。
+	showDeleted := r.URL.Query().Get("deleted") == "1"
+	// 兩邊都必須出現 deleted_at 這個字（值本身是它）：這是軟刪除不變條件的
+	// 要求 —— 每一條讀 forum_posts 的查詢都要明確說出它要哪一種列，而不是
+	// 靠省略條件默默得到「全部」。
+	visibilityFilter := "deleted_at IS NULL"
+	orderBy := "created_at DESC, id DESC"
+	if showDeleted {
+		visibilityFilter = "deleted_at IS NOT NULL"
+		// 已刪除的清單以「刪除時間」排序：管理員要撈回的是「剛剛誤刪的那
+		// 幾篇」，而那一批就在最上面。deleted_at 在此為 NOT NULL（上面的
+		// 過濾保證），因此不需要處理 NULL 的排序。
+		orderBy = "deleted_at DESC, id DESC"
+	}
+
 	// 先算總數：pages 需要它。COUNT(*) 在 InnoDB 上需要掃描，但列表本身已是分頁的，
 	// 用一次額外計數換前端能畫出完整頁碼是划算的。
-	// deleted_at IS NULL：軟刪除的貼文不在後臺列表裡（它已經不在任何公開頁），
-	// 而 total 必須與列表同一批資料，否則頁碼會比實際內容多出一頁空的。
+	// 可見性條件與列表完全相同：total 必須與列表同一批資料，否則頁碼會比實際
+	// 內容多出一頁空的（或反過來少一頁）。
 	var total int
-	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM forum_posts WHERE deleted_at IS NULL`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM forum_posts WHERE `+visibilityFilter).Scan(&total); err != nil {
 		internalError(w, "unable to count forum posts")
 		return
 	}
@@ -1056,8 +1089,8 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 		       (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = forum_posts.id),
 		       (SELECT COUNT(*) FROM forum_post_comments WHERE post_id = forum_posts.id),
 		       pinned
-		FROM forum_posts WHERE deleted_at IS NULL
-		ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+		FROM forum_posts WHERE `+visibilityFilter+`
+		ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, pageSize, offset)
 	if err != nil {
 		internalError(w, "unable to load forum posts")
 		return
@@ -1081,6 +1114,9 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		item.Pinned = pinned == 1
+		// deleted 的來源是查詢本身（這個回應一定來自上面兩條分支之一），
+		// 而不是資料列上的一個欄位 —— 查詢與回應因此不可能不同步。
+		item.Deleted = showDeleted
 		// 先取出庫值（純檔名）：以它的正規化結果判斷要不要簽發 token，
 		// 舊資料若存的是無法辨識的值，就不會為了它白白打一次 Redis。
 		imageName := s.forumImageFileName(item.ImageURL)
@@ -1373,11 +1409,13 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		// 理由見 MigrateMySQL 第 30 步）：貼文從所有公開頁面消失，但原文、留言、
 		// 按讚與檢舉工單都還在，因此事後仍可對帳。真正的資料回收是另一個機制。
 		//
-		// 稽核：刪文在後台沒有復原路徑（軟刪除只保留了資料，沒有恢復入口），
-		// 而它是這個後臺最常被使用的操作（檢舉的「通過（刪文）」就走這條路）。
+		// 稽核：刪文是這個後臺最常被使用的操作（檢舉的「通過（刪文）」就走這條路）。
 		// 把刪除前的內容與作者記下來，事後才能回答「這篇文是誰寫的、寫了什麼、
 		// 為什麼被刪」。軟刪除讓這份稽核多一個好處：changes 引用的原文仍然查
 		// 得到，不必只靠稽核裡截斷後的 200 字。
+		//
+		// 「刪了還是救得回來」不是這裡少記一筆的理由：救回來的動作（post.restore）
+		// 在自己的稽核紀錄裡，兩個動作各自記一次才能還原完整的時間線。
 		tx, err := s.beginAdminTx(r)
 		if err != nil {
 			internalError(w, "unable to delete forum post")
@@ -1434,6 +1472,123 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 		// 只是用了這條路由不接受的方法（GET、HEAD 等），因此回 405 表示「路由存在但方法不對」。
 		methodNotAllowed(w)
 	}
+}
+
+/*
+handleAdminPostRestore 還原一篇被軟刪除的貼文（deleted_at 設回 NULL）。
+
+	POST	還原；冪等（已經沒被刪除時回 200 restored=false，不記稽核）
+	其他	methodNotAllowed 回 405
+
+為什麼是 POST 且沒有 body
+
+	與置頂（handleAdminPostPin）同一條契約：目標在路徑裡，動作本身只改變一個
+	狀態。「還原」不是 DELETE 的反向語意（DELETE 語意是「移除」而不是「標記
+	為已刪除」），因此不借用 DELETE 方法；PUT 則已在同一條路由上代表「改內容」。
+
+為什麼是「先讀再寫」而不是單一 UPDATE
+
+	與置頂相同的形狀：稽核紀錄需要刪除時間（Before）與內容（label），而這兩個
+	值只存在於那一列。讀與寫在同一個交易裡，中間不會有別的請求插隊看到不一致
+	的狀態。
+
+	讀取刻意**不**過濾 deleted_at：這一支要處理的正是已刪除的列，而「已經沒被
+	刪除」是合法的冪等情境（連點兩下的第二下）而不是 404。
+
+還原之後的索引
+
+	刪除時 unindexForumPost 會把索引文件移除，因此還原必須把它補回來。少了這
+	一手，貼文「存在但搜不到」，而那是使用者無從回報的錯誤（他只知道自己搜
+	不到）。放在 Commit 之後並在失敗時補記稽核，理由與刪除路徑完全相同
+	（見 recordPostIndexFailure）。
+*/
+func (s *Server) handleAdminPostRestore(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminForum(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.isTrustedOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+
+	id, err := adminPostRestoreIDFromPath(r.URL.Path)
+	if err != nil || id < 1 {
+		badRequest(w, "invalid post id")
+		return
+	}
+
+	tx, err := s.beginAdminTx(r)
+	if err != nil {
+		internalError(w, "unable to restore post")
+		return
+	}
+	defer tx.Rollback()
+
+	var deletedAt sql.NullTime
+	var content string
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT deleted_at, content FROM forum_posts WHERE id = ?`, id).Scan(&deletedAt, &content); err != nil {
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		internalError(w, "unable to load forum post")
+		return
+	}
+	// 已經沒被刪除：什麼都不做，也**不記稽核** —— 稽核記的是「發生了什麼改變」，
+	// 而「把沒被刪除的貼文還原」什麼都沒改（與置頂的「狀態沒變直接回成功」同一個
+	// 理由）。回應帶 restored=false 讓管理介面能顯示正確的結果。
+	if !deletedAt.Valid {
+		writeOK(w, map[string]bool{"ok": true, "restored": false})
+		return
+	}
+
+	result, err := tx.ExecContext(r.Context(),
+		`UPDATE forum_posts SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL`, id)
+	if err != nil {
+		internalError(w, "unable to restore post")
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		// 競態：在 SELECT 與 UPDATE 之間，另一個請求（另一位管理員）已經把它
+		// 還原了。刻意回「沒有東西被還原」而不是 404：這一列確實存在，而且
+		// 現在的狀態正是呼叫端想要的。不記稽核（沒有改變），交易直接由 defer
+		// 回滾 —— 它沒有任何已寫入的變更。
+		writeOK(w, map[string]bool{"ok": true, "restored": false})
+		return
+	}
+
+	// 稽核與 post.delete 成對。Before 是刪除時間（被還原掉的那個狀態）、
+	// After 是一句說明而不是空字串：稽核紀錄的讀者是人，空字串看起來像
+	// 「這個欄位沒有值」而不是「它現在不是刪除狀態」。
+	if err := s.recordAdminAction(r, tx, adminActionPostRestore, audit.TargetPost, strconv.FormatInt(id, 10), content,
+		audit.Change{Field: "deletedAt", Before: deletedAt.Time.UTC().Format(time.RFC3339), After: "（已還原）"}); err != nil {
+		internalError(w, "unable to restore post")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		internalError(w, "unable to restore post")
+		return
+	}
+	if err := s.reindexForumPostByID(r.Context(), id); err != nil {
+		s.recordPostIndexFailure(r, id, err)
+	}
+	writeOK(w, map[string]bool{"ok": true, "restored": true})
+}
+
+// adminPostRestoreIDFromPath 從 /api/admin/forum/posts/{id}/restore 取出貼文編號。
+//
+// 與 adminPostPinIDFromPath 逐字同形（見該函式對 TrimSuffix 的說明：用 Trim
+// 會把尾綴當成字元集合，讓 "/posts/restore1/restore" 解析成 1）。刻意各寫一份
+// 而不是抽共用函式：兩條路徑各自是一個端點，共用的解析器會讓「改了一條、
+// 另一條跟著變」成為可能，而這種漂移沒有任何編譯器或測試會提醒。
+func adminPostRestoreIDFromPath(path string) (int64, error) {
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(path, "/api/admin/forum/posts/"), "/restore")
+	return strconv.ParseInt(trimmed, 10, 64)
 }
 
 /*

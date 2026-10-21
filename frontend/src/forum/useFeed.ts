@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { errorMessage, requestJSON } from '../core';
 import { msg, tr, type Message } from '../i18n';
-import type { ItemsResponse, LikeResponse, ForumPost } from '../types';
+import type { ItemsResponse, LikeResponse, BookmarkResponse, UploadResponse, ForumPost } from '../types';
 
 export type FeedPhase = 'loading' | 'ready' | 'failed';
 
@@ -178,7 +178,7 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
 }
 
 /* ==========================================================================
-   按讚
+   按讚與收藏
    ========================================================================== */
 
 /**
@@ -196,22 +196,150 @@ export async function toggleLike(postId: number): Promise<{ liked: boolean; coun
 }
 
 /**
- * 改掉自己貼文的本文。
+ * 切換收藏。
+ *
+ * 回傳伺服器確認的狀態而不是本地翻轉：連點兩下的合併結果只有後端知道，
+ * 而呼叫端要拿它去 patch 列表 —— 猜錯會讓卡片上的圖示與資料庫不一致，
+ * 直到下一次重新載入才修正。
+ *
+ * 沒有第二個回傳值（例如收藏數）：收藏是私人的，後端刻意不回公開的收藏數
+ * （見 forum_bookmark_handlers.go 的說明）。
+ */
+export async function toggleBookmark(postId: number): Promise<boolean> {
+  const data = await requestJSON<BookmarkResponse>(`/api/forum/posts/${postId}/bookmark`, {
+    method: 'POST',
+    fallback: tr(msg('error.fallbackBookmark')),
+  });
+  return !!data.bookmarked;
+}
+
+/* ==========================================================================
+   圖片
+   ========================================================================== */
+
+/**
+ * 上傳一張圖片，回傳檔案伺服器給的網址（含 media token）。
+ *
+ * 發文頁與貼文編輯共用：兩者的差別只在拿到網址之後做什麼（前者放進發佈
+ * 請求，後者放進 PUT 的 imageUrl），而「怎麼上傳」完全相同 —— 表單欄位名、
+ * 端點與錯誤文案都不該有兩份。
+ */
+export async function uploadForumImage(file: File): Promise<string> {
+  const body = new FormData();
+  body.append('file', file);
+  const uploaded = await requestJSON<UploadResponse>('/api/forum/images', {
+    method: 'POST',
+    form: body,
+    fallback: tr(msg('error.fallbackUpload')),
+  });
+  return uploaded.url ?? '';
+}
+
+/**
+ * 刪除自己上傳、且已不被任何貼文或頭像引用的圖片。
+ *
+ * 只在兩條路徑上呼叫：使用者主動丟掉一張圖（編輯時按「移除附圖」），以及
+ * 上傳成功但貼文沒存成（見 updateForumPost 與 NewPostPage.handleSubmit）。
+ *
+ * 刻意不做「先問引用狀態再決定刪不刪」：那個檢查必然在刪除前過期，而後端
+ * 端點本來就是原子地判斷（仍被引用時回 409，見 forum_media_handlers.go）。
+ * 因此呼叫端一律把失敗當成 best-effort —— 它清不掉的最壞情況是留下一個
+ * 孤兒檔，而不是讓使用者正在做的事失敗。
+ */
+export async function deleteForumImage(url: string): Promise<void> {
+  await requestJSON('/api/forum/images/delete', {
+    method: 'POST',
+    json: { url },
+    fallback: tr(msg('error.fallbackImageDelete')),
+  });
+}
+
+/* ==========================================================================
+   編輯貼文
+   ========================================================================== */
+
+/**
+ * 編輯時附圖的變更意圖。
+ *
+ *   undefined —— 不動附圖（表單沒被碰過）
+ *   null      —— 移除附圖
+ *   File      —— 換成這張新圖
+ *
+ * 用 null 而不是空字串代表「移除」：undefined 與 null 在這裡必須是兩個
+ * 不同的狀態（前者是「沒碰」、後者是「拿掉」），而空字串在型別上與「有沒有
+ * 選檔案」無關，呼叫端很容易用 `||` 之類的寫法把兩者混在一起。
+ */
+export type PostImageChange = undefined | null | File;
+
+/**
+ * 存檔後要套用到列表那一筆貼文的變更。
+ *
+ * imageUrl 刻意允許 undefined 且**保留這個欄位**：useFeed 的 patch 是淺合併，
+ * 欄位不存在代表「不動附圖」，而移除附圖要表達的正是「把它設成沒有」。
+ * 多出來的 undefined 因此不是雜訊，是這個三態的第三個值 —— 這也是這個
+ * 介面存在的理由（exactOptionalPropertyTypes 下必須明確寫成
+ * `imageUrl?: string | undefined`）。
+ */
+export interface PostUpdatePatch {
+  content: string;
+  edited: true;
+  imageUrl?: string | undefined;
+  /**
+   * 索引簽章讓它可以直接餵給 useFeed 的 patch()（參數型別是 Partial<ForumPost>，
+   * 而 ForumPost 帶著同樣的索引簽章）。
+   *
+   * TypeScript 的規則：來源型別**沒有**索引簽章時，它不能指派給帶索引簽章的
+   * 目標型別 —— 物件字面量可以（推導出的隱含索引簽章），但這個 patch 是介面，
+   * 因此少了這一行會在六個呼叫端各噴一次「Index signature is missing」。
+   * 六處都改寫成物件展開只會製造六份一樣的轉換。
+   */
+  [key: string]: unknown;
+}
+
+/**
+ * 改掉自己貼文的本文與（可選的）附圖。
  *
  * 與 toggleLike 放在一起的理由相同：兩者都是「對某一篇貼文的寫入」，而五個
  * 渲染 PostCard 的頁面都需要它。寫成共用函式而不是讓每個頁面各寫一次
  * requestJSON，否則那五處的 fallback 文案與錯誤處理會各自漂移 —— 而它們
  * 漂移之後不會出現在任何 console 裡。
  *
- * 回傳修剪後的內容（後端也會 TrimSpace，兩邊一致）：呼叫端要拿它去 patch
- * 列表，而 patch 顯示的字必須與資料庫裡的字完全相同。
+ * 回傳的是「要 patch 進列表的變更」而不是只有修剪後的內容：後端從
+ * 圖片網址到 edited 旗標都與請求一一對應，但呼叫端自己並不知道後端怎麼
+ * 存那張圖（例如 media token 是不是同一個字串），因此由這裡把請求中真的
+ * 送出去的值原樣帶回來，呼叫端只負責套用。
+ *
+ * 換圖採用「先上傳、再 PUT」：上傳成功而 PUT 失敗時，那張新圖不會被任何
+ * 貼文引用 —— 不主動清掉就是一個孤兒檔，而一般使用者沒有任何手段清掉它
+ * （刪圖端點要求「我上傳的、且未被引用」兩個條件都成立）。清理是
+ * best-effort，且不掩蓋原本的錯誤：使用者要看到的是「存檔失敗」。
  */
-export async function updateForumPost(postId: number, content: string): Promise<string> {
+export async function updateForumPost(
+  postId: number,
+  content: string,
+  imageChange?: PostImageChange,
+): Promise<PostUpdatePatch> {
   const next = content.trim();
-  await requestJSON(`/api/forum/posts/${postId}`, {
-    method: 'PUT',
-    json: { content: next },
-    fallback: tr(msg('posts.editFailed')),
-  });
-  return next;
+  const json: { content: string; imageUrl?: string } = { content: next };
+  const patch: PostUpdatePatch = { content: next, edited: true };
+  let uploadedURL = '';
+  if (imageChange === null) {
+    json.imageUrl = '';
+    patch.imageUrl = undefined;
+  } else if (imageChange) {
+    uploadedURL = await uploadForumImage(imageChange);
+    json.imageUrl = uploadedURL;
+    patch.imageUrl = uploadedURL;
+  }
+  try {
+    await requestJSON(`/api/forum/posts/${postId}`, {
+      method: 'PUT',
+      json,
+      fallback: tr(msg('posts.editFailed')),
+    });
+  } catch (error) {
+    if (uploadedURL) void deleteForumImage(uploadedURL).catch(() => undefined);
+    throw error;
+  }
+  return patch;
 }

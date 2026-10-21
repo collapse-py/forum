@@ -232,6 +232,9 @@ type Config struct {
 	LogFormat             string   // LOG_FORMAT（"json" 或 "text"）
 	MonitorRetentionHours int      // MONITOR_RETENTION_HOURS（分鐘彙總保留小時數）
 	AuditRetentionDays    int      // AUDIT_RETENTION_DAYS（稽核紀錄保留天數）
+	PostRetentionDays     int      // POST_RETENTION_DAYS（軟刪除貼文的保留天數，到期後連留言／按讚／附圖一併清除）
+	LogMaxSizeMB          int      // LOG_MAX_SIZE_MB（日誌檔輪替的大小上限 MB；0＝不輪替）
+	LogMaxFiles           int      // LOG_MAX_FILES（保留的輪替檔數，不含目前檔）
 	ForumName             string   // FORUM_NAME（站台顯示名稱，預設 "forum 論壇"）
 	ForumShortName        string   // FORUM_SHORT_NAME（標誌短名，留空＝沿用 ForumName）
 	ForumDescription      string   // FORUM_DESCRIPTION（manifest 說明，留空＝沿用 ForumName）
@@ -266,6 +269,11 @@ func Load(path string) (Config, error) {
 	cfg.RateLimitUploadWindow = time.Minute
 	cfg.RateLimitAuthRequests = 10
 	cfg.RateLimitAuthWindow = time.Minute
+	// 日誌輪替的預設值也在这里預先寫入，而不是在 applyDefaults 兜底：
+	// LOG_MAX_SIZE_MB 的 0 是合法的「不輪替」，而 applyDefaults 的兜底
+	// 無法分辨「明確設成 0」與「沒有設定」—— 預先寫入讓明確的 0 能保留。
+	cfg.LogMaxSizeMB = 50
+	cfg.LogMaxFiles = 5
 
 	file, err := os.Open(path)
 	if err != nil {
@@ -452,6 +460,24 @@ func Load(path string) (Config, error) {
 			if hours, ok := parsePositiveInt(val); ok {
 				cfg.MonitorRetentionHours = hours
 			}
+		case "POST_RETENTION_DAYS":
+			// 與 AUDIT_RETENTION_DAYS 同一個理由：保留 0 天等於「軟刪除的貼文
+			// 立刻被硬刪」，那讓軟刪除與還原功能形同虛設，靜默接受比拒絕更危險。
+			if days, ok := parsePositiveInt(val); ok {
+				cfg.PostRetentionDays = days
+			}
+		case "LOG_MAX_SIZE_MB":
+			// 0 是合法的「不輪替」：沿用舊行為（無限追加）。只有正數才算設定
+			// 一個輪替上限，因此这里用 parseNonNegativeInt 而非 parsePositiveInt。
+			if mb, ok := parseNonNegativeInt(val); ok {
+				cfg.LogMaxSizeMB = mb
+			}
+		case "LOG_MAX_FILES":
+			// 只接受正數：保留 0 個輪替檔等於「每次輪替直接丟掉舊檔」，那是
+			// 比「不輪替」更糟的資料損失，不是一個值得靜默接受的值。
+			if n, ok := parsePositiveInt(val); ok {
+				cfg.LogMaxFiles = n
+			}
 		case "FORUM_NAME":
 			// 原樣保留：站名可能含中文與空白，解析端沒有任何格式要求。
 			cfg.ForumName = val
@@ -572,6 +598,14 @@ func (c *Config) applyDefaults() {
 		// 都會長出一列的，只增不減的監控資料在幾個月後就會變成資料庫裡
 		// 最大的一張表，而它的價值隨時間急遽下降（維運看的是「最近幾小時」）。
 		c.MonitorRetentionHours = 24
+	}
+	if c.PostRetentionDays <= 0 {
+		// 90 天，與 AUDIT_RETENTION_DAYS 相同。軟刪除的價值是「刪錯能救」，
+		// 而保留期太短（例如 7 天）會讓「誤刪」的救援窗口小於管理員實際
+		// 發現問題的時間（檢舉與稽核的保留期都是 90 天，對帳需要同一尺度）。
+		// 保留期長到「等於沒有清理」也不合理：列數與附圖檔案會無限累積，
+		// 而那正是 KNOWN_ISSUES 記錄的缺口。
+		c.PostRetentionDays = 90
 	}
 	// 站名的三個欄位有相依的兜底順序，因此集中在最後：短名與說明預設都取
 	// 「完整站名」，而完整站名必須先有值。順序若調換，短名會變成空字串 ——
@@ -771,6 +805,20 @@ func parseBool(val string) bool {
 func parsePositiveInt(val string) (int, bool) {
 	n, err := strconv.Atoi(val)
 	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// parseNonNegativeInt 解析「可以為 0」的整數設定，只拒絕負數與非數字。
+//
+// 存在的理由：LOG_MAX_SIZE_MB 的 0 有明確語意（不輪替），而 parsePositiveInt
+// 會把 0 当成「沒設定」，讓「刻意關掉輪替」與「忘記設定」在 Config 上無法
+// 區分 —— 與 MediaTokenTTLExplicit 處理的是同一類問題，只是這裡的 0 本身
+// 就是合法值，不需要另外旗標。
+func parseNonNegativeInt(val string) (int, bool) {
+	n, err := strconv.Atoi(val)
+	if err != nil || n < 0 {
 		return 0, false
 	}
 	return n, true

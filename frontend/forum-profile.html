@@ -15,6 +15,11 @@
     <meta name="forum-name" content="{{FORUM_NAME}}" />
     <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
     <title>個人資料｜{{FORUM_NAME}}</title>
+    <!--
+      RSS 2.0 訂閱連結（後端 /feed.xml）。放在公開頁的殼層，讓瀏覽器與閱讀器
+      在這一頁就能發現它 —— 訂閱的是全站動態，不是這一頁的內容。
+    -->
+    <link rel="alternate" type="application/rss+xml" title="{{FORUM_NAME}}" href="/feed.xml" />
     <link rel="stylesheet" href="/style.css?v=202610171200" />
     <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
     <link rel="icon" href="/asset/logo.png" type="image/png" />

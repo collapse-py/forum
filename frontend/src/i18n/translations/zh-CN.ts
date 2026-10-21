@@ -62,6 +62,10 @@ export const zhCN: Record<MessageKey, string> = {
   'error.fallbackUpload': '图片上传响应格式错误',
   'error.fallbackNotFound': '找不到该用户',
   'error.fallbackFollow': '关注失败',
+  'error.fallbackBookmark':
+    '收藏失败',
+  'error.fallbackImageDelete':
+    '删除图片失败',
 
   /* ==========================================================================
      auth
@@ -142,6 +146,18 @@ export const zhCN: Record<MessageKey, string> = {
   'post.editedBadge': '已编辑',
   'post.editContentLabel': '帖子内容',
   'post.editMax': '最多 10000 字',
+  'post.bookmark':
+    '收藏',
+  'post.unbookmark':
+    '取消收藏',
+  'post.imageEdit':
+    '更换配图',
+  'post.imageRemove':
+    '移除配图',
+  'post.imageSelectedNote':
+    '已选择新图片（保存后生效）。',
+  'post.imageWillRemoveNote':
+    '保存后会移除配图。',
 
   /* ==========================================================================
      comment
@@ -225,6 +241,8 @@ export const zhCN: Record<MessageKey, string> = {
   'profile.saveFailed': '保存失败，请稍后再试。',
   'profile.loadFailed': '读取失败，请稍后再试。',
   'profile.followingEntry': '我的关注',
+  'profile.bookmarksEntry':
+    '我的收藏',
   'profile.postsLabel': '我的帖子',
   'profile.emptyPosts': '你还没有发表帖子。',
 
@@ -258,6 +276,14 @@ export const zhCN: Record<MessageKey, string> = {
   'following.emptyPosts': '关注的人还没有发表帖子。',
   'following.peopleFailed': '关注列表加载失败。',
   'following.postsFailed': '关注的人的帖子加载失败。',
+  'bookmarks.label':
+    '收藏的帖子',
+  'bookmarks.empty':
+    '你还没有收藏任何帖子。在帖子上点击「收藏」，之后就能在这里找到它。',
+  'bookmarks.failed':
+    '收藏列表加载失败。',
+  'bookmarks.removed':
+    '已取消收藏。',
 
   /* ==========================================================================
      login
@@ -456,6 +482,8 @@ export const zhCN: Record<MessageKey, string> = {
   'log.actionPostCreate': '发帖',
   'log.actionPostUpdate': '改文',
   'log.actionPostDelete': '删文',
+  'log.actionPostRestore':
+    '还原帖子',
   'log.actionCommentCreate': '评论',
   'log.actionCommentUpdate': '改评论',
   'log.actionCommentDelete': '删评论',
@@ -875,6 +903,24 @@ export const zhCN: Record<MessageKey, string> = {
   'posts.pinDone': '已置顶',
   'posts.unpinDone': '已取消置顶',
   'posts.pinFailed': '置顶操作失败。',
+  'posts.onlyDeleted':
+    '只显示已删除',
+  'posts.deletedBadge':
+    '已删除',
+  'posts.restore':
+    '还原',
+  'posts.restoreTitle':
+    '还原帖子 #{id}',
+  'posts.restoreMessage':
+    '还原后这篇帖子会重新出现在公开页面；留言与配图都会保留。',
+  'posts.restoreDone':
+    '帖子已还原。',
+  'posts.restoreFailed':
+    '还原失败。',
+  'posts.emptyDeletedTitle':
+    '没有已删除的帖子',
+  'posts.emptyDeletedBody':
+    '目前没有被删除的帖子。',
 
   /* ==========================================================================
      reports
@@ -945,6 +991,8 @@ export const zhCN: Record<MessageKey, string> = {
   'title.publicProfile': '公开个人资料｜{site}',
   'title.post': '帖子｜{site}',
   'title.following': '关注｜{site}',
+  'title.bookmarks':
+    '收藏｜{site}',
   'title.adminUsers': '用户管理｜{brand} 后台',
   'title.adminLogin': '登录｜{brand} 后台',
   'title.adminPosts': '论坛帖子｜{brand} 后台',

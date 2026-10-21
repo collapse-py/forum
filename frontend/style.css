@@ -5,7 +5,7 @@
  * <style> 區塊裡，理由是調版面時開一個檔案就看得見全部，不必在 CSS 與
  * HTML 之間來回跳。分界線不是「覺得順不順」，而是元件的使用範圍：
  *
- *   style.css          九個頁面共用，或同一個家族（公開頁 / 後臺）內被兩頁以上
+ *   style.css          所有頁面共用，或同一個家族（公開頁 / 後臺）內被兩頁以上
  *                      共用的元件：殼層（導覽列、rail、topbar）、膠囊按鈕、
  *                      表格、面板、對話框、toast。
  *   <style>（頁內）    只被那一頁渲染的元件。公開頁的貼文卡與留言表單、後臺的
@@ -1025,6 +1025,39 @@ body {
   object-fit: contain;
 }
 
+/* --- 附圖編輯列（就地編輯表單裡的一列）----------------------------------
+   三個狀態共用同一列：預覽目前附圖（__preview）、標記「儲存後移除」、
+   標記「已選新圖」（兩者都是 __note）。狀態本身是 PostCard 的
+   imageChange，這裡只負責讓三者在 DOM 上長得不一樣 —— 切換靠 React
+   條件渲染，而不是把三份都畫出來再藏起來。 */
+.post-edit-image {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.post-edit-image__preview {
+  display: block;
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.post-edit-image__note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* <label> 要長得像 .ghost-button 的按鈕：那個 class 原本只掛在 <button>
+   上，而 label 是行內元素，padding 不會撐開行高。 */
+.post-edit-image__label {
+  display: inline-flex;
+  align-items: center;
+}
+
 .post-actions {
   display: flex;
   gap: 22px;
@@ -1075,11 +1108,20 @@ body {
   font-weight: 700;
 }
 
-.post-like-button:hover {
+/*
+ * 按讚鈕與收藏鈕的狀態與 hover 一律寫成 .post-actions button.<class>... 的形式。
+ *
+ * 這不是冗長：外層那條 .post-actions button.post-like-button（0,2,1）的優先級
+ * 高於任何單一 class 的選擇器（0,2,0），因此 `.post-like-button:hover` 這種寫法
+ * 會被它蓋掉 —— 症狀是 hover 沒有反應、選取狀態也永遠不變色，而且沒有任何
+ * 錯誤訊息。與 .post-comment-button 那組 !important 是同一個原因（見上方說明），
+ * 只是這裡靠選擇器本身取勝，不需要 !important。
+ */
+.post-actions button.post-like-button:hover {
   color: var(--text);
 }
 
-.post-like-button.liked {
+.post-actions button.post-like-button.liked {
   border-color: #f7c7c7;
   color: #d92b2b;
   background: #fff4f4;
@@ -1116,6 +1158,44 @@ body {
   min-width: 1.2em;
   font-size: 13px;
   font-weight: 700;
+}
+
+/* 收藏鈕：與按讚鈕同一個膠囊外型，但沒有數字 —— 收藏是私人的，後端
+   刻意不回公開的收藏數（見 httpapi/forum_bookmark_handlers.go）。
+   .post-actions button 的 24×28 圖示鈕規則優先級較低，因此逐項覆寫的
+   理由與 .post-like-button 相同（含 :hover 與 .bookmarked 為什麼要寫成
+   複合選擇器），寫成一條完整的規則而不是補丁。 */
+.post-actions button.post-bookmark-button {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  height: auto;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fff;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.post-bookmark-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.post-actions button.post-bookmark-button:hover {
+  color: var(--text);
+}
+
+/* 已收藏：填滿的圖示 + 深一階的外框。不用品牌色 —— 按讚已經佔用紅色
+   （.post-like-button.liked），收藏用中性色才不會讓兩顆鈕在「都選了」
+   的時候互相搶注意力。 */
+.post-actions button.post-bookmark-button.bookmarked {
+  border-color: var(--text);
+  color: var(--text);
+  background: #f2f2f2;
 }
 
 /* --- 追蹤鈕 --------------------------------------------------------------
@@ -2587,7 +2667,7 @@ body {
 /* ==========================================================================
    16. 語言切換器
    ==========================================================================
-   九個頁面共用（公開頁導覽列與後臺 topbar），因此樣式在這裡、互動邏輯與
+   所有頁面共用（公開頁導覽列與後臺 topbar），因此樣式在這裡、互動邏輯與
    「有哪些語言」在 src/i18n/。元件本身不判斷自己在哪一頁，由呼叫處傳
    variant —— 樣式與位置是兩件事，混在一起就會長成一個需要
    document.location 的元件。

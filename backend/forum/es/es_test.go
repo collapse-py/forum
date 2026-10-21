@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -695,4 +696,77 @@ func newAuthedTestClient(t *testing.T, auth Auth, handler http.HandlerFunc) (*Cl
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	return New(server.URL, "forum_posts", auth), server
+}
+
+/* ==========================================================================
+   ListAllIDs（索引對帳的讀取端）
+   ========================================================================== */
+
+// fakeIndexStore 實作「依 id 升冪、search_after 分頁」的 match_all 查詢，
+// 與 ES 的真實行為同形：size 滿頁代表還有下一頁，未滿頁代表是最後一页。
+type fakeIndexStore struct {
+	ids []int64
+}
+
+func (f *fakeIndexStore) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/_search") {
+		writeJSONBody(w, http.StatusBadRequest, `{"error":{"type":"bad_request"}}`)
+		return
+	}
+	var q struct {
+		Size        int   `json:"size"`
+		SearchAfter int64 `json:"search_after"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&q); err != nil || q.Size <= 0 {
+		writeJSONBody(w, http.StatusBadRequest, `{"error":{"type":"bad_request"}}`)
+		return
+	}
+	hits := make([]string, 0, q.Size)
+	for _, id := range f.ids {
+		if id <= q.SearchAfter {
+			continue
+		}
+		if len(hits) >= q.Size {
+			break
+		}
+		hits = append(hits, `{"_id":"`+strconv.FormatInt(id, 10)+`"}`)
+	}
+	writeJSONBody(w, http.StatusOK, `{"hits":{"hits":[`+strings.Join(hits, ",")+`]}}`)
+}
+
+func TestListAllIDsPagesBeyondOnePage(t *testing.T) {
+	// 500 筆、每頁 200（bulkChunkSize）：三頁。這驗的是「對帳需要全部」
+	// 的含義——只看第一頁會讓後面的幽靈永遠被找不到。
+	store := &fakeIndexStore{}
+	for id := int64(1); id <= 500; id++ {
+		store.ids = append(store.ids, id)
+	}
+	client, _ := newTestClient(t, store.handle)
+
+	ids, err := client.ListAllIDs(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllIDs error = %v", err)
+	}
+	if len(ids) != 500 {
+		t.Fatalf("got %d ids, want 500", len(ids))
+	}
+	if ids[0] != 1 || ids[499] != 500 {
+		t.Fatalf("ids not in ascending order: first=%d last=%d", ids[0], ids[499])
+	}
+}
+
+func TestListAllIDsEmptyIndex(t *testing.T) {
+	store := &fakeIndexStore{}
+	client, _ := newTestClient(t, store.handle)
+	ids, err := client.ListAllIDs(context.Background())
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("empty index: got (%v, %v), want (nil, nil)", ids, err)
+	}
+}
+
+func TestListAllIDsDisabledClient(t *testing.T) {
+	client := New("", "forum_posts", Auth{})
+	if _, err := client.ListAllIDs(context.Background()); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("ListAllIDs error = %v, want ErrDisabled", err)
+	}
 }

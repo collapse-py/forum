@@ -93,6 +93,10 @@ export const vi: Record<MessageKey, string> = {
     'Không tìm thấy người dùng này',
   'error.fallbackFollow':
     'Không thể theo dõi',
+  'error.fallbackBookmark':
+    'Cập nhật mục đã lưu thất bại',
+  'error.fallbackImageDelete':
+    'Xóa ảnh thất bại',
   'auth.checking':
     'Đang kiểm tra trạng thái đăng nhập...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const vi: Record<MessageKey, string> = {
     'Nội dung bài viết',
   'post.editMax':
     'Tối đa 10000 ký tự',
+  'post.bookmark':
+    'Lưu',
+  'post.unbookmark':
+    'Bỏ lưu',
+  'post.imageEdit':
+    'Đổi ảnh',
+  'post.imageRemove':
+    'Xóa ảnh',
+  'post.imageSelectedNote':
+    'Đã chọn ảnh mới (áp dụng khi lưu).',
+  'post.imageWillRemoveNote':
+    'Ảnh sẽ bị xóa khi lưu.',
   'comment.loading':
     'Đang tải bình luận...',
   'comment.none':
@@ -313,6 +329,8 @@ export const vi: Record<MessageKey, string> = {
     'Không thể tải dữ liệu, vui lòng thử lại sau.',
   'profile.followingEntry':
     'Đang theo dõi',
+  'profile.bookmarksEntry':
+    'Mục đã lưu của tôi',
   'profile.postsLabel':
     'Bài viết của tôi',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const vi: Record<MessageKey, string> = {
     'Không thể tải danh sách theo dõi.',
   'following.postsFailed':
     'Không thể tải bài viết của người bạn theo dõi.',
+  'bookmarks.label':
+    'Bài viết đã lưu',
+  'bookmarks.empty':
+    'Bạn chưa lưu bài viết nào. Nhấn “Lưu” trên một bài viết để tìm lại ở đây.',
+  'bookmarks.failed':
+    'Không tải được mục đã lưu.',
+  'bookmarks.removed':
+    'Đã bỏ lưu.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const vi: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Tạo bài viết',
   'log.actionPostUpdate': 'Sửa bài viết',
   'log.actionPostDelete': 'Xóa bài viết',
+  'log.actionPostRestore':
+    'Khôi phục bài viết',
   'log.actionCommentCreate': 'Tạo bình luận',
   'log.actionCommentUpdate': 'Sửa bình luận',
   'log.actionCommentDelete': 'Xóa bình luận',
@@ -1166,6 +1194,24 @@ export const vi: Record<MessageKey, string> = {
   'posts.pinDone': 'Đã ghim',
   'posts.unpinDone': 'Đã bỏ ghim',
   'posts.pinFailed': 'Thao tác ghim thất bại.',
+  'posts.onlyDeleted':
+    'Chỉ hiện bài đã xóa',
+  'posts.deletedBadge':
+    'Đã xóa',
+  'posts.restore':
+    'Khôi phục',
+  'posts.restoreTitle':
+    'Khôi phục bài viết #{id}',
+  'posts.restoreMessage':
+    'Sau khi khôi phục, bài viết sẽ xuất hiện lại trên các trang công khai; bình luận và ảnh được giữ nguyên.',
+  'posts.restoreDone':
+    'Đã khôi phục bài viết.',
+  'posts.restoreFailed':
+    'Khôi phục thất bại.',
+  'posts.emptyDeletedTitle':
+    'Không có bài viết đã xóa',
+  'posts.emptyDeletedBody':
+    'Hiện không có bài viết nào bị xóa.',
   'reports.title':
     'Quản lý báo cáo',
   'reports.listSummary':
@@ -1284,6 +1330,8 @@ export const vi: Record<MessageKey, string> = {
     'Bài viết｜{site}',
   'title.following':
     'Đang theo dõi｜{site}',
+  'title.bookmarks':
+    'Mục đã lưu｜{site}',
   'title.adminUsers':
     'Quản lý người dùng｜{brand} Admin Console',
   'title.adminLogin':

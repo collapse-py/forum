@@ -503,10 +503,11 @@ INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?
 
 ### 未解的部分
 
-**沒有恢復入口，也沒有清理機制。** 軟刪除把「回收」從 handler 拿走，但替代方案還沒
-設計；誤刪因此仍然救不回來（除非直接動資料庫）。這記在
-[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文沒有恢復入口也不會被清理)，要補的是
-有保留期限的清理，而不是把刪除改回硬刪除。
+**沒有清理機制。** 軟刪除把「回收」從 handler 拿走，但替代方案還沒設計。恢復入口後來補上了
+（後臺的「只顯示已刪除」清單與 `POST /api/admin/forum/posts/{id}/restore`），因此誤刪在
+介面上救得回來；剩下的是列數與附圖只增不減。這記在
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文不會被清理)，要補的是有保留期限的清理，
+而不是把刪除改回硬刪除。
 
 ---
 

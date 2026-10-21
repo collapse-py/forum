@@ -24,6 +24,7 @@ go test ./forum/session/...  # Session 列舉與撤銷（miniredis）
 go test ./forum/ipban/...    # IP 封鎖名單（miniredis）
 go test ./forum/audit/...    # 稽核（CSV 防護、佔位符、截斷）
 go test ./forum/es/...       # ES 傳輸層（httptest 假伺服器）
+go test ./forum/httpapi/...  # HTTP 層（用假的資料庫替身，不需要 MySQL）
 go test .                    # 監聽逾時、優雅停止、-check 報告（package main）
 
 # 檔案服務（上傳／刪除／token 驗證／路徑穿越）
@@ -38,6 +39,21 @@ node tools/i18n/verify-catalogs.mjs
 ```
 
 `verify-catalogs.mjs` 同時比對**README 宣稱的語系數量與清單** —— 新增或刪除語系而沒更新 README 那兩處數字時，它會指名 README 的哪一處過期（CI 會跑這一步）。
+
+### 沒有 MySQL 怎麼測 handler
+
+`forum/httpapi` 有一個**假的資料庫**（`cov_harness_test.go`）：它是一個註冊在
+`database/sql/driver` 上的極簡驅動，查詢預設回空結果集、寫入預設成功、交易
+可以開也可以結束。要讓某一條查詢回資料時，用 `h.rows("FROM forum_posts", 欄位,
+列)` 登記結果集即可（欄位順序必須與 handler 的 `Scan` 對應）。
+
+它與 `go-sqlmock` 的差別是**寬鬆**：不要求每一筆查詢都被預期，也不檢查順序。
+因此 handler 只要走到某條路徑，就不會因為「少登記一筆查詢」而失敗；代價是它
+不適合用來斷言 SQL 形狀 —— 那種斷言請用 `go-sqlmock` 或既有的 `*_mysql_test.go`。
+
+`package main` 那一側有同樣的思路：啟動流程（OAuth → Session → Server → 背景
+工作）抽成 `startServices` 之後，可以在同一個行程裡用替身（假的 `*sql.DB`、
+miniredis）直接執行，不需要真的監聽任何連接埠。
 
 ---
 
@@ -60,7 +76,8 @@ cd ../../backend && go vet -vettool=<abs>/tools/invariants/invariants ./...
 cd ../tools/invariants && go test ./...   # 含負向測試：刻意寫違規程式碼，確認會被報
 
 # 覆蓋率地板（backend/tools/coveragefloor）
-cd ../backend && go run ./tools/coveragefloor <合併後的 coverage.out> 25.0
+cd ../backend && go run ./tools/coveragefloor <合併後的 coverage.out> 75.0
+cd ../backend && go run ./tools/coveragefloor <單一模組的 coverage.out> 75.0 --per-package
 ```
 
 它刻意是**獨立的 Go 模組**：它需要 `golang.org/x/tools`，而 backend 的相依項刻意維持在四個（miniredis、mysql、go-redis、oauth2）。把分析工具的相依塞進 runtime 相依裡，等於讓每個部署環境都多下載一份只有 CI 需要的程式碼。
@@ -75,18 +92,32 @@ cd ../backend && go run ./tools/coveragefloor <合併後的 coverage.out> 25.0
 
 | job | 做什麼 |
 | --- | --- |
-| `backend` | build、`go vet`、`go test -race`（CGO 開啟就是為了它） |
+| `backend` | build、`go vet`、`go test -race`（CGO 開啟就是為了它）、逐套件覆蓋率地板 |
 | `files_server` | 同上 |
 | `frontend` | `npm ci`、`typecheck`、`build`、`verify-catalogs` |
-| `coverage-floor` | 合併兩個模組的覆蓋率，檢查是否 ≥ **25.0** |
+| `coverage-floor` | 合併兩個模組的覆蓋率，檢查是否 ≥ **75.0** |
 | `invariants` | 建置並執行分析器，加上分析器自測 |
 | `migrations` | 起真實 MySQL 8.0.29，跑 `forum/data` 的遷移測試 |
-| `secrets` | 確認 `config.conf` 從未被追蹤、範本檔不含明文憑證 |
+| `secrets` | 確認 `config.conf` 從未被追蹤、範本檔的憑證鍵仍是佔位符（附反向自我測試） |
 
 兩件事值得知道：
 
 - `secrets` 用 `fetch-depth: 0` 掃**整份歷史** —— 只掃工作區的話，一個「刪掉檔案」的 commit 就足以讓真正的憑證留在倉庫裡。
-- **覆蓋率地板的作用是防止退化，不是製造動機。** 刻意不設一個虛高的目標（例如 70%），因為那會誘發無行為斷言的測試來拉數字，而那種測試是負債：它會在重構時壞掉，卻沒有指出任何東西壞了。目前合併覆盖率約 **26.2%**；`forum/httpapi` 約 2,500 行、覆蓋率最低，是主要缺口。
+- **覆蓋率地板的作用是防止退化，不是製造動機。** 地板是 **75.0**，而且是**逐套件**量的：每個套件都要 ≥ 75.0%，`backend` 與 `files_server` 各自的 job 各量一次，`coverage-floor` job 另外量合併後的總數。兩道閘門擋的不是同一種退化 —— 總數看不見「某個套件被掏空」，而那正是會出事的地方。
+
+  目前實測（2026-10-21，本機 `go test ./...`，不含真實 MySQL）：
+
+  | 套件 | 覆蓋率 | 套件 | 覆蓋率 |
+  | --- | --- | --- | --- |
+  | `forum/forum/data` | 98.6% | `forum/forum/config` | 89.0% |
+  | `forum/forum/audit` | 97.0% | `forum/forum/session` | 88.3% |
+  | `forum/forum/purge` | 93.5% | `forum/forum/httpapi` | 87.0% |
+  | `forum/forum/ipban` | 92.9% | `forum`（main） | 78.5% |
+  | `forum/forum/es` | 92.8% | `forum/forum/metrics` | 76.9% |
+  | `forum/forum/logger` | 91.1% | `forum/tools/coveragefloor` | 98.3% |
+  | `forum/forum/auth` | 92.0% | `files_server` | 91.6% |
+
+  backend 合計 **87.4%**、files_server **91.6%**、合併 **87.7%**（`forum/forum/logcaller` 沒有敘述，不列入）。
 
 ---
 

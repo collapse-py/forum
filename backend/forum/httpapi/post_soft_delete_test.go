@@ -280,6 +280,20 @@ var softDeleteExceptions = []struct {
 		marker: "SELECT DISTINCT author_email FROM forum_posts",
 		reason: "public key → email 的退路解析與貼文可見性無關",
 	},
+	{
+		// forumImageReferenceCount（forum_media_handlers.go）。圖片的引用
+		// 計數刻意把軟刪除的貼文也算進去：貼文可以還原（後台 /restore），
+		// 還原之後圖片必須還在。「先刪圖、後還原」是一個合法的使用者順序，
+		// 而把它排除的症狀是還原後得到一張破掉的圖。
+		marker: "FROM forum_posts WHERE image_url = ? OR image_url LIKE ?",
+		reason: "圖片引用計數必須包含軟刪除的貼文，否則還原後的圖片會被刪掉",
+	},
+	{
+		// forumFileAttachable（forum_media_handlers.go）。舊制圖片的所有權
+		// 退路：以「已經是自己貼文的圖片」證明所有權。
+		marker: "FROM forum_posts WHERE author_email = ? AND (image_url = ? OR image_url LIKE ?)",
+		reason: "舊制（forum_media 之前）圖片的所有權退路與貼文是否被軟刪除無關",
+	},
 }
 
 /* ==========================================================================

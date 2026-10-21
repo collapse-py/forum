@@ -11,7 +11,7 @@
 
 ## 頁面路由
 
-後端把多個 HTML 檔直接送給瀏覽器（這是 MPA 不是 SPA 的原因）。**17 個頁面殼**，對應 `src/entries/` 的 17 個 entry 與 `vite.config.ts` 的 `rollupOptions.input`。
+後端把多個 HTML 檔直接送給瀏覽器（這是 MPA 不是 SPA 的原因）。**19 個頁面殼**，對應 `src/entries/` 的 19 個 entry 與 `vite.config.ts` 的 `rollupOptions.input`。
 
 | Path | HTML 檔 | 需登入 |
 | --- | --- | --- |
@@ -22,6 +22,8 @@
 | `/forum/profile` | `forum-profile.html` | 是 |
 | `/forum/others-profile` | `forum-others-profile.html` | 是 |
 | `/forum/following` | `forum-following.html` | 是 |
+| `/forum/bookmarks` | `forum-bookmarks.html` | 是 |
+| `/forum/notifications` | `forum-notifications.html` | 是 |
 | `/forum/post/{id}` | `forum-post.html` | 否（互動時需登入） |
 | `/admin` | `admin.html` | 管理員 |
 | `/admin/forum` | `forum-admin.html` | 管理員 |

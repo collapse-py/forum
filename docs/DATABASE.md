@@ -15,6 +15,8 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_posts` | 貼文 | `image_url` 只存**檔名**，讀取時才用 `FILES_SERVER_PUBLIC_URL` 組網址；`updated_at` 可空＝從未被作者編輯過；`deleted_at` 可空＝未被刪除（軟刪除，見 [`API.md`](API.md#貼文的軟刪除soft-delete)） |
 | `forum_post_comments` | 留言 | 無外鍵，完整性靠應用層；`updated_at` 語意同上；`parent_id` 指回應的另一則留言（`0`＝第一層）、`depth` 是層級 1..3，見 [`API.md`](API.md#留言的層級回覆) |
 | `forum_post_likes` | 按讚 | 複合 PK `(post_id, author_email)`，天然去重 |
+| `forum_post_bookmarks` | 收藏 | 複合 PK `(post_id, author_email)`，天然去重；`created_at` 是收藏時間（目前不用於排序）；收藏數**不公開**，見 [`API.md`](API.md#收藏) |
+| `forum_media` | 上傳檔案的所有權 | 主鍵是**檔名**（檔案伺服器以此為鍵）；`owner_email` 是上傳者，刪圖端點靠它回答「這是不是我的」。只記錄這個功能上線**之後**上傳的檔案 —— 更早的檔案沒有列，見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#這次改動之前留下的孤兒檔無法清除) |
 | `forum_reports` | 檢舉 | `target_type`（`post`/`comment`）+ `target_id` 的多型參照，無外鍵 |
 | `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一；`avatar_url` 只存**檔名**（讀取時組網址，語意指 `forum_posts.image_url`） |
 | `forum_users` | 帳號狀態 | `status` 為 `ACTIVE` / `SUSPENDED`。**沒有 role 欄位** |

@@ -93,6 +93,10 @@ export const ptBR: Record<MessageKey, string> = {
     'Usuário não encontrado.',
   'error.fallbackFollow':
     'Falha ao seguir.',
+  'error.fallbackBookmark':
+    'Falha ao atualizar o item salvo',
+  'error.fallbackImageDelete':
+    'Falha ao excluir a imagem',
   'auth.checking':
     'Verificando login...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const ptBR: Record<MessageKey, string> = {
     'Conteúdo da publicação',
   'post.editMax':
     'No máximo 10000 caracteres',
+  'post.bookmark':
+    'Salvar',
+  'post.unbookmark':
+    'Remover dos salvos',
+  'post.imageEdit':
+    'Trocar imagem',
+  'post.imageRemove':
+    'Remover imagem',
+  'post.imageSelectedNote':
+    'Nova imagem selecionada (aplicada ao salvar).',
+  'post.imageWillRemoveNote':
+    'A imagem será removida ao salvar.',
   'comment.loading':
     'Carregando comentários...',
   'comment.none':
@@ -313,6 +329,8 @@ export const ptBR: Record<MessageKey, string> = {
     'Falha ao carregar. Tente novamente em instantes.',
   'profile.followingEntry':
     'Quem eu sigo',
+  'profile.bookmarksEntry':
+    'Meus salvos',
   'profile.postsLabel':
     'Minhas publicações',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const ptBR: Record<MessageKey, string> = {
     'Falha ao carregar quem você segue.',
   'following.postsFailed':
     'Falha ao carregar as publicações.',
+  'bookmarks.label':
+    'Publicações salvas',
+  'bookmarks.empty':
+    'Você ainda não salvou nenhuma publicação. Toque em “Salvar” em uma publicação para encontrá-la aqui.',
+  'bookmarks.failed':
+    'Falha ao carregar os salvos.',
+  'bookmarks.removed':
+    'Removido dos salvos.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const ptBR: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Postagem criada',
   'log.actionPostUpdate': 'Postagem editada',
   'log.actionPostDelete': 'Postagem removida',
+  'log.actionPostRestore':
+    'Publicação restaurada',
   'log.actionCommentCreate': 'Comentário criado',
   'log.actionCommentUpdate': 'Comentário editado',
   'log.actionCommentDelete': 'Comentário removido',
@@ -1166,6 +1194,24 @@ export const ptBR: Record<MessageKey, string> = {
   'posts.pinDone': 'Fixada',
   'posts.unpinDone': 'Desafixada',
   'posts.pinFailed': 'A operação de fixar falhou.',
+  'posts.onlyDeleted':
+    'Mostrar somente excluídas',
+  'posts.deletedBadge':
+    'Excluída',
+  'posts.restore':
+    'Restaurar',
+  'posts.restoreTitle':
+    'Restaurar publicação nº {id}',
+  'posts.restoreMessage':
+    'Após restaurar, a publicação voltará a aparecer nas páginas públicas; os comentários e a imagem são mantidos.',
+  'posts.restoreDone':
+    'Publicação restaurada.',
+  'posts.restoreFailed':
+    'Falha ao restaurar.',
+  'posts.emptyDeletedTitle':
+    'Nenhuma publicação excluída',
+  'posts.emptyDeletedBody':
+    'No momento, não há publicações excluídas.',
   'reports.title':
     'Gerenciamento de denúncias',
   'reports.listSummary':
@@ -1284,6 +1330,8 @@ export const ptBR: Record<MessageKey, string> = {
     'Publicação｜{site}',
   'title.following':
     'Seguindo｜{site}',
+  'title.bookmarks':
+    'Salvos｜{site}',
   'title.adminUsers':
     'Gerenciamento de usuários｜Painel administrativo {brand}',
   'title.adminLogin':

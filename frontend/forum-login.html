@@ -15,6 +15,12 @@
     <meta name="forum-name" content="{{FORUM_NAME}}" />
     <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
     <title>登入｜{{FORUM_NAME}}</title>
+    <!--
+      RSS 2.0 訂閱連結（後端 /feed.xml）。登入閘門也是公開頁，因此與其他公開頁
+      一樣帶著探索連結 —— 閱讀器在任何一頁都能發現它，而在這裡被擋下的人
+      正好是「還沒有帳號、只能先訂閱」的那一種讀者。
+    -->
+    <link rel="alternate" type="application/rss+xml" title="{{FORUM_NAME}}" href="/feed.xml" />
     <link rel="stylesheet" href="/style.css?v=202610171200" />
     <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
     <link rel="icon" href="/asset/logo.png" type="image/png" />

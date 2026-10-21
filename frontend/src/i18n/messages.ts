@@ -101,6 +101,8 @@ export const zhTW = {
   'error.fallbackUpload': '圖片上傳回應格式錯誤',
   'error.fallbackNotFound': '找不到這個使用者',
   'error.fallbackFollow': '追蹤失敗',
+  'error.fallbackBookmark': '收藏失敗',
+  'error.fallbackImageDelete': '刪除圖片失敗',
 
   /* ==========================================================================
      auth（公開頁導覽列的登入狀態與登入按鈕）
@@ -183,6 +185,12 @@ export const zhTW = {
   'post.editedBadge': '已編輯',
   'post.editContentLabel': '貼文內容',
   'post.editMax': '最多 10000 字',
+  'post.bookmark': '收藏',
+  'post.unbookmark': '取消收藏',
+  'post.imageEdit': '更換附圖',
+  'post.imageRemove': '移除附圖',
+  'post.imageSelectedNote': '已選擇新圖片（儲存後生效）。',
+  'post.imageWillRemoveNote': '儲存後會移除附圖。',
 
   /* ==========================================================================
      comment：留言串
@@ -275,6 +283,7 @@ export const zhTW = {
   'profile.saveFailed': '儲存失敗，請稍後再試。',
   'profile.loadFailed': '讀取失敗，請稍後再試。',
   'profile.followingEntry': '我的追蹤',
+  'profile.bookmarksEntry': '我的收藏',
   'profile.postsLabel': '我的貼文',
   'profile.emptyPosts': '你還沒有發表貼文。',
 
@@ -324,6 +333,10 @@ export const zhTW = {
   'following.emptyPosts': '追蹤的人還沒有發表貼文。',
   'following.peopleFailed': '追蹤清單載入失敗。',
   'following.postsFailed': '追蹤者的貼文載入失敗。',
+  'bookmarks.label': '收藏的貼文',
+  'bookmarks.empty': '你還沒有收藏任何貼文。在貼文上按「收藏」，之後就能在這裡找到它。',
+  'bookmarks.failed': '收藏列表載入失敗。',
+  'bookmarks.removed': '已取消收藏。',
 
   /* ==========================================================================
      login：登入閘門
@@ -569,6 +582,7 @@ export const zhTW = {
   'log.actionPostCreate': '發文',
   'log.actionPostUpdate': '改文',
   'log.actionPostDelete': '刪文',
+  'log.actionPostRestore': '還原貼文',
   'log.actionCommentCreate': '留言',
   'log.actionCommentUpdate': '改留言',
   'log.actionCommentDelete': '刪留言',
@@ -1090,6 +1104,15 @@ export const zhTW = {
   'posts.pinDone': '已置頂',
   'posts.unpinDone': '已取消置頂',
   'posts.pinFailed': '置頂操作失敗。',
+  'posts.onlyDeleted': '只顯示已刪除',
+  'posts.deletedBadge': '已刪除',
+  'posts.restore': '還原',
+  'posts.restoreTitle': '還原文章 #{id}',
+  'posts.restoreMessage': '還原後這篇文章會重新出現在公開頁面；留言與附圖都會保留。',
+  'posts.restoreDone': '文章已還原。',
+  'posts.restoreFailed': '還原失敗。',
+  'posts.emptyDeletedTitle': '沒有已刪除的文章',
+  'posts.emptyDeletedBody': '目前沒有被軟刪除的文章。',
 
   /* ==========================================================================
      reports：檢舉管理頁
@@ -1163,6 +1186,7 @@ export const zhTW = {
   'title.publicProfile': '公開個人資料｜{site}',
   'title.post': '貼文｜{site}',
   'title.following': '追蹤｜{site}',
+  'title.bookmarks': '收藏｜{site}',
   'title.adminUsers': '用戶管理｜{brand} 後臺',
   'title.adminLogin': '登入｜{brand} 後臺',
   'title.adminPosts': '論壇文章｜{brand} 後臺',

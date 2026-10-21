@@ -30,7 +30,7 @@ func TestBusinessCallerIsRecorded(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "caller.log")
 	t.Cleanup(func() { logger.Close() })
 
-	if err := logger.Init("INFO", logFile, "text"); err != nil {
+	if err := logger.Init("INFO", logFile, "text", 0, 0); err != nil {
 		t.Fatalf("Init 回錯誤: %v", err)
 	}
 

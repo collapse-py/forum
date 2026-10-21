@@ -13,9 +13,11 @@
 #                           而 npm run build 內含 typecheck，因此不必另開 lint job。
 #
 # 刻意不做的事：
-#   - 不設一個虛高的覆蓋率目標（例如 70%）。那會誘發無行為斷言的測試來拉數字，
-#     而那種測試是負債：它會在重構時壞掉，卻沒有指出任何東西壞了。地板只防止
-#     退化（見 coverage-floor job）。
+#   - 不設一個「越高越好」的覆蓋率目標。地板的作用是防止退化，不是製造動機：
+#     2026-10-21 起地板是 75.0%（合併後實測 87.6%），而且是**逐套件**量的 ——
+#     每一個套件都要 ≥ 75.0%。這個數字不是為了「看起來好」，而是因為
+#     「一個套件的測試被掏空」在總覆蓋率上看不出來，而那正是會出事的地方。
+#     超過地板之後要往上推，必須先有新的測試，而不是先改常數。
 #   - 不跑 E2E。Phase 3.1 的遷移測試已經需要真實 MySQL，而 CI 已經是容器裡，
 #     用 services: 區塊提供 MySQL 比在測試程式裡起容器更簡單也更可靠。
 
@@ -73,6 +75,17 @@ jobs:
       - name: test -race
         run: go test ./... -race -covermode=count -coverprofile=coverage.out
 
+      # 逐套件的覆蓋率地板（每個套件都要 ≥ 75.0%）。
+      #
+      # 與 coverage-floor job 的「總數」是兩道不同的閘門：總數過關但某個
+      # 套件被掏空，那種退化在總覆蓋率上看不出來 —— 而被掏空的那個套件正是
+      # 壞掉時爆炸半徑最大的那個。因此這裡逐套件量一次。
+      #
+      # 2026-10-21 實測：最低的是 metrics 76.9% 與 httpapi 87.0%，其餘都在
+      # 88% 以上（logcaller 沒有敘述，不在此列）。
+      - name: 檢查逐套件覆蓋率地板
+        run: go run ./tools/coveragefloor coverage.out 75.0 --per-package
+
       - name: 上傳覆蓋率
         if: always()
         uses: actions/upload-artifact@v4
@@ -108,6 +121,16 @@ jobs:
       # 它現在有了 upload 與 delete 兩條會碰磁碟的路徑，以及一個 Redis 用戶端。
       - name: test -race
         run: go test ./... -race -covermode=count -coverprofile=coverage.out
+
+      # 逐套件地板與 backend 相同（75.0%）。這個模組只有一個套件，因此這道
+      # 閘門與總數是同一件事；它存在的原因是「兩個模組用同一條線」，而不是
+      # 這個模組需要另一個數字。
+      #
+      # 工具在 backend 模組裡（那是它唯一的位置），因此這一步的工作目錄是
+      # backend，而被檢查的 profile 在 ../files_server。
+      - name: 檢查逐套件覆蓋率地板
+        working-directory: backend
+        run: go run ./tools/coveragefloor ../files_server/coverage.out 75.0 --per-package
 
       - name: 上傳覆蓋率
         if: always()
@@ -157,7 +180,7 @@ jobs:
       - name: 驗證翻譯目錄與 README 語系宣稱
         run: node ../tools/i18n/verify-catalogs.mjs
 
-      # 產出的十六個 HTML 殼必須與後端的 CSP 授權清單同步（Phase 2.4 的
+      # 產出的每個 HTML 殼都必須與後端的 CSP 授權清單同步（Phase 2.4 的
       # 不變條件三處之一）。把 dist/ 當成附件上傳，是為了讓「後端的
       # frontendShellFiles 少了一個」這種錯誤在前端 job 裡就看得出來。
       - name: 上傳建置產物
@@ -167,7 +190,7 @@ jobs:
           path: frontend/dist
           if-no-files-found: error
 
-coverage-floor:
+  coverage-floor:
     name: coverage floor
     runs-on: ubuntu-latest
     needs: [backend, files_server]
@@ -188,16 +211,16 @@ coverage-floor:
           pattern: '*-coverage'
           merge-multiple: true
 
-      # 地板從 25.0 起算（2026-10-02 實測合併後 26.5%，留 1.5 個百分點的餘裕）。
+      # 地板從 75.0 起算（2026-10-21 實測合併後 87.7%，留 12.7 個百分點的餘裕）。
       #
-      # 實測值的組成：backend 25.1%（auth 92%、config 89%、logger 86%、
-      # data 0%—— 沒有 MySQL 時全部 skip、httpapi 10.6%）+
-      # files_server 48.9%（從 0% 開始），合併 26.5%。
+      # 實測值的組成：backend 87.4%（httpapi 87.0%、data 98.6%、purge 93.5%、
+      # audit 97.0%、metrics 76.9%、main 78.5%，其餘皆 ≥ 88%）+
+      # files_server 91.6%，合併 87.7%。
       #
-      # 刻意不是 0：那樣這道閘門就只是記錄一個數字。25.0 如實反映
-      # 「工具性套件測得好、業務邏輯沒測」這個狀況，而地板的作用是**防止退化**，
-      # 不是製造動機。ROADMAP.md 的 Phase 3 會把這個數字往上推，那時改這一行的
-      # 常量即可。
+      # 這個數字與逐套件的地板（75.0，見 backend 與 files_server 兩個 job）是
+      # 兩道不同的閘門：這裡量的是「合併後的總數」，那裡量的是「每個套件
+      # 各自」。兩者都擋同一種退化 —— 覆蓋率掉下來 —— 但擋的不是同一種：
+      # 總數看不見「某個套件被掏空」。
       #
       # 這個數字不含 migrations job 的覆蓋率（那個 job 有獨立 MySQL，
       # 產出的 profile 刻意不合併 —— 否則「有 MySQL 與沒有 MySQL」兩種情況
@@ -205,8 +228,10 @@ coverage-floor:
       #
       # 刻意只在這裡用總數而不逐套件：逐套件會讓「把一個套件的測試搬去補
       # 另一個套件」變成一種合法的玩法 —— 總數不變，但那個套件的保護消失了。
+      # 因此逐套件的那道閘門放在各模組自己的 job 裡（profile 不跨模組合併，
+      # 套件名稱不會互相蓋掉）。
       - name: 檢查覆蓋率地板
-        run: go run ./tools/coveragefloor coverage/coverage.out 25.0
+        run: go run ./tools/coveragefloor coverage/coverage.out 75.0
 
   invariants:
     name: invariants (audit / admin auth / blocklist mount)
@@ -242,7 +267,9 @@ coverage-floor:
         run: go test ./...
 
   migrations:
-    name: migrations (real MySQL: idempotency / restart / upgrade / comment subtree)
+    # 名字裡有冒號（"real MySQL: ..."），必須加引號：YAML 的純量值裡
+    # 「冒號 + 空白」會被當成映射，整份 workflow 因此解析失敗。
+    name: "migrations (real MySQL: idempotency / restart / upgrade / comment subtree / post purge)"
     runs-on: ubuntu-latest
     needs: backend
     defaults:
@@ -293,6 +320,13 @@ coverage-floor:
           FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
         run: go test ./forum/httpapi/... -run MySQL -v -timeout 10m
 
+      # 軟刪除貼文的保留期清理（purge 套件）：清理排程的正確性是「DELETE
+      # 之後 SELECT 看不到」，sqlmock 回答不了這個問題，因此需要真實 MySQL。
+      - name: 軟刪除貼文清理排程（真實 MySQL）
+        env:
+          FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
+        run: go test ./forum/purge/... -run MySQL -v -timeout 10m
+
   secrets:
     name: secrets (config.conf 不得進版控)
     runs-on: ubuntu-latest
@@ -330,14 +364,105 @@ coverage-floor:
       # 設定檔含明文憑證，因此版控裡只允許去密碼化的 .example 範本。
       # 這一項擋的是「有人把範本裡填上真實 token 後改名成 config.conf 並提交」
       # 這條常見路徑。
-      - name: 確認範本檔不含明文憑證
+      #
+      # 為什麼是「逐鍵檢查」而不是「掃所有未加引號的值」：範本裡大部分的
+      # 值本來就沒有引號（FORUM_NAME=SB 論壇、SERVER_PORT=:8088），那種規則
+      # 會把整份範本判成有問題 —— 等於沒有檢查。憑證鍵則相反：它們的值永遠
+      # 是空或一個佔位符（change_me），因此「不是佔位符」是一個明確的訊號。
+      #
+      # 這一步會先掃真正的範本，再把三組假憑證塞進暫存副本掃第二次，**要求
+      # 第二次變紅**。自我測試不是裝飾：前一版（一條 ERE 掃所有未加引號的
+      # 值）在 CI 之外沒有任何方式被驗證過，而它其實永遠不會把 status 設成
+      # 1 —— 一個沒有被反向測試過的檢查，遲早會變成一個只印訊息的路由。
+      - name: 確認範本檔的憑證鍵仍是佔位符
         run: |
           set -euo pipefail
           status=0
-          for path in backend/config/config.conf.example files_server/config.conf.example; do
-            if grep -nE '^[[:space:]]*[A-Za-z_]+[[:space:]]*=[[:space:]]*[^"'"'"'[:space:]#][^#]*' "$path"; then
-              echo "::error::$path 有未加引號且看起來不是佔位符的值（可能是明文憑證）"
+
+          # 佔位符白名單：憑證鍵的值必須是空的，或**恰好**是其中一個字
+          #（不分大小寫）。範本換了佔位符字樣而沒有補進這裡，症狀是這一步
+          # 變紅（不是放行）—— 這是刻意的方向。
+          placeholders='change_me placeholder your_secret your_token your_password todo xxx'
+
+          is_placeholder() {
+            [ -z "$1" ] && return 0
+            local lower candidate
+            lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+            for candidate in $placeholders; do
+              [ "$lower" = "$candidate" ] && return 0
+            done
+            return 1
+          }
+
+          trim_value() {
+            # 去掉行尾註解、前後空白與成對的引號（KEY=value／key = "value"）。
+            local v="$1"
+            v="${v%%#*}"
+            v="$(printf '%s' "$v" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            case "$v" in
+              \"*\") v="${v#\"}"; v="${v%\"}" ;;
+              \'*\') v="${v#\'}"; v="${v%\'}" ;;
+            esac
+            printf '%s' "$v"
+          }
+
+          # check_config 掃一份設定檔；有問題回 1。
+          #
+          # keys 由呼叫端給，因為兩個模組的鍵名不同（後端大寫的 KEY=value、
+          # files_server 的 TOML 用小寫 key = value）。漏列一個鍵的症狀是那個
+          # 鍵沒有被檢查（不是誤報），因此鍵清單與範本要一起維護。
+          backend_keys='FILES_SERVER_TOKEN REDIS_PASSWORD DB_DSN GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET ES_USERNAME ES_PASSWORD ES_API_KEY'
+          files_keys='token password access_key secret_key'
+
+          check_config() {
+            local path="$1" keys="$2" key line value secret bad=0
+            for key in $keys; do
+              # 取最後一次出現：同一個鍵應該只有一種定義，而最後一次就是
+              # 會生效的那一個（前面的是註解裡的範例或舊值）。
+              line="$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "$path" | tail -n 1 || true)"
+              [ -n "$line" ] || continue
+              value="$(trim_value "${line#*=}")"
+              case "$key" in
+                DB_DSN)
+                  # DSN 是複合值（"帳號:密碼@tcp(…)…"），只有密碼段是憑證。
+                  secret="${value%%@*}"     # 第一個 @ 之前
+                  secret="${secret#*:}"     # 第一個 : 之後
+                  ;;
+                *)
+                  secret="$value"
+                  ;;
+              esac
+              is_placeholder "$secret" && continue
+              echo "::error::$path 的 $key 不是已知的佔位符（允許空值或 ${placeholders} 之一）：疑似明文憑證"
+              bad=1
+            done
+            return $bad
+          }
+
+          check_config backend/config/config.conf.example "$backend_keys" || status=1
+          check_config files_server/config.conf.example "$files_keys" || status=1
+
+          # 自我測試（負向）：三個變異各自對應一種「真的憑證」的形狀，任何
+          # 一個沒有被擋下都代表這道檢查有缺口。
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cp backend/config/config.conf.example "$tmp/filled.conf"
+          cp backend/config/config.conf.example "$tmp/dsn.conf"
+          cp files_server/config.conf.example "$tmp/toml.conf"
+          # 1) 空著的憑證鍵被填上 —— 最常見的誤提交路徑。
+          printf 'GOOGLE_CLIENT_SECRET=AIzaSyFAKEfakeFAKEfakeFAKE\n' >> "$tmp/filled.conf"
+          # 2) DSN 的密碼段（複合值，判定方式與其他鍵不同）。
+          printf 'DB_DSN=forum:Str0ngP4ssw0rd@tcp(127.0.0.1:3306)/forum\n' >> "$tmp/dsn.conf"
+          # 3) files_server 的 TOML 值（既有佔位符被換成看起來像真的 token）。
+          sed 's/"change_me"/"sk-live-fake-token-9f3a"/' "$tmp/toml.conf" > "$tmp/toml.mod.conf"
+
+          expect_blocked() {
+            if check_config "$1" "$2"; then
+              echo "::error::自我測試失敗：$(basename "$1") 帶著假憑證卻仍然通過（這道檢查有缺口）"
               status=1
             fi
-          done
+          }
+          expect_blocked "$tmp/filled.conf" "$backend_keys"
+          expect_blocked "$tmp/dsn.conf" "$backend_keys"
+          expect_blocked "$tmp/toml.mod.conf" "$files_keys"
           exit $status

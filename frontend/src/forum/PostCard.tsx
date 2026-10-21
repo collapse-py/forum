@@ -21,6 +21,7 @@ import { FollowButton } from './FollowButton';
 import { MAX_COMMENT_DEPTH } from './useComments';
 import type { CommentsController } from './useComments';
 import type { FollowController } from './useFollow';
+import type { PostImageChange } from './useFeed';
 import type { ReportController, ReportTarget } from './useReport';
 import { ForumAvatar } from './ForumAvatar';
 import { buildCommentTree, type CommentNode } from './commentTree';
@@ -51,6 +52,15 @@ export interface PostCardProps {
   report: ReportController;
   follow: FollowController;
   onLike: (post: ForumPost) => void;
+  /**
+   * 收藏／取消收藏（必填，理由與 onUpdate 相同：五個渲染 PostCard 的頁面
+   * 都必須提供它，而那個狀態住在頁面的列表資料裡）。
+   *
+   * 回傳值刻意是 void 而不是新的收藏狀態：切換的結果由呼叫端決定要
+   * patch 這一張卡還是把它從列表移除（收藏頁在取消收藏之後就不該再看到
+   * 它），而那是頁面層才知道的事。
+   */
+  onBookmark: (post: ForumPost) => void;
   onDelete?: ((post: ForumPost) => Promise<void>) | undefined;
   /**
    * 儲存編輯後的貼文本文（必填，理由見 PostCard 檔內「就地編輯」的說明）。
@@ -62,8 +72,12 @@ export interface PostCardProps {
    * 與 onDelete 相反的一條契約：**失敗時必須丟出例外**（成功時 resolve）。
    * PostCard 用它決定要不要關掉編輯框 —— 失敗就關掉的話，使用者剛打的字就
    * 消失了，而伺服器上仍然是舊內容，也就是一次「白打」。
+   *
+   * imageChange 是附圖的三態變更（見 useFeed 的 PostImageChange）：未給
+   * 代表「不動附圖」。上傳新圖、清掉孤兒檔與 PUT 全都由 useFeed 的
+   * updateForumPost 負責，因此這一頁拿到的錯誤與本文存檔失敗是同一種。
    */
-  onUpdate: (post: ForumPost, content: string) => Promise<void>;
+  onUpdate: (post: ForumPost, content: string, imageChange?: PostImageChange) => Promise<void>;
   onRequireLogin: () => void;
   /**
    * 切換追蹤成功後的頁面層副作用（可選）。
@@ -76,7 +90,7 @@ export interface PostCardProps {
   onFollowChanged?: ((userKey: string, following: boolean) => void) | undefined;
 }
 
-export function PostCard({ post, canInteract, comments, report, follow, onLike, onDelete, onUpdate, onRequireLogin, onFollowChanged }: PostCardProps) {
+export function PostCard({ post, canInteract, comments, report, follow, onLike, onBookmark, onDelete, onUpdate, onRequireLogin, onFollowChanged }: PostCardProps) {
   const state = comments.get(post.id);
   const listRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -87,6 +101,14 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  /*
+   * 附圖的變更意圖（三態，見 useFeed 的 PostImageChange）。
+   *
+   * 與 draft 同一個生命週期：開始編輯時歸零、取消或存檔成功後清掉。放在
+   * PostCard 而不是頁面層，因為它不描述任何伺服器狀態 —— 它只是「這個
+   * 表單裡還沒送出的選擇」，重新整理就該消失。
+   */
+  const [imageChange, setImageChange] = useState<PostImageChange>(undefined);
 
   /*
    * useComments() 回傳的 controller 每次渲染都是新的物件字面值，因此不能整包
@@ -199,12 +221,14 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
    */
   const startEditing = () => {
     setDraft(text(post.content));
+    setImageChange(undefined);
     setEditing(true);
   };
 
   const cancelEditing = () => {
     setEditing(false);
     setDraft('');
+    setImageChange(undefined);
   };
 
   useEffect(() => {
@@ -225,9 +249,10 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
     void (async () => {
       setSaving(true);
       try {
-        await onUpdate(post, content);
+        await onUpdate(post, content, imageChange);
         setEditing(false);
         setDraft('');
+        setImageChange(undefined);
       } catch {
         /* 失敗訊息由頁面層的狀態列呈現（每一頁都已把錯誤翻譯好）。 */
       } finally {
@@ -419,6 +444,52 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
             aria-label={t('post.editContentLabel')}
             onChange={(event) => setDraft(event.target.value)}
           />
+          {/*
+            附圖的編輯列。
+            
+            三個狀態共用同一列：預覽目前附圖、標記「儲存後移除」、標記「已選
+            新圖」。刻意不為新選的檔案做 object URL 預覽 —— 那需要一個與
+            NewPostPage 相同的 revoke 生命週期，而這一列只需要回答「我選了
+            什麼」；檔名與一行說明就足以回答它，且不會多一份記憶體。
+          */}
+          <div className="post-edit-image">
+            {imageChange === null ? (
+              <span className="post-edit-image__note">{t('post.imageWillRemoveNote')}</span>
+            ) : imageChange ? (
+              <span className="post-edit-image__note">{t('post.imageSelectedNote')}</span>
+            ) : post.imageUrl ? (
+              <img className="post-edit-image__preview" src={post.imageUrl} alt={t('post.imageAlt')} />
+            ) : null}
+            <label className="ghost-button post-edit-image__label" htmlFor={`post-image-input-${post.id}`}>
+              {t('post.imageEdit')}
+            </label>
+            <input
+              id={`post-image-input-${post.id}`}
+              className="image-upload-input"
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp"
+              hidden
+              onChange={(event) => {
+                const selected = event.target.files?.[0];
+                /*
+                 * 清掉 input 的值：留著的話，重新選同一個檔案不會觸發 change
+                 * （瀏覽器認為值沒變），使用者會覺得按了沒反應 —— 而那正是
+                 * 「選錯圖想重選」時會做的事。
+                 */
+                event.target.value = '';
+                if (selected) setImageChange(selected);
+              }}
+            />
+            {imageChange !== undefined || post.imageUrl ? (
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => setImageChange(imageChange === null ? undefined : null)}
+              >
+                {imageChange === null ? t('common.cancel') : t('post.imageRemove')}
+              </button>
+            ) : null}
+          </div>
           <div className="comment-form-footer">
             <span className="composer-note">{t('post.editMax')}</span>
             <button className="ghost-button" type="button" onClick={cancelEditing}>
@@ -433,7 +504,12 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
         <p>{text(post.content)}</p>
       )}
 
-      {post.imageUrl ? (
+      {/*
+        編輯中不畫大圖：編輯列已經有同一張圖的預覽，而兩份同時出現會讓
+        「哪一份是我等一下要改的」變成要看兩處才能回答。條件與編輯列
+        互補，因此任何時候畫面上剛好有一份。
+      */}
+      {!editing && post.imageUrl ? (
         <img className="post-image" src={post.imageUrl} alt={t('post.imageAlt')} loading="lazy" />
       ) : null}
 
@@ -458,6 +534,21 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
         >
           <CommentIcon />
           <span className="post-comment-count">{post.commentCount || 0}</span>
+        </button>
+        {/*
+          收藏鈕排在留言鈕之後：它與按讚是同一種「改變我與這篇的關係」的
+          動作，而回應是「把這篇打開」。放在最後一顆讓三顆鈕的順序讀成
+          「表態（讚）→ 互動（回應）→ 保存（收藏）」。
+        */}
+        <button
+          className={`post-bookmark-button${post.bookmarked ? ' bookmarked' : ''}`}
+          type="button"
+          aria-label={post.bookmarked ? t('post.unbookmark') : t('post.bookmark')}
+          aria-pressed={!!post.bookmarked}
+          disabled={!canInteract}
+          onClick={() => onBookmark(post)}
+        >
+          <BookmarkIcon bookmarked={!!post.bookmarked} />
         </button>
       </div>
 
@@ -928,6 +1019,35 @@ function CommentIcon() {
     >
       <title>{t('post.reply')}</title>
       <path d="M20.656 17.008a9.993 9.993 0 1 0-3.59 3.615L22 22Z" />
+    </svg>
+  );
+}
+
+/*
+ * 收藏圖示。與 LikeIcon 同一個模式（同一個圖形、兩種填色）：收藏與取消
+ * 收藏是同一個形狀的兩個狀態，切換時只有填色變 —— 換成兩個不同的圖形
+ * 會讓使用者在圖示之間找不到「同一件事」。
+ *
+ * 未收藏是空心（stroke）、已收藏是實心（fill）：這是書籤在整個 Material
+ * Symbols 與各家行動介面裡的既有語彙。
+ */
+function BookmarkIcon({ bookmarked }: { bookmarked: boolean }) {
+  const label = bookmarked ? t('post.unbookmark') : t('post.bookmark');
+  return (
+    <svg
+      className="post-bookmark-icon"
+      aria-label={label}
+      fill={bookmarked ? 'currentColor' : 'none'}
+      height={24}
+      role="img"
+      stroke="currentColor"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+      width={24}
+    >
+      <title>{label}</title>
+      <path d="M19 21l-7-4.4L5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z" />
     </svg>
   );
 }

@@ -38,7 +38,7 @@ import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
-import { updateForumPost, useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike, toggleBookmark, type PostImageChange } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -222,16 +222,39 @@ export function FollowingPage() {
   );
 
   /*
+   * 收藏／取消收藏。與 handleLike 同一條路徑（見 FeedPage 的 handleBookmark
+   * 說明）。這一頁不從列表移除卡片 —— 收藏狀態與「我追蹤了誰」無關，
+   * 取消收藏之後貼文仍然屬於追蹤動態。
+   */
+  const handleBookmark = useCallback(
+    (post: ForumPost) => {
+      void (async () => {
+        try {
+          const bookmarked = await toggleBookmark(post.id);
+          patchPost(post.id, { bookmarked });
+        } catch (error) {
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
+          setFail(errorText(error, msg('error.fallbackBookmark')));
+        }
+      })();
+    },
+    [patchPost, setFail],
+  );
+
+  /*
    * 追蹤動態裡的貼文也可以是「我自己的」（我追蹤了自己不可能，但別人的貼文
    * 我是作者的情況會出現在這裡 —— 例如我自己發過文，而某位使用者追蹤了我，
    * 我從他的頁面看見自己的舊文）。因此這一頁也需要 onUpdate，否則編輯會
    * 在伺服器成功、畫面卻停在舊內容。
    */
   const handleUpdate = useCallback(
-    async (post: ForumPost, content: string) => {
+    async (post: ForumPost, content: string, imageChange?: PostImageChange) => {
       try {
-        const next = await updateForumPost(post.id, content);
-        patchPost(post.id, { content: next, edited: true });
+        const patch = await updateForumPost(post.id, content, imageChange);
+        patchPost(post.id, patch);
         setOk(msg('posts.edited'));
       } catch (error) {
         if (error instanceof LoginRequiredError) {
@@ -255,6 +278,7 @@ export function FollowingPage() {
       report={report}
       follow={follow}
       onLike={handleLike}
+      onBookmark={handleBookmark}
       onUpdate={handleUpdate}
       onFollowChanged={handlePostFollowChanged}
       onRequireLogin={goToLogin}

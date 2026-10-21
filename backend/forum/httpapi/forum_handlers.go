@@ -141,6 +141,9 @@ import (
 //	CreatedAt    直接對應 forum_posts.created_at，時區格式化交給前端。
 //	LikeCount    該文的按讚總數，由 SQL 的相關子查詢即時 COUNT 而非快取欄位。
 //	Liked        「目前這個請求的登入者」是否已按讚；未登入時恆為 false。
+//	Bookmarked   「目前這個請求的登入者」是否已收藏；未登入時恆為 false。
+//	             與 Liked 同一個契約（恆送出，讓前端不必區分「沒有這個欄位」
+//	             與「未收藏」）。
 //	CommentCount 留言總數；刻意同時回傳，讓前端未展開留言時就能顯示數字，
 //	              避免為了顯示計數而額外請求一次留言列表。
 //	ImageURL     由庫中檔名組出的公開網址（已附加 token）；無圖時為空字串，
@@ -165,6 +168,7 @@ type forumPost struct {
 	CreatedAt    time.Time `json:"createdAt"`
 	LikeCount    int       `json:"likeCount"`
 	Liked        bool      `json:"liked"`
+	Bookmarked   bool      `json:"bookmarked"`
 	Pinned       bool      `json:"pinned,omitempty"`
 	Edited       bool      `json:"edited,omitempty"`
 	CommentCount int       `json:"commentCount"`
@@ -231,16 +235,17 @@ type updateForumCommentRequest struct {
 
 // updateForumPostRequest 是 PUT /api/forum/posts/{id} 的請求主體。
 //
-//	Content 去除前後空白後必須為 1 至 10000 個 rune，驗證規則與 createForumPost
+//	Content  去除前後空白後必須為 1 至 10000 個 rune，驗證規則與 createForumPost
 //	         相同（見 handleForumPostUpdate）。
-//
-// 刻意只有 Content，沒有 ImageURL：替換附圖不只是改一個欄位 —— 舊檔會變成
-// 沒有任何資料列指向的孤兒檔，而本站沒有「使用者刪除自己圖片」的端點
-// （/api/forum/image-tokens/release 只作廢存取權杖，不刪檔）。在沒有那條路徑
-// 的情況下接受 imageUrl 參數，只會讓人送出「新網址 + 舊圖變成孤兒」而以為
-// 舊圖被清掉了。寧可讓這件事明確不在這個端點的語意裡。
+//	ImageURL 附圖的三態（指標區分「沒送」與「送空字串」，這正是它是指標而不是
+//	         字串的原因）：
+//	           nil    = 不改變目前的附圖；
+//	           ""     = 移除附圖（舊檔在更新成功後回收，見 releaseForumImage）；
+//	           其他值 = 換成這張圖（先過 forumFileAttachable 的所有權檢查）。
+//	         JSON 的 null 與省略欄位都會解成 nil，兩者同義：不變更。
 type updateForumPostRequest struct {
-	Content string `json:"content"`
+	Content  string  `json:"content"`
+	ImageURL *string `json:"imageUrl"`
 }
 
 // createForumPostRequest 是 POST /api/forum/posts 的請求主體。
@@ -271,9 +276,9 @@ type forumReportRequest struct {
 //	          因此呼叫端每次都要把自己現在的頭像一起送回來（前端 ProfilePage
 //	          正是這麼做）。這與 Bio 的既有契約一致，而不是新的特殊規則。
 //
-// 換頭像的副作用：被替換掉的舊圖檔會變成沒有任何資料列指向的孤兒檔，而本站
-// 沒有「使用者刪除自己圖片」的端點（與 updateForumPostRequest 的同一個限制）。
-// 孤兒檔由 files_server 的 TTL／人工清理處理。
+// 換頭像的副作用：被替換掉的舊圖檔會由 handleForumProfile 在更新成功後嘗試
+// 回收（releaseForumImage：只在沒有人再引用它時才真的刪除）。使用者也可以
+// 用 POST /api/forum/images/delete 主動刪除自己上傳、且未被引用的檔案。
 type forumProfileRequest struct {
 	Nickname  string `json:"nickname"`
 	Bio       string `json:"bio"`
@@ -305,9 +310,12 @@ func (s *Server) handleForumPosts(w http.ResponseWriter, r *http.Request) {
 // 顯示未追蹤」，而且只在特定頁面出現。寫成單一字串之後，欄位集合不再是三份
 // 需要各記各的約定。
 //
-// 唯一的佔位符是 liked_by_me 的「目前這個請求的登入者」。呼叫端必須把它放在
-// 所有 condition 佔位符之前；未登入時傳空字串，該 EXISTS 子查詢自然恆為 false，
-// 因此讀取端點不需要額外的登入判斷。
+// 佔位符有兩個，都是「目前這個請求的登入者」：liked_by_me 與 bookmarked_by_me
+// 各一個。呼叫端必須把它放在所有 condition 佔位符之前，而且要傳**兩次**同一個
+// 值；未登入時傳空字串，兩個 EXISTS 子查詢自然恆為 false，因此讀取端點不需要
+// 額外的登入判斷。刻意不把兩個狀態合成一個查詢參數（例如讓參數只出現一次再在
+// SQL 裡重複引用）——MySQL 的 ? 是位置式的，SQL 裡出現兩次就得傳兩個值，這裡
+// 的兩個 ? 正是它實際的形狀。
 //
 // author_avatar 是這張表唯一的例外：它不在 forum_posts 上，因此投影必須靠
 // LEFT JOIN forum_profiles 才拿得到（見下方 forumPostFrom 的說明）。把它放進
@@ -329,7 +337,11 @@ const forumPostProjection = `fp.id, fp.author_email, pr.avatar_url AS author_ava
 		CASE WHEN EXISTS (
 		    SELECT 1 FROM forum_post_likes
 		    WHERE post_id = fp.id AND author_email = ?
-		) THEN 1 ELSE 0 END AS liked_by_me`
+		) THEN 1 ELSE 0 END AS liked_by_me,
+		CASE WHEN EXISTS (
+		    SELECT 1 FROM forum_post_bookmarks
+		    WHERE post_id = fp.id AND author_email = ?
+		) THEN 1 ELSE 0 END AS bookmarked_by_me`
 
 // forumPostFrom 是所有公開貼文查詢共用的 FROM 子句。
 //
@@ -426,7 +438,7 @@ type rowScanner interface {
 func scanForumPostRow(row rowScanner) (forumPost, error) {
 	var post forumPost
 	// CASE WHEN EXISTS 的結果以 0/1 呈現，MySQL 沒有原生布林型別。
-	var liked, pinned int
+	var liked, bookmarked, pinned int
 	// updated_at 可為 NULL（「從未被編輯」，見 MigrateMySQL 第 28 步），因此
 	// 必須用可空型別掃描：直接掃進 time.Time 會讓每一篇未編輯過的貼文都變成
 	// 掃描錯誤，而症狀是整個列表端點回 500。
@@ -435,10 +447,11 @@ func scanForumPostRow(row rowScanner) (forumPost, error) {
 	// NOT NULL，見 MigrateMySQL 第 29 步）：這位作者從未建過個人資料。
 	var authorAvatar sql.NullString
 	if err := row.Scan(&post.ID, &post.Author, &authorAvatar, &post.Content, &post.CreatedAt, &post.ImageURL,
-		&pinned, &updatedAt, &post.LikeCount, &post.CommentCount, &liked); err != nil {
+		&pinned, &updatedAt, &post.LikeCount, &post.CommentCount, &liked, &bookmarked); err != nil {
 		return forumPost{}, err
 	}
 	post.Liked = liked == 1
+	post.Bookmarked = bookmarked == 1
 	post.Pinned = pinned == 1
 	post.Edited = updatedAt.Valid
 	// 此刻存的是庫值（純檔名），完整網址由呼叫端與附圖共用同一把 token 現組
@@ -465,9 +478,13 @@ func scanForumPostRow(row rowScanner) (forumPost, error) {
 // 反而更貴。單頁筆數由 pageSize 封頂，因此最壞情況可控。
 func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs []interface{}, pageSize, offset int) ([]forumPost, error) {
 	ctx := r.Context()
-	// 參數順序即 SQL 裡 ? 的出現順序：投影的 currentUser → condition → LIMIT/OFFSET。
-	args := make([]interface{}, 0, len(conditionArgs)+3)
-	args = append(args, s.sessions.ResolveUser(r))
+	// 參數順序即 SQL 裡 ? 的出現順序：投影的 currentUser × 2（liked_by_me 與
+	// bookmarked_by_me）→ condition → LIMIT/OFFSET。
+	// ResolveUser 只呼叫一次：兩處的 ? 是同一個值，再解析一次只是同一個 lookup
+	// 做兩遍。
+	viewer := s.sessions.ResolveUser(r)
+	args := make([]interface{}, 0, len(conditionArgs)+4)
+	args = append(args, viewer, viewer)
 	args = append(args, conditionArgs...)
 	args = append(args, pageSize, offset)
 
@@ -635,6 +652,14 @@ func (s *Server) handleForumImageUpload(w http.ResponseWriter, r *http.Request) 
 		methodNotAllowed(w)
 		return
 	}
+	// 上傳者身分是 forum_media 的內容（見 MigrateMySQL 第 33 步），因此這裡
+	// 就必須拿得到 email；拿不到代表 session 有問題，回 401 而不是寫一筆
+	// 沒有擁有者的紀錄。
+	email := s.sessions.ResolveUser(r)
+	if email == "" {
+		unauthorized(w, "請先使用 Google 登入")
+		return
+	}
 	// 跨站表單 POST 會帶著 session cookie，因此上傳這種會消耗磁碟／儲存體的動作
 	// 必須另外驗 Origin。
 	if !s.isTrustedOrigin(r) {
@@ -732,10 +757,22 @@ func (s *Server) handleForumImageUpload(w http.ResponseWriter, r *http.Request) 
 	}
 	token, err := s.createMediaToken(r.Context())
 	if err != nil {
-		// 檔案已存檔但取不到 token，此時使用者拿不到網址，會看到錯誤並重新上傳，
-		// 孤兒檔案由檔案伺服器端的 TTL／人工清理處理。
+		// 檔案已存檔但取不到 token，此時使用者拿不到網址，會看到錯誤並重新上傳。
+		// 這條路徑上的檔案沒有任何用途（連上傳者都沒有它的網址），因此直接
+		// 回收（best-effort），而不是像以前那樣留給檔案伺服器的 TTL。
 		logger.ErrorfContext(r.Context(), "[FORUM] 建立圖片 token 失敗: %v", err)
+		s.discardForumUpload(r.Context(), name)
 		writeError(w, http.StatusBadGateway, "unable to create media token")
+		return
+	}
+	// 所有權紀錄（見 MigrateMySQL 第 33 步）。少了這一列，這個檔案就再也無法
+	// 被它的上傳者刪除（刪除端點要求所有權），也無法被掛進任何貼文或頭像
+	// （attach 檢查會拒絕沒有紀錄的檔名）—— 它會變成一個只進不出的孤兒。
+	// 因此寫不進去就把剛上傳的檔案刪掉並回 500：讓上傳失敗，使用者重試一次。
+	if err := s.forumRecordUploadedImage(r.Context(), name, email); err != nil {
+		logger.ErrorfContext(r.Context(), "[FORUM] 寫入圖片紀錄失敗 filename=%s: %v", name, err)
+		s.discardForumUpload(r.Context(), name)
+		internalError(w, "unable to record image upload")
 		return
 	}
 	// 立刻簽發 token，讓上傳後的預覽可以馬上載入，不必等貼文建立後重新列表。
@@ -1405,6 +1442,12 @@ func (s *Server) handleForumPostAction(w http.ResponseWriter, r *http.Request) {
 		s.handleForumPostLike(w, r)
 		return
 	}
+	// 收藏與按讚是同一層級的切換（都是「我對這篇的狀態」），因此用同樣的
+	// 尾綴分派形狀。兩個尾綴互不包含，先後順序不影響判定。
+	if strings.HasSuffix(r.URL.Path, "/bookmark") {
+		s.handleForumPostBookmark(w, r)
+		return
+	}
 	if strings.HasSuffix(r.URL.Path, "/report") {
 		s.handleForumReport(w, r, "post")
 		return
@@ -1447,19 +1490,26 @@ func (s *Server) handleForumPostDetail(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]interface{}{"item": posts[0]})
 }
 
-// handleForumPostUpdate 讓作者修改自己的貼文本文。
+// handleForumPostUpdate 讓作者修改自己的貼文本文，並可一併換圖或移除附圖。
 //
 // 授權與刪除完全相同：把 author_email 放進 UPDATE 的 WHERE 條件，而不是
 // 「先 SELECT 查作者、再 UPDATE」—— 後者兩步之間有窗口，攻擊者可以在那個
 // 窗口裡替換目標 id，而症狀是他剛好改到別人的文章。
+//
+// 附圖的處理違反上面那條「單一 UPDATE」的直覺，但有不一樣的理由：換圖需要
+// 先讀出「目前的檔名」才能 (1) 在「保持不變」時寫回原值、(2) 在更新成功後
+// 回收舊檔。那一讀（SELECT ... WHERE id AND author_email AND deleted_at）與
+// 隨後的 UPDATE 帶**同一組**授權條件，因此讀與寫之間縱使有窗口，看到的仍是
+// 「自己、而且存在」的那一列；UPDATE 的 0 列回 404 仍是權威判定。
 //
 // 刻意不記稽核（理由與 handleForumPostDelete 的同一處）：稽核紀錄的 actor 是
 // 管理員，而這是使用者改自己的東西。稽核要能回答「誰動了這篇文章」，而答案
 // 此刻就是 author_email —— 它被寫在那一列裡。真的需要追「這篇的原文」時，
 // 稽核表本來就答不出來（見 docs/KNOWN_ISSUES.md 的已知問題：只存截斷後的值）。
 //
-// 回應刻意只回 ok：前端已經拿得到自己剛才送出的內容，而回一份 forumPost 會
-// 讓呼叫端多處理一種「單篇形狀」（圖片 token 是新簽的、AuthorTags 要再查一次）。
+// 回應刻意只回 ok：前端已經拿得到自己剛才送出的內容與圖片網址（換圖時那張
+// 圖是它自己上傳的），而回一份 forumPost 會讓呼叫端多處理一種「單篇形狀」
+// （圖片 token 是新簽的、AuthorTags 要再查一次）。
 func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 	author := s.sessions.ResolveUser(r)
 	// 縱深防禦：中介層 requireLoginForWrite 已對 PUT 做過登入與停權檢查。
@@ -1494,12 +1544,64 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "內容最多 10000 字")
 		return
 	}
+	// 附圖：先讀出目前的庫值。這個讀取與 UPDATE 帶同一組授權條件（見函式說明），
+	// 而 0 列（不存在／不是你的／已軟刪除）與 UPDATE 的 0 列共用同一個 404。
+	var currentImageRaw string
+	err = s.db.QueryRowContext(r.Context(),
+		`SELECT image_url FROM forum_posts WHERE id = ? AND author_email = ? AND deleted_at IS NULL`,
+		postID, author).Scan(&currentImageRaw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		logger.ErrorfContext(r.Context(), "[FORUM] 讀取貼文附圖失敗 post_id=%d: %v", postID, err)
+		internalError(w, "unable to load forum post")
+		return
+	}
+	// 舊資料的 image_url 可能是 /files/x.png 或完整網址（見 forumImageFileName
+	// 的相容說明），因此一律先收斂成純檔名再比較與回收。nextImage 預設寫回原值：
+	// 「沒送 imageUrl」與「送了同一個檔名」都不改動這一欄。
+	currentImage := s.forumImageFileName(currentImageRaw)
+	nextImage := currentImageRaw
+	// 更新成功後要回收的舊檔名（空字串＝沒有要回收的）。
+	releasedImage := ""
+	if req.ImageURL != nil {
+		value := strings.TrimSpace(*req.ImageURL)
+		if value == "" {
+			// 移除附圖。舊檔不一定刪得掉（別人也在用就用不著刪，見
+			// releaseForumImage），所以這裡只負責記錄「更新後試著回收它」。
+			nextImage, releasedImage = "", currentImage
+		} else {
+			name := s.forumImageFileName(value)
+			if name == "" {
+				badRequest(w, "附圖必須是上傳到本站的圖片")
+				return
+			}
+			// 同一個檔名＝沒有換圖，跳過所有權檢查（它已經在這一列上）。
+			if name != currentImage {
+				attachable, err := s.forumFileAttachable(r.Context(), name, author)
+				if err != nil {
+					logger.ErrorfContext(r.Context(), "[FORUM] 檢查換圖所有權失敗 filename=%s: %v", name, err)
+					internalError(w, "unable to verify image ownership")
+					return
+				}
+				if !attachable {
+					badRequest(w, "附圖必須是自己上傳的圖片")
+					return
+				}
+				nextImage, releasedImage = name, currentImage
+			}
+		}
+	}
 	// 單一 UPDATE 具原子性，不需要交易（同 createForumPost 的說明）。
 	// deleted_at IS NULL 讓「編輯一篇已刪除的貼文」落到 404 而不是成功：
 	// 那篇貼文在任何頁面都已經不存在，編輯它只會產生一筆沒人看到的改動。
+	// updated_at 每次都會變，因此即使內容與附圖都原樣送回，MySQL 回報的
+	// 仍是「已變更」而不是 0 列。
 	result, err := s.db.ExecContext(r.Context(),
-		`UPDATE forum_posts SET content = ?, updated_at = ? WHERE id = ? AND author_email = ? AND deleted_at IS NULL`,
-		req.Content, time.Now(), postID, author)
+		`UPDATE forum_posts SET content = ?, image_url = ?, updated_at = ? WHERE id = ? AND author_email = ? AND deleted_at IS NULL`,
+		req.Content, nextImage, time.Now(), postID, author)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 編輯本人貼文失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to update forum post")
@@ -1510,6 +1612,11 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		http.NotFound(w, r)
 		return
+	}
+	// 更新成功之後才回收舊檔：順序反過來（先刪檔、UPDATE 失敗）會留下一篇
+	// 指著不存在檔案的貼文。回收是 best-effort，失敗只記日誌（見 releaseForumImage）。
+	if releasedImage != "" {
+		s.releaseForumImage(r.Context(), releasedImage, author)
 	}
 	// 索引必須跟著更新，否則搜尋結果會是舊內容 —— 而「改了字、搜尋還是舊字」
 	// 是使用者最難自己察覺的一種錯誤。刻意 best-effort：索引失敗只記日誌，
@@ -2228,6 +2335,31 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, "頭像必須是上傳到本站的圖片")
 			return
 		}
+		// 目前庫中的頭像（收斂成純檔名）：換頭像或移除頭像之後要回收舊檔，
+		// 因此必須在 upsert 蓋掉它之前先讀出來。查不到（首次建立）＝沒有舊檔。
+		var currentAvatarRaw string
+		if err := s.db.QueryRowContext(r.Context(),
+			`SELECT avatar_url FROM forum_profiles WHERE author_email = ?`, email).Scan(&currentAvatarRaw); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			logger.ErrorfContext(r.Context(), "[FORUM] 讀取目前頭像失敗: %v", err)
+			internalError(w, "unable to load profile")
+			return
+		}
+		currentAvatar := s.forumImageFileName(currentAvatarRaw)
+		// 所有權檢查，理由與 createForumPost 的附圖相同：沒有這一關就能把別人
+		// 的圖片設成自己的頭像，而之後的換圖回收（只看引用計數）會把它從檔案
+		// 伺服器上刪掉。同一個檔名（原樣重送）跳過：它已經在自己的資料列上。
+		if avatarName != "" && avatarName != currentAvatar {
+			attachable, err := s.forumFileAttachable(r.Context(), avatarName, email)
+			if err != nil {
+				logger.ErrorfContext(r.Context(), "[FORUM] 檢查頭像所有權失敗 filename=%s: %v", avatarName, err)
+				internalError(w, "unable to verify image ownership")
+				return
+			}
+			if !attachable {
+				badRequest(w, "頭像必須是自己上傳的圖片")
+				return
+			}
+		}
 		// 以單一 upsert 語句同時處理「首次建立」與「更新」，省掉一次
 		// 先 SELECT 判斷再分支寫入的往返。author_email 是主鍵，故
 		// ON DUPLICATE KEY 只會在「自己的資料已存在」時觸發。
@@ -2252,6 +2384,11 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 			}
 			internalError(w, "unable to update profile")
 			return
+		}
+		// 更新成功之後才回收舊檔：順序反過來（先刪檔、upsert 失敗）會留下一份
+		// 指著不存在檔案的個人資料。best-effort，失敗只記日誌（見 releaseForumImage）。
+		if currentAvatar != "" && currentAvatar != avatarName {
+			s.releaseForumImage(r.Context(), currentAvatar, email)
 		}
 		// 直接回傳修剪後的實際值，前端無需再清理一次空白。
 		//
@@ -2412,6 +2549,19 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 		imageName = s.forumImageFileName(req.ImageURL)
 		if imageName == "" {
 			badRequest(w, "附圖必須是上傳到本站的圖片")
+			return
+		}
+		// 所有權檢查：檔名是使用者可控的值，沒有這一關就能把別人的圖片掛到
+		// 自己的貼文上（熱連結）；更糟的是日後「換圖／移除」的自動回收只看
+		// 引用計數，會因此刪掉別人的檔案（見 forumFileAttachable）。
+		attachable, err := s.forumFileAttachable(r.Context(), imageName, author)
+		if err != nil {
+			logger.ErrorfContext(r.Context(), "[FORUM] 檢查附圖所有權失敗 filename=%s: %v", imageName, err)
+			internalError(w, "unable to verify image ownership")
+			return
+		}
+		if !attachable {
+			badRequest(w, "附圖必須是自己上傳的圖片")
 			return
 		}
 		// 重新簽發 token，而沿用請求帶來的那一個不是選項：那是使用者可控的
@@ -2669,6 +2819,12 @@ func (s *Server) handleForumPage(frontendDir string) http.HandlerFunc {
 			// 通知頁同樣落在 /forum/ 子樹（掛 requireLogin），理由與追蹤頁
 			// 完全相同。
 			page = "forum-notifications.html"
+		case "/forum/bookmarks", "/forum/bookmarks/":
+			// 收藏頁同樣落在 /forum/ 子樹（掛 requireLogin）。它與追蹤頁
+			// 唯一的差別是資料來源（/api/forum/bookmarks 而不是
+			// /api/forum/following/posts），而「未登入沒有收藏」是同一個
+			// 道理的兩次套用。
+			page = "forum-bookmarks.html"
 		default:
 			/*
 			 * 永久連結頁是唯一一個「id 在路徑裡」的公開頁，因此不能用上面的

@@ -29,7 +29,13 @@ import { AnnouncementBanner } from './AnnouncementBanner';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, InstallHint, useAuth, usePwaInstall } from './shell';
 import { useComments } from './useComments';
-import { updateForumPost, useFeed, toggleLike } from './useFeed';
+import {
+  updateForumPost,
+  useFeed,
+  toggleBookmark,
+  toggleLike,
+  type PostImageChange,
+} from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -199,6 +205,31 @@ export function FeedPage() {
     [patchPost, setFail],
   );
 
+  /*
+   * 收藏／取消收藏。
+   *
+   * 與 handleLike 同一條路徑，但沒有「數量」要同步：收藏是私人的，後端不回
+   * 收藏數（見 useFeed 的 toggleBookmark）。成功之後以伺服器確認的狀態 patch
+   * 這一張卡，而不是本地翻轉 —— 連點兩下的合併結果只有後端知道。
+   */
+  const handleBookmark = useCallback(
+    (post: ForumPost) => {
+      void (async () => {
+        try {
+          const bookmarked = await toggleBookmark(post.id);
+          patchPost(post.id, { bookmarked });
+        } catch (error) {
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
+          setFail(errorMessage(error, tr(msg('error.fallbackBookmark'))));
+        }
+      })();
+    },
+    [patchPost, setFail],
+  );
+
   const handleDelete = useCallback(
     async (post: ForumPost) => {
       try {
@@ -225,10 +256,15 @@ export function FeedPage() {
    * 之後「已編輯」標記要等到下一次載入才出現。
    */
   const handleUpdate = useCallback(
-    async (post: ForumPost, content: string) => {
+    async (post: ForumPost, content: string, imageChange?: PostImageChange) => {
       try {
-        const next = await updateForumPost(post.id, content);
-        patchPost(post.id, { content: next, edited: true });
+        const patch = await updateForumPost(post.id, content, imageChange);
+        /*
+         * 整包套用而不是只挑 content：換圖與移除附圖時 imageUrl 也在 patch
+         * 裡（見 useFeed 的 PostUpdatePatch），而漏掉它正是「編輯成功但畫面
+         * 還是舊圖」那條路徑。
+         */
+        patchPost(post.id, patch);
         setOk(msg('posts.edited'));
       } catch (error) {
         if (error instanceof LoginRequiredError) {
@@ -289,6 +325,7 @@ export function FeedPage() {
       report={report}
       follow={follow}
       onLike={handleLike}
+      onBookmark={handleBookmark}
       onDelete={handleDelete}
       onUpdate={handleUpdate}
       onRequireLogin={goToLogin}

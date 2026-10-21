@@ -93,6 +93,10 @@ export const th: Record<MessageKey, string> = {
     'ไม่พบผู้ใช้คนนี้',
   'error.fallbackFollow':
     'ติดตามไม่สำเร็จ',
+  'error.fallbackBookmark':
+    'อัปเดตรายการบันทึกไม่สำเร็จ',
+  'error.fallbackImageDelete':
+    'ลบรูปภาพไม่สำเร็จ',
   'auth.checking':
     'กำลังตรวจสอบสถานะการเข้าสู่ระบบ...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const th: Record<MessageKey, string> = {
     'เนื้อหาโพสต์',
   'post.editMax':
     'สูงสุด 10000 ตัวอักษร',
+  'post.bookmark':
+    'บันทึก',
+  'post.unbookmark':
+    'เลิกบันทึก',
+  'post.imageEdit':
+    'เปลี่ยนรูปภาพ',
+  'post.imageRemove':
+    'ลบรูปภาพ',
+  'post.imageSelectedNote':
+    'เลือกรูปภาพใหม่แล้ว (จะใช้เมื่อบันทึก)',
+  'post.imageWillRemoveNote':
+    'รูปภาพจะถูกลบเมื่อบันทึก',
   'comment.loading':
     'กำลังโหลดความคิดเห็น...',
   'comment.none':
@@ -313,6 +329,8 @@ export const th: Record<MessageKey, string> = {
     'โหลดข้อมูลไม่สำเร็จ ให้ลองใหม่ภายหลัง',
   'profile.followingEntry':
     'รายชื่อที่ฉันติดตาม',
+  'profile.bookmarksEntry':
+    'รายการที่บันทึกไว้',
   'profile.postsLabel':
     'โพสต์ของฉัน',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const th: Record<MessageKey, string> = {
     'โหลดรายชื่อที่ติดตามไม่สำเร็จ',
   'following.postsFailed':
     'โหลดโพสต์ของผู้ใช้ที่คุณติดตามไม่สำเร็จ',
+  'bookmarks.label':
+    'โพสต์ที่บันทึกไว้',
+  'bookmarks.empty':
+    'คุณยังไม่ได้บันทึกโพสต์ใด ๆ แตะ “บันทึก” บนโพสต์เพื่อกลับมาดูที่นี่',
+  'bookmarks.failed':
+    'โหลดรายการที่บันทึกไว้ไม่สำเร็จ',
+  'bookmarks.removed':
+    'เลิกบันทึกแล้ว',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const th: Record<MessageKey, string> = {
   'log.actionPostCreate': 'สร้างกระทู้',
   'log.actionPostUpdate': 'แก้ไขกระทู้',
   'log.actionPostDelete': 'ลบกระทู้',
+  'log.actionPostRestore':
+    'กู้คืนโพสต์',
   'log.actionCommentCreate': 'สร้างความคิดเห็น',
   'log.actionCommentUpdate': 'แก้ไขความคิดเห็น',
   'log.actionCommentDelete': 'ลบความคิดเห็น',
@@ -1166,6 +1194,24 @@ export const th: Record<MessageKey, string> = {
   'posts.pinDone': 'ปักหมุดแล้ว',
   'posts.unpinDone': 'เอาการปักหมุดออกแล้ว',
   'posts.pinFailed': 'การปักหมุดล้มเหลว',
+  'posts.onlyDeleted':
+    'แสดงเฉพาะที่ลบแล้ว',
+  'posts.deletedBadge':
+    'ลบแล้ว',
+  'posts.restore':
+    'กู้คืน',
+  'posts.restoreTitle':
+    'กู้คืนโพสต์ #{id}',
+  'posts.restoreMessage':
+    'เมื่อกู้คืนแล้ว โพสต์นี้จะกลับมาแสดงในหน้าสาธารณะอีกครั้ง ความคิดเห็นและรูปภาพยังคงอยู่',
+  'posts.restoreDone':
+    'กู้คืนโพสต์แล้ว',
+  'posts.restoreFailed':
+    'กู้คืนไม่สำเร็จ',
+  'posts.emptyDeletedTitle':
+    'ไม่มีโพสต์ที่ถูกลบ',
+  'posts.emptyDeletedBody':
+    'ขณะนี้ไม่มีโพสต์ที่ถูกลบ',
   'reports.title':
     'จัดการรายงาน',
   'reports.listSummary':
@@ -1284,6 +1330,8 @@ export const th: Record<MessageKey, string> = {
     'โพสต์｜{site}',
   'title.following':
     'กำลังติดตาม｜{site}',
+  'title.bookmarks':
+    'รายการที่บันทึกไว้｜{site}',
   'title.adminUsers':
     'จัดการผู้ใช้｜แดชบอร์ด {brand}',
   'title.adminLogin':

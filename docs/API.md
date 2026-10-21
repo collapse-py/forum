@@ -4,6 +4,10 @@
 
 - [基礎](#基礎)
 - [論壇](#論壇)
+- [收藏](#收藏)
+- [貼文附圖與頭像的替換](#貼文附圖與頭像的替換)
+- [圖片的所有權與刪除](#圖片的所有權與刪除)
+- [RSS](#rss)
 - [管理](#管理)
 
 ---
@@ -29,15 +33,18 @@
 | GET | `/api/forum/posts?offset=&limit=` | 貼文列表 |
 | POST | `/api/forum/posts` | 建立貼文 |
 | GET | `/api/forum/posts/{id}` | 單篇貼文（永久連結頁；匿名可讀，找不到回 404） |
-| PUT | `/api/forum/posts/{id}` | 編輯自己的貼文本文（**只有 `content`**，見 [已知問題](KNOWN_ISSUES.md)） |
+| PUT | `/api/forum/posts/{id}` | 編輯自己的貼文：`content` 必填，`imageUrl` 選填（省略／`null`＝不動、`""`＝移除、有值＝換圖，見 [附圖的替換](#貼文附圖與頭像的替換)） |
 | DELETE | `/api/forum/posts/{id}` | 軟刪除自己的貼文（`deleted_at` 寫入時間，資料保留） |
 | GET | `/api/forum/posts/{id}/comments` | 留言列表（公開；含回覆，最多三層） |
 | POST | `/api/forum/posts/{id}/comments` | 建立留言；body 可帶 `parentId` 回覆某一則留言 |
 | PUT / DELETE | `/api/forum/posts/{id}/comments/{cid}` | 編輯／刪除自己的留言（刪除連同它的回覆子樹；回應帶 `removed`） |
 | POST | `/api/forum/posts/{id}/like` | 按讚 |
+| POST | `/api/forum/posts/{id}/bookmark` | 切換收藏（見 [收藏](#收藏)） |
+| GET | `/api/forum/bookmarks` | 我收藏的貼文（需登入，不限流；單頁 25 筆，與動態相同） |
 | POST | `/api/forum/posts/{id}/report` | 檢舉貼文 |
 | POST | `/api/forum/posts/{id}/comments/{cid}/report` | 檢舉留言 |
 | POST | `/api/forum/images` | 上傳圖片，轉送 files_server |
+| POST | `/api/forum/images/delete` | 刪除自己上傳且未被引用的圖片（body `{url}`，見 [附圖的替換](#貼文附圖與頭像的替換)） |
 | POST | `/api/forum/image-tokens/release` | 釋放媒體存取權杖 |
 | GET / PUT | `/api/forum/profile` | 自己的資料（暱稱、簡介、頭像；PUT 為整份覆寫） |
 | GET / POST | `/api/forum/follows` | 追蹤名單 / 切換追蹤 |
@@ -95,7 +102,71 @@
 - 回應欄位：`GET /api/forum/profile`、`GET /api/forum/public-profile` 回 `avatarUrl`（已附加 media token）；貼文與留言多帶 `authorAvatar`；追蹤清單的每一項多帶 `avatarUrl`。三處都省略空值。
 - 讀取端點一共有四個讀者：`/forum/profile`（編輯自己的頭像）、`/forum/others-profile`（看別人的）、`/forum/following`（追蹤清單），以及 `/forum/new` 的 composer 那一顆「我」。因此 `GET /api/forum/profile` 在已登入的頁面上會被重複呼叫 —— 這是有意的：四個頁面各只需要自己那一份，而共用一個快取會讓「剛改了頭像」在某一頁還是舊的。
  - `PUT /api/forum/profile` **不回** `avatarUrl` —— 呼叫端送進去的值就是寫入的值，多回一份只會讓它有第二個來源。
-- 被替換掉的舊檔沒有刪除端點，會成為孤兒檔（與貼文附圖相同，見 `forumProfileRequest` 的說明）。
+- 被替換或移除的舊檔，會在**不再被任何貼文或頭像引用**時一併刪除（見 [附圖的替換](#貼文附圖與頭像的替換)）。
+
+## 收藏
+
+收藏是**私人**的備忘，不是公開的按讚：沒有任何回應會說一則貼文被幾個人收藏。
+
+| Method | Path | 說明 |
+| --- | --- | --- |
+| POST | `/api/forum/posts/{id}/bookmark` | 切換收藏（已收藏→取消、未收藏→新增）；回 `{"bookmarked":…}` |
+| GET | `/api/forum/bookmarks?offset=` | 我收藏過的貼文（需登入、不限流；單頁 25 筆） |
+
+- 回應只有 `bookmarked`（切換**後**的狀態）：連點兩下的合併結果只有後端的交易知道，前端不猜。
+- 清單只列**還活著**的貼文 —— 一則被作者刪除的貼文不再出現，即使有人收藏過它（與所有公開列表同一條規則）。還原之後它會回到清單裡。
+- 排序與全站動態相同（置頂優先、再依發表時間），不是依收藏時間：置頂的貼文在每個列表都看得到。
+- 對已刪除或不存在的貼文收藏回 404；收藏自己的貼文是允許的。取消收藏是真的 `DELETE`（沒有歷史語意，與按讚、追蹤相同）。
+
+## 貼文附圖與頭像的替換
+
+兩者共用同一個流程：**先上傳、再寫入**（`POST /api/forum/images`，然後各自的 `PUT`），差別只在欄位名。
+
+| 動作 | 貼文附圖（`PUT /api/forum/posts/{id}`） | 頭像（`PUT /api/forum/profile`） |
+| --- | --- | --- |
+| 不動 | 欄位**省略**（或 `null`） | 沒有這個選項 —— 頭像每次都是整份覆寫 |
+| 換成新圖 | `imageUrl` 帶新的網址 | `avatarUrl` 帶新的網址 |
+| 移除 | `imageUrl: ""` | `avatarUrl: ""` |
+
+- 貼文附圖是三態（`省略／null`／`""`／有值），`content` 仍為必填。刻意不用 `null` 表示「移除」：JSON 的 `null` 與「欄位不存在」解碼後都是 `nil`，無法區分。
+- **換圖會回收舊檔**：更新成功之後，舊檔名若不再被任何貼文或頭像引用，就從檔案伺服器刪除。回收是 best-effort（失敗只留日誌），因此它不會把一次成功的編輯變成失敗。
+- **軟刪除的貼文仍然算引用**：被刪除的貼文還原之後必須還看得到它的圖，所以「刪文」不會把圖刪掉。
+- 寫入時只取網址裡的**檔名**（資料庫只存檔名的既有契約），且該檔名必須是本站的檔案、**上傳者是自己**（見下）。
+
+## 圖片的所有權與刪除
+
+「這個檔名是誰上傳的」記在 `forum_media`，上傳成功時寫入。它回答兩個問題：這張圖能不能掛到我的內容上、以及能不能被我刪掉。
+
+| Method | Path | 說明 |
+| --- | --- | --- |
+| POST | `/api/forum/images/delete` | 刪除自己上傳、且沒有被任何貼文或頭像引用的圖片（body `{url}`） |
+
+| 情況 | 結果 |
+| --- | --- |
+| 是我上傳的，且沒有任何引用 | 200 `{"ok":true}`，檔案刪除 |
+| 檔名無效（第三方網址、路徑穿越、不在副檔名白名單裡） | 400 `{"error":"invalid image url"}` |
+| 不是我上傳的，或**沒有上傳紀錄**（舊檔案，含從未上傳過的檔名） | 404 —— 與「這個檔名不存在」共用同一個回應，因此無法用它探測別人上傳過什麼 |
+| 仍被某一篇貼文或某個頭像引用 | 409（呼叫端要先把引用改掉） |
+| 檔案伺服器說檔案已經不在 | 視為成功（重試安全） |
+
+- 這條端點是給「上傳了但沒用到」的情況（選錯圖、發文失敗後重試）；正常換圖／移除由上面的 `PUT` 自動回收。
+- 上傳時若寫不進所有權紀錄，該次上傳回 500 並把剛上傳的檔案刪掉：寧可失敗重傳，也不要留下一個沒有人能刪的檔。
+- 舊檔案（`forum_media` 存在之前上傳的）沒有紀錄，因此**不能被刪除**；它們唯一還能做的是被掛回**自己既有的**內容上（例如個人資料頁把目前的舊頭像原樣送回來）。見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#這次改動之前留下的孤兒檔無法清除)。
+
+---
+
+## RSS
+
+| Method | Path | 說明 |
+| --- | --- | --- |
+| GET / HEAD | `/feed.xml` | 全站貼文的 RSS 2.0 摘要（公開、不限流） |
+
+- 掛在**網站的根目錄**而不是 `/forum/` 之下：那棵子樹有登入閘門，而訂閱來源必須匿名可達。公開頁的 `<head>` 都帶 `<link rel="alternate" type="application/rss+xml">`，閱讀器在任何一頁都能發現它。
+- 最新 50 則，**依發表時間新到舊**（與動態的「置頂優先」不同：摘要要回答的是「最近發生什麼」）。
+- 每一則有標題、連結（即永久連結）、全文、發佈時間與 GUID。**不含作者、不含圖片**：作者 email 不離開後端，而附圖需要分鐘級的 media token —— RSS 是存起來慢慢讀的格式，簽一個很快失效的網址只會得到破圖。
+- 標題由內文衍生：折疊空白後取開頭 60 個字（更長時補 `…`）。**沒有貼文時仍是一份合法的空 feed**，不是 404。
+- 回應帶 `ETag`（整份文件的 SHA-256）與 `Cache-Control: public, max-age=300`；內容沒變時回 304，因此閱讀器的輪詢幾乎不傳輸內容。`lastBuildDate` 由**最新一則貼文的時間**推導而非產生回應的時刻 —— 文件裡只要有一個會自己走動的欄位，雜湊就會每秒不同，304 永遠不會發生（而那個失效沒有任何錯誤訊息）。沒有貼文時整份 feed 省略 `lastBuildDate`。
+- 只列未刪除的貼文（與所有公開端點同一條規則）；還原之後它會回到摘要裡。
 
 ---
 
@@ -105,9 +176,10 @@
 
 | Method | Path |
 | --- | --- |
-| GET / POST | `/api/admin/forum/posts` |
+| GET / POST | `/api/admin/forum/posts` （GET 可帶 `deleted=1`：只列已刪除，依刪除時間新到舊） |
 | GET / PUT / DELETE | `/api/admin/forum/posts/{id}` （DELETE 為軟刪除） |
 | POST | `/api/admin/forum/posts/{id}/pin` （body `{"pinned":true\|false}`） |
+| POST | `/api/admin/forum/posts/{id}/restore` （還原軟刪除；冪等，回 `{"ok":true,"restored":…}`） |
 | GET / POST | `/api/admin/forum/comments` |
 | GET / PUT / DELETE | `/api/admin/forum/comments/{id}` |
 | GET / POST | `/api/admin/forum/reports?status=PENDING\|RESOLVED\|REJECTED` |
@@ -142,13 +214,13 @@
 
 | 問題 | 答案 |
 | --- | --- |
-| 刪掉之後還看得到嗎？ | 看不到。所有讀取路徑（動態、追蹤動態、個人頁、永久連結、**留言列表**、搜尋、後臺列表、統計、CSV 匯出）都帶 `deleted_at IS NULL`。 |
+| 刪掉之後還看得到嗎？ | 看不到。所有公開的讀取路徑（動態、追蹤動態、收藏、個人頁、永久連結、**留言列表**、搜尋、RSS、後臺列表、統計、CSV 匯出）都帶 `deleted_at IS NULL`。唯一的例外是後臺的 `?deleted=1` 清單，它要的正是那一批。 |
 | 重複刪除同一篇？ | 回 404（與「這篇不存在」同一種回應，不區分以避免探測作者權限）。 |
-| 留言、按讚、檢舉呢？ | 資料都還在表裡，但**讀不到也不能再互動**：`GET /comments` 回 404，編輯／刪除自己的留言、按讚、留言、檢舉、置頂同樣一律 404。 |
-| 對一篇已刪除的貼文還能做什麼？ | 什麼都不能。它對外等同不存在，因此所有子資源端點都以母文章的可見性把關，而不是只看子資源自己還在不在。 |
-| 搜尋引擎呢？ | 刪除時移除 ES 文件（`unindexForumPost`）；全量重建也跳過已刪除的貼文。若移除失敗而留下幽靈文件，搜尋端會再用 MySQL 的可見性把它從結果與筆數中挑掉（必要時向後補齊該頁），因此回應宣稱的筆數不會多於畫面上看得到的。 |
-| 可以救回來嗎？ | 目前沒有恢復入口（API 或介面都沒有）。要救回只能對 `forum_posts` 下 `UPDATE ... SET deleted_at = NULL`，見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)。 |
-| 資料什麼時候真正消失？ | 目前不會。軟刪除把「回收」從 handler 移出去，需要另外設計清理機制（見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。 |
+| 留言、按讚、檢舉呢？ | 資料都還在表裡，但**讀不到也不能再互動**：`GET /comments` 回 404，編輯／刪除自己的留言、按讚、收藏、留言、檢舉、置頂同樣一律 404。 |
+| 對一篇已刪除的貼文還能做什麼？ | 只有管理員能在後臺還原它（`POST /api/admin/forum/posts/{id}/restore`）。除此之外什麼都不能：它對外等同不存在，因此所有子資源端點都以母文章的可見性把關，而不是只看子資源自己還在不在。 |
+| 搜尋引擎呢？ | 刪除時移除 ES 文件（`unindexForumPost`）；全量重建也跳過已刪除的貼文。若移除失敗而留下幽靈文件，搜尋端會再用 MySQL 的可見性把它從結果與筆數中挑掉（必要時向後補齊該頁），因此回應宣稱的筆數不會多於畫面上看得到的。刪除是 best-effort，還原則會重新索引。 |
+| 可以救回來嗎？ | 可以。後臺的「只顯示已刪除」清單（`?deleted=1`）上有「還原」：`POST /api/admin/forum/posts/{id}/restore` 把 `deleted_at` 設回 `NULL` 並補一筆 `post.restore` 稽核。已經不是刪除狀態時回 200 但 `restored:false`（冪等，不記稽核）。剩下的限制見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文不會被清理)。 |
+| 資料什麼時候真正消失？ | 目前不會。軟刪除把「回收」從 handler 移出去，需要另外設計清理機制（見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文不會被清理)）。 |
 
 ---
 

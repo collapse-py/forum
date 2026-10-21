@@ -407,6 +407,13 @@ const indexMapping = `{
 // 這個取捨是刻意的：讓服務在啟動時偷偷重建索引，會讓「我改了設定檔，為什麼
 // 還沒生效」變成一個難以追查的問題。
 func (c *Client) EnsureIndex(ctx context.Context) error {
+	// 與其他方法（Ping / IndexPost / Search …）同一個 nil 安全語意：URL 組裝
+	// 會先解引用 c.index，因此必須在 Enabled 檢查之後才組 URL —— 否則 nil
+	// client（未設定 ES_URL）會得到 panic 而不是 ErrDisabled，而其他方法
+	// 全部回 ErrDisabled。
+	if !c.Enabled() {
+		return ErrDisabled
+	}
 	_, err := c.do(ctx, http.MethodPut, "/"+c.index, "application/json", []byte(indexMapping))
 	if err != nil {
 		var httpErr *HTTPError
@@ -433,6 +440,10 @@ func (c *Client) Ping(ctx context.Context) error {
 // 這對論壇是正確的取捨 —— 為了讓每篇貼文的寫入都同步可搜尋而開
 // refresh=wait_for，會讓每次發文多花掉一個 refresh 週期的延遲。
 func (c *Client) IndexPost(ctx context.Context, doc PostDocument) error {
+	// nil 安全：URL 組裝會先解引用 c.index，必須先過 Enabled（同 EnsureIndex）。
+	if !c.Enabled() {
+		return ErrDisabled
+	}
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -445,11 +456,78 @@ func (c *Client) IndexPost(ctx context.Context, doc PostDocument) error {
 // DeletePost 刪除單篇貼文的文件。文件已不存在（404）視為成功：
 // 索引的目標狀態就是「這裡不該有這篇文」，重複刪除不該讓呼叫端視為失敗。
 func (c *Client) DeletePost(ctx context.Context, id int64) error {
+	// nil 安全：同 IndexPost，URL 組裝先於 do 的 Enabled 檢查。
+	if !c.Enabled() {
+		return ErrDisabled
+	}
 	_, err := c.do(ctx, http.MethodDelete, "/"+c.index+"/_doc/"+strconv.FormatInt(id, 10), "", nil)
 	if StatusOf(err) == http.StatusNotFound {
 		return nil
 	}
 	return err
+}
+
+// ListAllIDs 回傳索引中所有文件的 ID，供與 MySQL 的對帳使用
+// （見 httpapi.ReconcileSearchIndex）。
+//
+// 分頁用 search_after + 依 id 升冪排序，而不是 from/size：from+size 有
+// maxResultWindow（10000）的天花板，而對帳需要「全部」文件——只看前一萬筆
+// 會讓坐在更後面的幽靈永遠被找不到，那正是對帳要根除的問題。id 欄位是 long
+// 且與 _id 同值（見 PostDocument），因此依 id 排序與依 _id 排序等價。
+//
+// _source 刻意關掉：對帳只需要 ID，每頁 200 筆全文只是讓回應膨脹。
+func (c *Client) ListAllIDs(ctx context.Context) ([]int64, error) {
+	if !c.Enabled() {
+		return nil, ErrDisabled
+	}
+	ids := make([]int64, 0, 1024)
+	var searchAfter int64
+	firstPage := true
+	for {
+		query := map[string]interface{}{
+			"query":   map[string]interface{}{"match_all": map[string]interface{}{}},
+			"size":    bulkChunkSize,
+			"sort":    []interface{}{map[string]interface{}{"id": "asc"}},
+			"_source": false,
+		}
+		if !firstPage {
+			query["search_after"] = searchAfter
+		}
+		body, err := json.Marshal(query)
+		if err != nil {
+			return ids, err
+		}
+		payload, err := c.do(ctx, http.MethodPost, "/"+c.index+"/_search", "application/json", body)
+		if err != nil {
+			return ids, err
+		}
+		var decoded struct {
+			Hits struct {
+				Hits []struct {
+					ID string `json:"_id"`
+				} `json:"hits"`
+			} `json:"hits"`
+		}
+		if err := json.Unmarshal(payload, &decoded); err != nil {
+			return ids, err
+		}
+		hits := decoded.Hits.Hits
+		if len(hits) == 0 {
+			return ids, nil
+		}
+		for _, hit := range hits {
+			id, err := strconv.ParseInt(hit.ID, 10, 64)
+			if err != nil {
+				return ids, fmt.Errorf("es: 索引文件 _id %q 不是數字", hit.ID)
+			}
+			ids = append(ids, id)
+		}
+		searchAfter = ids[len(ids)-1]
+		firstPage = false
+		if len(hits) < bulkChunkSize {
+			return ids, nil
+		}
+	}
 }
 
 // IndexPosts 以 _bulk 批次寫入，供啟動時的全量重建使用。

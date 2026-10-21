@@ -93,6 +93,10 @@ export const de: Record<MessageKey, string> = {
     'Dieser Benutzer wurde nicht gefunden.',
   'error.fallbackFollow':
     'Folgen fehlgeschlagen.',
+  'error.fallbackBookmark':
+    'Merken fehlgeschlagen',
+  'error.fallbackImageDelete':
+    'Bild konnte nicht gelöscht werden',
   'auth.checking':
     'Anmeldestatus wird geprüft...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const de: Record<MessageKey, string> = {
     'Beitragstext',
   'post.editMax':
     'Maximal 10.000 Zeichen',
+  'post.bookmark':
+    'Merken',
+  'post.unbookmark':
+    'Nicht mehr merken',
+  'post.imageEdit':
+    'Bild ändern',
+  'post.imageRemove':
+    'Bild entfernen',
+  'post.imageSelectedNote':
+    'Neues Bild ausgewählt (wird beim Speichern übernommen).',
+  'post.imageWillRemoveNote':
+    'Das Bild wird beim Speichern entfernt.',
   'comment.loading':
     'Kommentare werden geladen...',
   'comment.none':
@@ -313,6 +329,8 @@ export const de: Record<MessageKey, string> = {
     'Profil konnte nicht geladen werden. Bitte versuche es später erneut.',
   'profile.followingEntry':
     'Meine Follows',
+  'profile.bookmarksEntry':
+    'Meine Merkliste',
   'profile.postsLabel':
     'Meine Beiträge',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const de: Record<MessageKey, string> = {
     'Folge-Liste konnte nicht geladen werden.',
   'following.postsFailed':
     'Beiträge der gefolgten Benutzer konnten nicht geladen werden.',
+  'bookmarks.label':
+    'Gemerkte Beiträge',
+  'bookmarks.empty':
+    'Du hast noch keine Beiträge gemerkt. Tippe bei einem Beitrag auf „Merken“, um ihn hier wiederzufinden.',
+  'bookmarks.failed':
+    'Merkliste konnte nicht geladen werden.',
+  'bookmarks.removed':
+    'Aus der Merkliste entfernt.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const de: Record<MessageKey, string> = {
   'log.actionPostCreate': 'Beitrag erstellt',
   'log.actionPostUpdate': 'Beitrag bearbeitet',
   'log.actionPostDelete': 'Beitrag gelöscht',
+  'log.actionPostRestore':
+    'Beitrag wiederhergestellt',
   'log.actionCommentCreate': 'Kommentar erstellt',
   'log.actionCommentUpdate': 'Kommentar bearbeitet',
   'log.actionCommentDelete': 'Kommentar gelöscht',
@@ -1166,6 +1194,24 @@ export const de: Record<MessageKey, string> = {
   'posts.pinDone': 'Angeheftet',
   'posts.unpinDone': 'Anheftung aufgehoben',
   'posts.pinFailed': 'Das Anheften ist fehlgeschlagen.',
+  'posts.onlyDeleted':
+    'Nur gelöschte anzeigen',
+  'posts.deletedBadge':
+    'Gelöscht',
+  'posts.restore':
+    'Wiederherstellen',
+  'posts.restoreTitle':
+    'Beitrag #{id} wiederherstellen',
+  'posts.restoreMessage':
+    'Nach dem Wiederherstellen erscheint der Beitrag wieder auf den öffentlichen Seiten; Kommentare und Bild bleiben erhalten.',
+  'posts.restoreDone':
+    'Beitrag wiederhergestellt.',
+  'posts.restoreFailed':
+    'Wiederherstellung fehlgeschlagen.',
+  'posts.emptyDeletedTitle':
+    'Keine gelöschten Beiträge',
+  'posts.emptyDeletedBody':
+    'Derzeit gibt es keine gelöschten Beiträge.',
   'reports.title':
     'Meldungsverwaltung',
   'reports.listSummary':
@@ -1273,17 +1319,19 @@ export const de: Record<MessageKey, string> = {
   'title.forum':
     '{site}',
   'title.login':
-    'Anmeldung | {site}',
+    'Anmeldung｜{site}',
   'title.newPost':
-    'Neuen Beitrag erstellen | {site}',
+    'Neuen Beitrag erstellen｜{site}',
   'title.profile':
-    'Profil | {site}',
+    'Profil｜{site}',
   'title.publicProfile':
-    'Öffentliches Profil | {site}',
+    'Öffentliches Profil｜{site}',
   'title.post':
     'Beitrag｜{site}',
   'title.following':
-    'Folge | {site}',
+    'Folge｜{site}',
+  'title.bookmarks':
+    'Merkliste｜{site}',
   'title.adminUsers':
     'Benutzerverwaltung | {brand}-Backend',
   'title.adminLogin':

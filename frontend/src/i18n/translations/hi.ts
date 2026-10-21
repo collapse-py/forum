@@ -93,6 +93,10 @@ export const hi: Record<MessageKey, string> = {
     'यह उपयोगकर्ता नहीं मिला',
   'error.fallbackFollow':
     'अनफ़ॉलो करना विफल',
+  'error.fallbackBookmark':
+    'सहेजना अपडेट नहीं हो सका',
+  'error.fallbackImageDelete':
+    'छवि हटाई नहीं जा सकी',
   'auth.checking':
     'प्रवेश अवस्था की जांच चल रही है...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const hi: Record<MessageKey, string> = {
     'पोस्ट सामग्री',
   'post.editMax':
     'अधिकतम 10000 अक्षर',
+  'post.bookmark':
+    'सहेजें',
+  'post.unbookmark':
+    'सहेजना हटाएँ',
+  'post.imageEdit':
+    'छवि बदलें',
+  'post.imageRemove':
+    'छवि हटाएँ',
+  'post.imageSelectedNote':
+    'नई छवि चुनी गई (सहेजने पर लागू होगी)।',
+  'post.imageWillRemoveNote':
+    'सहेजने पर छवि हट जाएगी।',
   'comment.loading':
     'टिप्पणी लोड हो रही है...',
   'comment.none':
@@ -313,6 +329,8 @@ export const hi: Record<MessageKey, string> = {
     'डेटा पढ़ने में सफलता मिली नहीं। कृपया बाद में फिर प्रयास करें।',
   'profile.followingEntry':
     'मेरी फ़ॉलोइंग',
+  'profile.bookmarksEntry':
+    'मेरे सहेजे गए',
   'profile.postsLabel':
     'मेरी पोस्ट',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const hi: Record<MessageKey, string> = {
     'फ़ॉलोइंग सूची लोड नहीं हो सकी।',
   'following.postsFailed':
     'फ़ॉलो किए गए उपयोगकर्ताओं की पोस्ट लोड नहीं हो सकीं।',
+  'bookmarks.label':
+    'सहेजी गई पोस्ट',
+  'bookmarks.empty':
+    'आपने अभी तक कोई पोस्ट नहीं सहेजी है। किसी पोस्ट पर “सहेजें” दबाएँ, फिर वह यहाँ मिलेगी।',
+  'bookmarks.failed':
+    'सहेजी गई पोस्ट लोड नहीं हो सकीं।',
+  'bookmarks.removed':
+    'सहेजे गए से हटा दिया।',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const hi: Record<MessageKey, string> = {
   'log.actionPostCreate': 'पोस्ट बनी',
   'log.actionPostUpdate': 'पोस्ट संपादित',
   'log.actionPostDelete': 'पोस्ट हटाई',
+  'log.actionPostRestore':
+    'पोस्ट बहाल की गई',
   'log.actionCommentCreate': 'टिप्पणी बनी',
   'log.actionCommentUpdate': 'टिप्पणी संपादित',
   'log.actionCommentDelete': 'टिप्पणी हटाई',
@@ -1166,6 +1194,24 @@ export const hi: Record<MessageKey, string> = {
   'posts.pinDone': 'पिन किया गया',
   'posts.unpinDone': 'अनपिन किया गया',
   'posts.pinFailed': 'पिन करने का कार्य विफल रहा।',
+  'posts.onlyDeleted':
+    'केवल हटाई गई दिखाएँ',
+  'posts.deletedBadge':
+    'हटाई गई',
+  'posts.restore':
+    'बहाल करें',
+  'posts.restoreTitle':
+    'पोस्ट #{id} बहाल करें',
+  'posts.restoreMessage':
+    'बहाल करने पर पोस्ट सार्वजनिक पृष्ठों पर फिर दिखेगी; टिप्पणियाँ और छवि बनी रहेंगी।',
+  'posts.restoreDone':
+    'पोस्ट बहाल हो गई।',
+  'posts.restoreFailed':
+    'बहाल नहीं हो सकी।',
+  'posts.emptyDeletedTitle':
+    'कोई हटाई गई पोस्ट नहीं',
+  'posts.emptyDeletedBody':
+    'फ़िलहाल कोई हटाई गई पोस्ट नहीं है।',
   'reports.title':
     'रिपोर्ट प्रबंधन',
   'reports.listSummary':
@@ -1273,17 +1319,19 @@ export const hi: Record<MessageKey, string> = {
   'title.forum':
     '{site}',
   'title.login':
-    'लॉग इन | {site}',
+    'लॉग इन｜{site}',
   'title.newPost':
-    'नई पोस्ट | {site}',
+    'नई पोस्ट｜{site}',
   'title.profile':
-    'प्रोफ़ाइल | {site}',
+    'प्रोफ़ाइल｜{site}',
   'title.publicProfile':
-    'सार्वजनिक प्रोफ़ाइल | {site}',
+    'सार्वजनिक प्रोफ़ाइल｜{site}',
   'title.post':
     'पोस्ट｜{site}',
   'title.following':
-    'फ़ॉलोइंग | {site}',
+    'फ़ॉलोइंग｜{site}',
+  'title.bookmarks':
+    'सहेजे गए｜{site}',
   'title.adminUsers':
     'उपयोगकर्ता प्रबंधन | {brand} Admin Console',
   'title.adminLogin':

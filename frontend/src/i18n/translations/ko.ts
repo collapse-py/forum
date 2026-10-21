@@ -93,6 +93,10 @@ export const ko: Record<MessageKey, string> = {
     '이 사용자를 찾을 수 없습니다',
   'error.fallbackFollow':
     '팔로우 실패',
+  'error.fallbackBookmark':
+    '저장에 실패했습니다',
+  'error.fallbackImageDelete':
+    '이미지 삭제에 실패했습니다',
   'auth.checking':
     '로그인 상태 확인 중...',
   'auth.statusUnknown':
@@ -190,6 +194,18 @@ export const ko: Record<MessageKey, string> = {
     '게시글 내용',
   'post.editMax':
     '최대 10000자',
+  'post.bookmark':
+    '저장',
+  'post.unbookmark':
+    '저장 취소',
+  'post.imageEdit':
+    '이미지 변경',
+  'post.imageRemove':
+    '이미지 제거',
+  'post.imageSelectedNote':
+    '새 이미지를 선택했습니다(저장 시 반영됩니다).',
+  'post.imageWillRemoveNote':
+    '저장하면 이미지가 제거됩니다.',
   'comment.loading':
     '댓글 로딩 중...',
   'comment.none':
@@ -313,6 +329,8 @@ export const ko: Record<MessageKey, string> = {
     '불러오기에 실패했습니다. 나중에 다시 시도해 주세요.',
   'profile.followingEntry':
     '내 팔로우',
+  'profile.bookmarksEntry':
+    '내 저장',
   'profile.postsLabel':
     '내 글',
   'profile.emptyPosts':
@@ -367,6 +385,14 @@ export const ko: Record<MessageKey, string> = {
     '팔로우 목록을 불러오지 못했습니다.',
   'following.postsFailed':
     '팔로우한 사용자의 글을 불러오지 못했습니다.',
+  'bookmarks.label':
+    '저장한 게시물',
+  'bookmarks.empty':
+    '아직 저장한 게시물이 없습니다. 게시물에서 “저장”을 누르면 여기에서 찾을 수 있습니다.',
+  'bookmarks.failed':
+    '저장한 게시물을 불러오지 못했습니다.',
+  'bookmarks.removed':
+    '저장을 취소했습니다.',
   'login.eyebrow':
     'MEMBER ACCESS',
   'login.title':
@@ -580,6 +606,8 @@ export const ko: Record<MessageKey, string> = {
   'log.actionPostCreate': '글 작성',
   'log.actionPostUpdate': '글 수정',
   'log.actionPostDelete': '글 삭제',
+  'log.actionPostRestore':
+    '게시물 복원',
   'log.actionCommentCreate': '댓글 작성',
   'log.actionCommentUpdate': '댓글 수정',
   'log.actionCommentDelete': '댓글 삭제',
@@ -1166,6 +1194,24 @@ export const ko: Record<MessageKey, string> = {
   'posts.pinDone': '고정했습니다',
   'posts.unpinDone': '고정을 해제했습니다',
   'posts.pinFailed': '고정 작업에 실패했습니다.',
+  'posts.onlyDeleted':
+    '삭제된 것만 보기',
+  'posts.deletedBadge':
+    '삭제됨',
+  'posts.restore':
+    '복원',
+  'posts.restoreTitle':
+    '게시물 #{id} 복원',
+  'posts.restoreMessage':
+    '복원하면 이 게시물이 공개 페이지에 다시 표시됩니다. 댓글과 이미지는 유지됩니다.',
+  'posts.restoreDone':
+    '게시물을 복원했습니다.',
+  'posts.restoreFailed':
+    '복원에 실패했습니다.',
+  'posts.emptyDeletedTitle':
+    '삭제된 게시물 없음',
+  'posts.emptyDeletedBody':
+    '현재 삭제된 게시물이 없습니다.',
   'reports.title':
     '신고 관리',
   'reports.listSummary':
@@ -1284,6 +1330,8 @@ export const ko: Record<MessageKey, string> = {
     '게시글｜{site}',
   'title.following':
     '팔로우｜{site}',
+  'title.bookmarks':
+    '저장한 게시물｜{site}',
   'title.adminUsers':
     '사용자 관리｜{brand} 관리자 화면',
   'title.adminLogin':

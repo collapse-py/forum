@@ -33,7 +33,7 @@ import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
 import { BottomNav, ForumNav, ForumShell, useAuth } from './shell';
 import { useComments } from './useComments';
-import { updateForumPost, useFeed, toggleLike } from './useFeed';
+import { updateForumPost, useFeed, toggleLike, toggleBookmark, type PostImageChange } from './useFeed';
 import { useFollow } from './useFollow';
 import { useMediaTokenRelease } from './useMediaTokenRelease';
 import { useReport } from './useReport';
@@ -226,6 +226,24 @@ export function OthersProfilePage() {
   );
 
   /*
+   * 收藏／取消收藏。與 handleLike 同一條路徑（見 FeedPage 的 handleBookmark
+   * 說明）：收藏是私人的，因此沒有數量要同步。
+   */
+  const handleBookmark = useCallback(
+    (post: ForumPost) => {
+      void (async () => {
+        try {
+          const bookmarked = await toggleBookmark(post.id);
+          patchPost(post.id, { bookmarked });
+        } catch (error) {
+          setFail(errorText(error, msg('error.fallbackBookmark')));
+        }
+      })();
+    },
+    [patchPost, setFail],
+  );
+
+  /*
    * 在這張卡上追蹤／取消追蹤之後，貼文區不需要重載 —— 這不是追蹤動態，
    * 貼文的篩選條件是「作者是這個人」，與我有沒有追蹤他無關。取消追蹤只影響
    * 頂部那顆面板按鈕與每張卡上的小鈕，而兩者的狀態都由同一個 follow
@@ -239,10 +257,10 @@ export function OthersProfilePage() {
    * 貼文，讓它可編輯才是正確的行為。
    */
   const handleUpdate = useCallback(
-    async (post: ForumPost, content: string) => {
+    async (post: ForumPost, content: string, imageChange?: PostImageChange) => {
       try {
-        const next = await updateForumPost(post.id, content);
-        patchPost(post.id, { content: next, edited: true });
+        const patch = await updateForumPost(post.id, content, imageChange);
+        patchPost(post.id, patch);
         setOk(msg('posts.edited'));
       } catch (error) {
         setFail(errorText(error, msg('posts.editFailed')));
@@ -262,6 +280,7 @@ export function OthersProfilePage() {
       report={report}
       follow={follow}
       onLike={handleLike}
+      onBookmark={handleBookmark}
       onUpdate={handleUpdate}
       onRequireLogin={goToLogin}
     />
