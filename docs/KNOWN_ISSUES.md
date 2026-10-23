@@ -380,8 +380,8 @@ https）未明確設定時，`config.Validate` 會讓**啟動被拒絕**，並�
 
 ### schema 沒有 migration 版本控制
 
-只有 idempotent 步驟（`CREATE TABLE IF NOT EXISTS`、`ALTER TABLE ... ADD COLUMN IF NOT
-EXISTS`、`INSERT IGNORE`），**沒有降級路徑**。
+只有 idempotent 步驟（`CREATE TABLE IF NOT EXISTS`、`INSERT IGNORE`，以及補欄位／
+補索引的 `information_schema` 探測），**沒有降級路徑**。
 
 好處是空資料庫直接啟動即可、不需手動匯入 SQL；代價是沒有辦法把 schema 降回去。
 

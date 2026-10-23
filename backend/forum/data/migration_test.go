@@ -7,8 +7,10 @@ ROADMAP.md 的 Phase 3.1 說得很直接：
 	go-sqlmock 驗證不了 DDL 真的能執行，miniredis 對 MySQL 沒有對應物
 
 原因不是工具不夠好，而是這個函式測的東西就是「MySQL 會不會接受這句 DDL」：
-  - ADD COLUMN IF NOT EXISTS 需要 MySQL 8.0.29+。在 sqlmock 上「通過」只代表
-    程式碼呼叫了它，而不代表任何一個 MySQL 版本接受它。
+  - `ADD COLUMN IF NOT EXISTS` 是 MariaDB 專屬語法，MySQL 8.x（本機實測 8.0.44）
+    對它回 ERROR 1064 並中止啟動 —— 而在 sqlmock 上「通過」只代表程式碼呼叫了那句
+    SQL，不代表任何一個 MySQL 版本接受它。開發用資料庫是 MariaDB 11.8（語法被
+    接受），因此這個差異只有真的跑過一次 MySQL 才會現形。
   - 部分步驟用 information_schema 探測。那些 SQL 的**結果**決定了後續步驟
     會不會執行 —— sqlmock 可以讓它回傳任何東西，因此它無法回答「一個已經有
     資料的資料庫會不會被正確升級」。

@@ -125,9 +125,14 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
 | Elasticsearch | 7.x / 8.x | 選用，留空則用 MySQL `LIKE` 搜尋 |
 | Google OAuth2 用戶端 | — | 登入與管理功能需要 |
 
-MySQL 的下限是 **8.0.29** 而不是籠統的「8.x」，因為 `MigrateMySQL` 用到
-`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` —— 這個語法在 8.0.29 之前不存在。在較舊的
-8.0 上啟動會在遷移時拿到 `ERROR 1064 (42000)`，行程在啟動時就死。
+MySQL 的下限是 **8.0.29** 而不是籠統的「8.x」：CI 以 `mysql:8.0.29` 服務容器持續
+驗證「下限版本真的能跑」，否則那個下限只在文件裡成立。
+
+`MigrateMySQL` 刻意**不**使用 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` —— 那是
+MariaDB 專屬語法，MySQL 8.x（本機實測 8.0.44）對它回 `ERROR 1064 (42000)`，行程在
+啟動時就死。補欄位一律走 `addColumnIfNotExists` 的「`information_schema` 探測 +
+建立 + 容忍 1060」，MySQL 與 MariaDB 都接受（2026-10-23 修復 migrations job 的根因：
+開發用資料庫是 MariaDB 11.8，差異只有真的跑過一次 MySQL 才會現形）。
 
 ## 快速開始
 

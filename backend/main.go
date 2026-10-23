@@ -271,7 +271,7 @@ func main() {
 	// 而 main 是唯一能確定「所有請求都結束」的時點。
 	defer db.Close()
 
-	// 啟動時執行 schema 遷移（CREATE TABLE IF NOT EXISTS / ADD COLUMN IF NOT EXISTS），
+	// 啟動時執行 schema 遷移（CREATE TABLE IF NOT EXISTS / 欄位與索引的 information_schema 探測），
 	// 讓部署不必另外跑 migration 步驟。刻意不引入版本號管理：代價是無法 downgrade，
 	// 且遷移語句必須永遠保持冪等，才能在每次啟動時安全重跑。
 	if err := data.MigrateMySQL(db); err != nil {

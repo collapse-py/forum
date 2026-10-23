@@ -28,7 +28,17 @@ import (
    ========================================================================== */
 
 func TestRemainingSecondsFloorsAtZero(t *testing.T) {
-	future := Entry{Expires: time.Now().Add(90 * time.Second)}
+	// Expires 刻意落在「90 整 + 0.5 秒」，而不是剛好 90 整。
+	//
+	// RemainingSeconds 是「呼叫當下」的 time.Until 再截斷（floor）。到期時間
+	// 剛好是 90.000000 時，兩次 time.Now() 之間任何微小流逝都會把它推到
+	// 89.999999 → 截成 89：Linux 上兩次 Now 必然不同（Windows 的時脈粒度讓
+	// 差值量化成 0，所以本地會過、CI 必紅 —— 2026-10-23 的 backend job 就
+	// 是死在 `RemainingSeconds = 89, want 90`）。
+	//
+	// 那不是實作的 bug，是斷言踩在截斷邊界上。0.5 秒緩衝把要測的事保留
+	// （未來到期 → 回傳整秒的剩餘時間），同時讓「時間會流逝」不再決定成敗。
+	future := Entry{Expires: time.Now().Add(90*time.Second + 500*time.Millisecond)}
 	if got := future.RemainingSeconds(); got != 90 {
 		t.Errorf("未來到期的 RemainingSeconds = %d, want 90", got)
 	}

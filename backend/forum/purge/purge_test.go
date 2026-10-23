@@ -140,7 +140,14 @@ func purgeTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("無法開啟連線: %v", err)
 	}
-	defer server.Close()
+	// 刻意用 t.Cleanup 而不是 defer：Cleanup 以 LIFO 執行，而下面的「DROP
+	// 拋棄式資料庫」也註冊在 Cleanup 裡。若這裡用 defer，server 會在函式返回時
+	// **先於** Cleanup 被關閉，DROP 於是在已關閉的連線池上執行、再被
+	// `_, _ =` 靜默吞掉 —— 症狀是每跑一次測試就在伺服器上留一個
+	// forum_purge_test_* 資料庫（2026-10-23 在本機 MySQL 實測留下 6 個，
+	// CI 的 runner 是一次性的所以沒有人看到）。註冊順序決定關閉順序：
+	// 這裡先註冊 ⇒ 最後才執行，DROP 因此在連線池還開著的時候發生。
+	t.Cleanup(func() { _ = server.Close() })
 	if err := server.Ping(); err != nil {
 		t.Fatalf("MySQL 連不上: %v", err)
 	}

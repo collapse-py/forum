@@ -345,6 +345,89 @@ func TestCovAddUniqueIndexIfNotExistsBranches(t *testing.T) {
 }
 
 /* ==========================================================================
+   columnAlreadyExists / addColumnIfNotExists
+   ========================================================================== */
+
+func TestCovColumnAlreadyExists(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"一般錯誤", errors.New("boom"), false},
+		{"1060 欄位已存在", &mysql.MySQLError{Number: 1060}, true},
+		{"包裝過的 1060", fmt.Errorf("alter failed: %w", &mysql.MySQLError{Number: 1060}), true},
+		{"1061 是索引的錯不是欄位的", &mysql.MySQLError{Number: 1061}, false},
+		{"1064 語法錯誤：不可被當成「已存在」吞掉", &mysql.MySQLError{Number: 1064}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := columnAlreadyExists(c.err); got != c.want {
+				t.Fatalf("columnAlreadyExists(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// addColumnIfNotExists 的分支測試與 addIndexIfNotExists 一一對應：兩者的冪等性
+// 是同一套承諾（探測 + 建立 + 容忍另一個實例先完成），因此漏掉任何一邊的分支
+// 都代表同一種防線在兩處有不同的覆蓋。
+//
+// 1064 那條分支是 2026-10-23 那次 CI 失敗的原始現場：遷移若寫回
+// `ADD COLUMN IF NOT EXISTS`（MariaDB 專屬），MySQL 收到的就是 1064，
+// 而它**必須**讓遷移失敗 —— 被吞掉的話，缺欄位會在第一個請求時才以 500 浮現。
+func TestCovAddColumnIfNotExistsBranches(t *testing.T) {
+	t.Run("欄位已存在：不執行 ALTER", func(t *testing.T) {
+		db, src := covDataDB(t)
+		src.addQuery(covDataQueryRule{substr: "information_schema", cols: []string{"n"}, rows: [][]covDataValue{{int64(1)}}})
+		if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err != nil {
+			t.Fatalf("addColumnIfNotExists: %v", err)
+		}
+		if src.saw("ADD COLUMN image_url") {
+			t.Errorf("欄位已存在時不應再送出 ALTER")
+		}
+	})
+
+	t.Run("不存在：執行 ALTER", func(t *testing.T) {
+		db, src := covDataDB(t)
+		covDataCountZero(src)
+		if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err != nil {
+			t.Fatalf("addColumnIfNotExists: %v", err)
+		}
+		if !src.saw("ALTER TABLE forum_posts ADD COLUMN image_url TEXT NOT NULL") {
+			t.Errorf("不存在時應送出 ALTER")
+		}
+	})
+
+	t.Run("探測失敗：回傳錯誤", func(t *testing.T) {
+		db, src := covDataDB(t)
+		src.addQuery(covDataQueryRule{substr: "information_schema", err: errors.New("metadata locked")})
+		if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err == nil {
+			t.Fatal("探測失敗時應回傳錯誤")
+		}
+	})
+
+	t.Run("ALTER 失敗（非 1060）：回傳錯誤", func(t *testing.T) {
+		db, src := covDataDB(t)
+		covDataCountZero(src)
+		src.addExec(covDataExecRule{substr: "ADD COLUMN image_url", err: errors.New("syntax error")})
+		if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err == nil {
+			t.Fatal("ALTER 失敗時應回傳錯誤")
+		}
+	})
+
+	t.Run("ALTER 撞到併發 1060：視為成功", func(t *testing.T) {
+		db, src := covDataDB(t)
+		covDataCountZero(src)
+		src.addExec(covDataExecRule{substr: "ADD COLUMN image_url", err: &mysql.MySQLError{Number: 1060}})
+		if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err != nil {
+			t.Fatalf("1060 應被容忍（另一個實例先補好了）, got %v", err)
+		}
+	})
+}
+
+/* ==========================================================================
    MigrateMySQL
    ========================================================================== */
 
@@ -367,7 +450,7 @@ func TestCovMigrateMySQLRunsAllSteps(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS forum_posts",
 		"CREATE TABLE IF NOT EXISTS forum_notifications",
 		"CREATE TABLE IF NOT EXISTS forum_daily_stats",
-		"ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS avatar_url",
+		"ALTER TABLE forum_profiles ADD COLUMN avatar_url",
 		"ADD INDEX idx_forum_posts_feed",
 		"ADD UNIQUE INDEX uq_forum_profiles_nickname",
 		"ADD INDEX idx_forum_posts_deleted_at_id",
@@ -416,10 +499,14 @@ func TestCovMigrateMySQLLegacyBranches(t *testing.T) {
 }
 
 func TestCovMigrateMySQLProbeErrors(t *testing.T) {
+	// 'image_url' 是 addColumnIfNotExists 的探測（其餘三個是第 6/7/8 步的探測）：
+	// 兩種探測都必須在失敗時中止遷移，否則「某個欄位補不補得上」會靜默取決於
+	// information_schema 恰好回什麼。
 	for _, probe := range []string{
 		"COLUMN_NAME = 'author_email'",
 		"COLUMN_NAME = 'user_email'",
 		"COLUMN_NAME = 'title'",
+		"COLUMN_NAME = 'image_url'",
 	} {
 		t.Run(probe, func(t *testing.T) {
 			db, src := covDataDB(t)
@@ -441,7 +528,7 @@ func TestCovMigrateMySQLExecErrors(t *testing.T) {
 		probe string // 非空時讓該舊欄位探測回報「存在」
 	}{
 		{"建立貼文表", "CREATE TABLE IF NOT EXISTS forum_posts", ""},
-		{"補 image_url", "ADD COLUMN IF NOT EXISTS image_url", ""},
+		{"補 image_url", "ADD COLUMN image_url", ""},
 		{"建立按讚表", "CREATE TABLE IF NOT EXISTS forum_post_likes", ""},
 		{"建立留言表", "CREATE TABLE IF NOT EXISTS forum_post_comments", ""},
 		{"建立檢舉表", "CREATE TABLE IF NOT EXISTS forum_reports", ""},
@@ -454,8 +541,8 @@ func TestCovMigrateMySQLExecErrors(t *testing.T) {
 		{"建立標籤字典", "CREATE TABLE IF NOT EXISTS forum_user_tags", ""},
 		{"建立標籤關聯", "CREATE TABLE IF NOT EXISTS forum_user_tag_assignments", ""},
 		{"回填使用者", "INSERT IGNORE INTO forum_users", ""},
-		{"補 bio", "ADD COLUMN IF NOT EXISTS bio", ""},
-		{"補 public_key", "ADD COLUMN IF NOT EXISTS public_key", ""},
+		{"補 bio", "ADD COLUMN bio", ""},
+		{"補 public_key", "ADD COLUMN public_key", ""},
 		{"回填 public_key", "UPDATE forum_profiles SET public_key", ""},
 		{"暱稱唯一索引", "ADD UNIQUE INDEX uq_forum_profiles_nickname", ""},
 		{"搬移 image_url", "UPDATE forum_posts", ""},
@@ -466,16 +553,16 @@ func TestCovMigrateMySQLExecErrors(t *testing.T) {
 		{"建立稽核表", "CREATE TABLE IF NOT EXISTS forum_admin_actions", ""},
 		{"users.created_at 索引", "ADD INDEX idx_forum_users_created_at", ""},
 		{"建立公告表", "CREATE TABLE IF NOT EXISTS forum_announcements", ""},
-		{"補 pinned", "ADD COLUMN IF NOT EXISTS pinned", ""},
+		{"補 pinned", "ADD COLUMN pinned", ""},
 		{"feed 索引", "ADD INDEX idx_forum_posts_feed", ""},
 		{"comments.author_email 索引", "ADD INDEX idx_forum_post_comments_author_email", ""},
 		{"likes.created_at 索引", "ADD INDEX idx_forum_post_likes_created_at", ""},
-		{"補貼文 updated_at", "ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER pinned", ""},
-		{"補留言 updated_at", "ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER created_at", ""},
-		{"補 avatar_url", "ADD COLUMN IF NOT EXISTS avatar_url", ""},
-		{"補 deleted_at", "ADD COLUMN IF NOT EXISTS deleted_at", ""},
-		{"補 parent_id", "ADD COLUMN IF NOT EXISTS parent_id", ""},
-		{"補 depth", "ADD COLUMN IF NOT EXISTS depth", ""},
+		{"補貼文 updated_at", "ADD COLUMN updated_at DATETIME NULL AFTER pinned", ""},
+		{"補留言 updated_at", "ADD COLUMN updated_at DATETIME NULL AFTER created_at", ""},
+		{"補 avatar_url", "ADD COLUMN avatar_url", ""},
+		{"補 deleted_at", "ADD COLUMN deleted_at", ""},
+		{"補 parent_id", "ADD COLUMN parent_id", ""},
+		{"補 depth", "ADD COLUMN depth", ""},
 		{"建立通知表", "CREATE TABLE IF NOT EXISTS forum_notifications", ""},
 		{"建立媒體表", "CREATE TABLE IF NOT EXISTS forum_media", ""},
 		{"建立收藏表", "CREATE TABLE IF NOT EXISTS forum_post_bookmarks", ""},

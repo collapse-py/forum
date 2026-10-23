@@ -37,11 +37,13 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
     製造「以為有原子性、實際沒有」的假象。加上 DDL 在 MySQL 中會取得隱式鎖，線性執行反而能
     避免兩個實例同時啟動時互相鎖住 metadata 而死鎖。代價是遷移中途失敗會留下半套 schema，
     但因為每一步都是冪等的，下一次啟動會自動補齊剩餘步驟。
- 2. 所有 DDL 儘量使用 IF NOT EXISTS 語法，讓 MigrateMySQL 可以安全地重複執行（啟動時必定會
-    執行一次）。仍舊需要 information_schema 探測的步驟，是因為舊版 MySQL 沒有
-    DROP COLUMN IF EXISTS / 唯一索引「不存在才建立」這類語法。探測與建立之間的窗口
-    （兩個實例同時啟動時會被命中）由 addIndexIfNotExists / addUniqueIndexIfNotExists
-    容忍 Error 1061 補上 —— 見 TestMigrateMySQLIsSafeWithConcurrentStartup。
+ 2. 冪等性有兩個來源，分工是「伺服器支援的用語法、不支援的用探測」：
+    CREATE TABLE IF NOT EXISTS 與 INSERT IGNORE 直接用語法；**補欄位與補索引**一律走
+    addColumnIfNotExists / addIndexIfNotExists 的「information_schema 探測 + 建立」，
+    因為 MySQL 沒有 ADD COLUMN IF NOT EXISTS（那是 MariaDB 專屬語法，MySQL 8.x 對它
+    回 ERROR 1064）、沒有 ADD INDEX IF NOT EXISTS，也沒有 DROP COLUMN IF EXISTS。
+    探測與建立之間的窗口（兩個實例同時啟動時會被命中）由容忍 Error 1060（欄位）
+    與 1061（索引）補上 —— 見 TestMigrateMySQLIsSafeWithConcurrentStartup。
  3. 全部資料表統一 ENGINE=InnoDB（交易與外鍵語意）與 DEFAULT CHARSET=utf8mb4。utf8mb4 是
     完整 Unicode（含 emoji 與 4-byte supplementary 平面），論壇內文屬使用者輸入，用舊的 utf8
     （MySQL 的 3-byte utf8mb3）會在寫入時直接報錯。
@@ -131,6 +133,56 @@ func addUniqueIndexIfNotExists(db *sql.DB, table, index, columns string) error {
 	return nil
 }
 
+// columnAlreadyExists 判斷一個 ALTER TABLE … ADD COLUMN 的錯誤是不是
+// 「欄位已經存在」的 Error 1060（MySQL 與 MariaDB 一樣）。
+//
+// 為什麼需要它：`ADD COLUMN IF NOT EXISTS` 是 **MariaDB 專屬**語法。MySQL 8.x 對它
+// 一律回 ERROR 1064（本機實測 8.0.44、CI 的 8.0.29 皆然），而這個專案的目標是
+// MySQL —— 2026-10-23 之前的遷移正是踩在這裡：開發用資料庫是 MariaDB 11.8（語法
+// 被接受，因此本機開發從來沒事），CI 的 mysql:8.0.29 上整批遷移測試全紅。兩種
+// 伺服器都能接受的寫法只有「探測 + 建立」。
+//
+// 1060 的語意與索引那邊的 1061 相同：探測與建立之間的窗口被另一個實例填滿，
+// 「對方先補好了」正是我們要的結果，因此它必須走成功而不是失敗。
+//
+// 反面（刻意不處理）：欄位已存在但**型別**與預期不符時不會被發現。那是檔頭第 4 點
+// 的 schema 漂移風險，不在此處的範圍 —— 在這裡改型別是 DDL、失去回滾機會，而且
+// 沒有訊號能區分「人工改過」與「舊版本本來就長這樣」。
+func columnAlreadyExists(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1060
+}
+
+// addColumnIfNotExists 以「探測 + 建立 + 容忍併發 1060」補上一個欄位。
+//
+// 是 addIndexIfNotExists 的欄位版，理由也相同：冪等性由這一個函式負責，呼叫端只
+// 描述「我要哪個欄位、它長什麼樣」。手寫探測的代價不是行數，而是「其中一處忘了
+// 容忍 1060」這種只會在兩個實例同時啟動時現身的差異。
+//
+// definition 是欄位定義本身（"TEXT NOT NULL"、"DATETIME NULL AFTER pinned"），
+// 因此 AFTER 這類位置子句也由呼叫端表達。table / column 是本檔的字面值，與索引的
+// DDL 一樣以字串組接（DDL 無法參數化）；探測查詢刻意也把它們寫成字面值而非
+// 綁定參數 —— 這樣「哪個欄位的探測掛了」會直接出現在錯誤輸出與測試規則裡。
+func addColumnIfNotExists(db *sql.DB, table, column, definition string) error {
+	var count int
+	if err := db.QueryRow(fmt.Sprintf(`
+		SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = '%s'
+	`, table, column)).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition); err != nil {
+		if columnAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // OpenMySQL 依傳入的 DSN 建立 *sql.DB 連線池，並設定連線池的容量與存活期限。
 //
 // 參數：
@@ -179,8 +231,9 @@ func OpenMySQL(dsn string, maxOpenConns, maxIdleConns int, connMaxLifetime time.
 // 由於 DDL 在 MySQL 具隱含提交語意，無法回滾，因此不做交易包裝；呼叫端（main）收到
 // 錯誤後直接 Fatal 結束行程，由下一次啟動重跑已冪等的遷移。
 //
-// 冪等性來源：CREATE TABLE IF NOT EXISTS、ALTER TABLE ... ADD COLUMN IF NOT EXISTS、
-// INSERT IGNORE，以及針對「舊版欄位是否存在」與「索引是否存在」的 information_schema 探測。
+// 冪等性來源：CREATE TABLE IF NOT EXISTS、INSERT IGNORE，以及
+// addColumnIfNotExists / addIndexIfNotExists 對「欄位、舊版欄位、索引是否存在」的
+// information_schema 探測（MySQL 沒有 ADD COLUMN IF NOT EXISTS —— 那是 MariaDB 專屬）。
 //
 // 錯誤條件：db 為 nil、回傳錯誤的 SQL 語法錯誤、權限不足（缺少 ALTER 權限）、
 // 或 DDL 對應的資料表已存在但結構衝突（例如既有索引名稱重複）。
@@ -216,7 +269,7 @@ func MigrateMySQL(db *sql.DB) error {
 	}
 
 	// 2) image_url 為後來新增的需求（先發文、圖片由獨立的檔案伺服器保管），
-	//    因此以 ADD COLUMN IF NOT EXISTS 追加，而非改建表。
+	//    因此以 addColumnIfNotExists 追加，而非改建表。
 	//    選 TEXT 而非 VARCHAR：沿用當初「存完整 URL、長度不可預期」的型別，
 	//    即使現在只存檔名也不改——改欄位型別是 DDL、失去回滾機會，
 	//    對一個上限 128 字元的值並不划算。
@@ -224,9 +277,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//    FILES_SERVER_PUBLIC_URL 組成；舊資料的轉換見第 18 步。
 	//    宣告 NOT NULL 卻未給 DEFAULT，代表所有既有列在 MySQL 嚴格模式下會被填入空字串
 	//    （DDL 會以列層級的隱式預設值補齊），因此 createForumPost 仍需顯式傳入值。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_posts ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err != nil {
 		return err
 	}
 
@@ -307,19 +358,10 @@ func MigrateMySQL(db *sql.DB) error {
 	//    （避免誤查到同名的其他資料庫），再用 TABLE_NAME 與 COLUMN_NAME 過濾。
 	//    這是必要的，因為 MySQL 沒有「ADD COLUMN IF NOT EXISTS」可用於比對既有欄位型別的情境
 	//    （此處的 author_email 為 NOT NULL，必須帶 DEFAULT '' 才能在有資料的表上成功）。
-	var authorEmailColumnCount int
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_post_likes' AND COLUMN_NAME = 'author_email'
-	`).Scan(&authorEmailColumnCount); err != nil {
+	// 探測與容忍 1060 由 addColumnIfNotExists 負責（它送出的 SQL 與過去手寫探測的
+	// 版本逐字相同），這裡只需要描述欄位定義本身。
+	if err := addColumnIfNotExists(db, "forum_post_likes", "author_email", "VARCHAR(255) NOT NULL DEFAULT ''"); err != nil {
 		return err
-	}
-	if authorEmailColumnCount == 0 {
-		// NOT NULL 欄位在已有資料的表上新增時必須提供 DEFAULT ''，否則 MySQL 會以
-		// strict mode 直接讓整句 DDL 失敗（Error 1364）。
-		if _, err := db.Exec(`ALTER TABLE forum_post_likes ADD COLUMN author_email VARCHAR(255) NOT NULL DEFAULT ''`); err != nil {
-			return err
-		}
 	}
 
 	// 7) 舊欄位遷移：user_email → author_email。
@@ -459,16 +501,12 @@ func MigrateMySQL(db *sql.DB) error {
 
 	// 14) forum_profiles 的欄位補齊，理由同第 6 步：CREATE TABLE IF NOT EXISTS 對既有表無效。
 	//     bio 為 NOT NULL TEXT，新增加到已有資料的表時 MySQL 會填入空字串。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_profiles", "bio", "TEXT NOT NULL"); err != nil {
 		return err
 	}
 
 	// 15) public_key 補欄位（新增需求：訪客以雜湊值查公開頁面）。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS public_key VARCHAR(64) NOT NULL DEFAULT '';
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_profiles", "public_key", "VARCHAR(64) NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 
@@ -745,13 +783,10 @@ func MigrateMySQL(db *sql.DB) error {
 	//     profile 的貼文列表與管理端的多處查詢都只按 created_at 排序，
 	//     那些地方不該為了支援置頂而多付一個無法命中的索引。
 	//
-	//     欄位與索引拆成兩句：欄位用 ADD COLUMN IF NOT EXISTS（同第 14、15 步），
+	//     欄位與索引拆成兩句：欄位走 addColumnIfNotExists（同第 14、15 步），
 	//     索引則交給 addIndexIfNotExists —— 兩者混在一句 ALTER 裡的話，第二次
 	//     啟動會因重複的 key 名稱（1061）讓整個遷移失敗，而主流程會因此 Fatal。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_posts
-			ADD COLUMN IF NOT EXISTS pinned TINYINT NOT NULL DEFAULT 0 AFTER image_url;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_posts", "pinned", "TINYINT NOT NULL DEFAULT 0 AFTER image_url"); err != nil {
 		return err
 	}
 	//     索引同樣走 addIndexIfNotExists：探測與建立之間的窗口在兩個實例同時
@@ -839,16 +874,10 @@ func MigrateMySQL(db *sql.DB) error {
 	//     而那一定已經有 id 等值條件走主鍵。為此在「最熱的表」上加一個只服務
 	//     單一列讀取的索引，與第 24 步不為熱門作者排行加 author_email 索引是
 	//     同一個判斷。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_posts
-			ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER pinned;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_posts", "updated_at", "DATETIME NULL AFTER pinned"); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`
-		ALTER TABLE forum_post_comments
-			ADD COLUMN IF NOT EXISTS updated_at DATETIME NULL AFTER created_at;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_post_comments", "updated_at", "DATETIME NULL AFTER created_at"); err != nil {
 		return err
 	}
 
@@ -877,9 +906,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//     選 TEXT 而非 VARCHAR：沿用 image_url 的型別決定（長度不可預期的舊契約
 	//     留下的形狀），對一個上限 128 字元的值不改欄位型別 —— 改型別是 DDL、
 	//     失去回滾機會，並不划算。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_profiles", "avatar_url", "TEXT NOT NULL"); err != nil {
 		return err
 	}
 
@@ -915,10 +942,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//     而清理排程（forum/purge）接管了它 —— 保留期由 POST_RETENTION_DAYS
 	//     決定（預設 90 天），到期後連留言／按讚／收藏／檢舉與不再被引用的
 	//     附圖一併清掉。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_posts
-			ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL AFTER updated_at;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_posts", "deleted_at", "DATETIME NULL AFTER updated_at"); err != nil {
 		return err
 	}
 
@@ -951,19 +975,13 @@ func MigrateMySQL(db *sql.DB) error {
 	//     NOT NULL + DEFAULT 讓既有資料自動成為「depth=1 的第一層留言」—— 那正是
 	//     它們在這個功能之前的樣子，回填作業等於不存在。
 	//
-	//     各自一句 ALTER 而非併成一句：兩條都用 ADD COLUMN IF NOT EXISTS，分開寫
+	//     各自一句 ALTER 而非併成一句：兩條都走 addColumnIfNotExists，分開寫
 	//     讓「只補了其中一欄」的狀態可被敘述（下次啟動會補上另一欄），合併後
 	//     其中一欄已存在時整句的行為需要另外查證。
-	if _, err := db.Exec(`
-		ALTER TABLE forum_post_comments
-			ADD COLUMN IF NOT EXISTS parent_id BIGINT NOT NULL DEFAULT 0 AFTER post_id;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_post_comments", "parent_id", "BIGINT NOT NULL DEFAULT 0 AFTER post_id"); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`
-		ALTER TABLE forum_post_comments
-			ADD COLUMN IF NOT EXISTS depth TINYINT NOT NULL DEFAULT 1 AFTER parent_id;
-	`); err != nil {
+	if err := addColumnIfNotExists(db, "forum_post_comments", "depth", "TINYINT NOT NULL DEFAULT 1 AFTER parent_id"); err != nil {
 		return err
 	}
 

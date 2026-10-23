@@ -1,6 +1,6 @@
 # 資料庫
 
-MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.MigrateMySQL` 是一連串 idempotent 步驟（`CREATE TABLE IF NOT EXISTS`、`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`、`INSERT IGNORE`），所以空資料庫直接啟動即可，不需手動匯入 SQL。沒有版本化的 migration，也沒有降級路徑。
+MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.MigrateMySQL` 是一連串 idempotent 步驟（`CREATE TABLE IF NOT EXISTS`、`INSERT IGNORE`，以及補欄位／補索引的 `information_schema` 探測 —— MySQL 沒有 `ADD COLUMN IF NOT EXISTS`，那是 MariaDB 專屬語法），所以空資料庫直接啟動即可，不需手動匯入 SQL。沒有版本化的 migration，也沒有降級路徑。
 
 - [資料表](#資料表)
 - [沒有 session 表](#沒有-session-表)

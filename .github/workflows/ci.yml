@@ -334,9 +334,14 @@ jobs:
       run:
         working-directory: backend
     services:
-      # 8.0.29 是下限不是偏好：ADD COLUMN IF NOT EXISTS 需要它，而那正是
-      # MigrateMySQL 裡反覆用到的語法。選這個版本等於讓 CI 持續驗證「下限
-      # 版本真的能跑」，否則那個下限只在文件裡成立。
+      # 8.0.29 是下限不是偏好（README 宣稱的最低版本）：選這個版本等於讓 CI
+      # 持續驗證「下限版本真的能跑」，否則那個下限只在文件裡成立。
+      #
+      # 這裡曾寫「ADD COLUMN IF NOT EXISTS 需要 8.0.29，而那正是 MigrateMySQL
+      # 反覆用到的語法」—— 那句話本身是錯的：那是 MariaDB 專屬語法，MySQL 8.x
+      # 對它一律回 ERROR 1064（8.0.44 實測），而這個 job 因為 backend 先紅而從
+      # 未真正執行過，因此沒有任何 CI 訊號暴露它。補欄位現在走 addColumnIfNotExists
+      # 的「information_schema 探測 + 建立 + 容忍 1060」，MySQL 與 MariaDB 皆可。
       #
       # 刻意用 services: 而不是 testcontainers：CI 已經在容器裡了，這個區塊
       # 比在測試程式裡起一個容器更簡單也更可靠，而且失敗時診斷容易得多。
