@@ -38,6 +38,12 @@
 	閱讀器的定期輪詢幾乎不傳輸內容；內容一變（新貼文、編輯、刪除、還原）
 	雜湊就變，不會給出過期的 304。
 
+	Cache-Control 是 **private**（不是 public），而且回應上沒有
+	Set-Cookie —— 這兩件事是同一個理由：每個請求都會經過 session 續期的
+	middleware，續期會寫入帶 session token 的 Set-Cookie；若這份回應被
+	共享快取存下來，任何訪客都會拿到登入者的 token。細節與 RFC 依據見
+	handleForumRSS 裡 Cache-Control 那一段的註解。
+
 	「內容沒變」的前提是文件裡沒有任何欄位會自己變動。lastBuildDate 因此
 	由**最新一則貼文的時間**推導，而不是產生回應的時刻（見下方的組稿處）——
 	後者會讓每一次請求的雜湊都不同，304 永遠不會發生，而症狀只是閱讀器
@@ -214,8 +220,33 @@ func (s *Server) handleForumRSS(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256([]byte(payload))
 	etag := `"` + hex.EncodeToString(sum[:]) + `"`
 	w.Header().Set("ETag", etag)
-	// 5 分鐘：公開內容，允許中間快取；閱讀器多半自己也會照這個節奏輪詢。
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	//
+	// Cache-Control 刻意是 **private** 而不是 public。
+	//
+	// 每一個請求（包含這一個）都會經過最外層的 session 續期 middleware，
+	// 而續期會在回應上寫入 `Set-Cookie: <session token>`（見 session.go 的
+	// Manager.Refresh）。回應內容本身是公開的、與登入狀態無關，但**表頭不是**：
+	// 那個 Set-Cookie 帶的就是使用者的 session token。
+	//
+	// 若這裡寫 public，共享快取（nginx / Caddy / Cloudflare —— 這個專案的
+	// 部署模型裡它們是標配）就會依 RFC 9111 §3 把回應存下來，而 §3.1 要求
+	// 「快取必須連同它收到的所有回應表頭一起存」，Set-Cookie 也在內。
+	// 這個回應沒有 Vary: Cookie，因此 cookie 不在 cache key 裡（RFC 9111 §4），
+	// 於是任何訪客都會拿到**登入者**的 session token —— 完整帳號接管。
+	//
+	// private 讓共享快取不得存放（RFC 9111 §3：共享快取遇到 private 就不能
+	// 存），閱讀器的私人快取仍然可以存 —— 那是「同一個使用者自己的」快取，
+	// 沒有跨使用者外洩的風險，而 ETag 帶來的 304 好處仍在。
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	//
+	// 再多一道保險：把續期寫進來的 Set-Cookie 拿掉。閱讀器不需要 session
+	// 續期（它不是瀏覽器工作階段），而帶著 token 的 Set-Cookie 存進任何
+	// 快取都是不必要的風險。拿掉之後，這個回應裡沒有任何與登入狀態有關的
+	// 資料 —— 即使有代理沒有遵守 private，它存的也只是一份公開的 feed。
+	//
+	// 續期本身不受影響：使用者下一次載入任何頁面時都會續到，而 session 的
+	// 滑動續期靠的是「每個請求」而不是「每一種請求」。
+	w.Header().Del("Set-Cookie")
 	if r.Header.Get("If-None-Match") == etag {
 		// 304 不帶 Content-Type 與 Content-Length：帶了會讓某些客戶端把
 		// 304 當成有 body 的回應來讀。

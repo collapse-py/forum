@@ -183,8 +183,10 @@ services:
       # 需要從主機測試時用 `docker compose exec backend /app/forum -healthz`，
       # 那比開一個 port 更能回答「它能不能用」。
       - "8088"
-    # 20 秒，且必須大於 SHUTDOWN_TIMEOUT_SECONDS（預設 15 秒）。
-    # 詳細理由見本檔檔頭與 backend/forum/config 的說明。
+    # 20 秒，且必須大於 SHUTDOWN_TIMEOUT_SECONDS + 最後收尾（預設 15 + 3）。
+    # 關機時 Shutdown 最多用 15 秒排空請求；背景工作與最後一次分鐘彙總
+    # **併行**收尾，各 3 秒。兩者併行後的總上限是 18 秒，留 2 秒給訊號
+    # 處理與關閉連線。若把 SHUTDOWN_TIMEOUT_SECONDS 調大，這裡也要一起調大。詳細理由見本檔檔頭與 backend/forum/config 的說明。
     #
     # 部署者必須在 backend/config/config.conf 裡設定的值（compose 無法代勞，
     # 因為那個檔是 bind mount 進去的應用層設定檔）：
@@ -195,11 +197,14 @@ services:
       # 呼叫執行檔自己的 -healthz，而不是 curl。backend 映像是 distroless，
       # 沒有 shell 也沒有 curl（見 backend/Dockerfile 的檔頭）。
       #
-      # timeout 5s 必須大於 -healthz 內部的 2 秒探測期限，
-      # 否則結果會是「探測被中斷」而那與「相依不可用」無法區分。
+      # -healthz 依序探測 MySQL 與 Redis，每個的內部期限是 2 秒，最壞合計
+      # 4 秒。timeout 只留 1 秒餘裕（舊值 5s）時，容器排程抖動就會讓探測
+      # 在第二個相依完成前被中斷 —— 而 Docker 只會說「healthcheck timed
+      # out」，與「相依不可用」無法區分。8 秒留給探測 4 秒 + 行程啟動與
+      # 排程延遲 4 秒。
       test: ["CMD", "/app/forum", "-healthz"]
       interval: 30s
-      timeout: 5s
+      timeout: 8s
       retries: 3
       start_period: 40s
     networks:

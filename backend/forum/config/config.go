@@ -163,7 +163,7 @@ import (
 // 換環境就會失效，錯設定一個預設值只會讓人以為有搜尋功能其實打到別台機器。
 // ESIndex 是貼文索引名稱。沿用舊版主站 config.conf 的 ES_INDEX 一詞，預設
 // forum_posts；它必須與 ES 上既有的其他索引（例如舊功能的 history_posts）
-// 不同名，否則兩種資料會混在同一个索引裡互相覆蓋。
+// 不同名，否則兩種資料會混在同一個索引裡互相覆蓋。
 // ESUsername 與 ESPassword 是連線 ES 用的 Basic Auth 帳密，ESPassword 留空代表
 // 「這台 ES 沒有啟用安全性」。與 DB_DSN、GOOGLE_CLIENT_SECRET 一樣以明文載入且
 // 不支援環境變數（見 FilesServerToken 的說明）：設定檔已經在 .gitignore 裡，
@@ -240,6 +240,14 @@ type Config struct {
 	ForumDescription      string   // FORUM_DESCRIPTION（manifest 說明，留空＝沿用 ForumName）
 }
 
+// maxLogFiles 是 LOG_MAX_FILES 的硬上限。
+//
+// 輪替一次要從 .maxFiles 往 .1 逐檔改名；沒有上限時，設定檔裡的一個大數字
+// （例如 100000000）會讓每次輪替跑上億次 rename，整個服務卡死。1000 遠高
+// 於實務需求（預設 5），又讓最壞情況有界。logger.Init 也有一道相同的防禦
+// 性夾制，因為它可能被 config 以外的呼叫端直接使用。
+const maxLogFiles = 1000
+
 // Load 讀取並解析 path 指向的設定檔，回傳套用預設值後的 Config。
 //
 // path 必須是檔案系統上的完整路徑，由呼叫端組裝（main 使用相對於工作目錄的
@@ -269,7 +277,7 @@ func Load(path string) (Config, error) {
 	cfg.RateLimitUploadWindow = time.Minute
 	cfg.RateLimitAuthRequests = 10
 	cfg.RateLimitAuthWindow = time.Minute
-	// 日誌輪替的預設值也在这里預先寫入，而不是在 applyDefaults 兜底：
+	// 日誌輪替的預設值也在這裡預先寫入，而不是在 applyDefaults 兜底：
 	// LOG_MAX_SIZE_MB 的 0 是合法的「不輪替」，而 applyDefaults 的兜底
 	// 無法分辨「明確設成 0」與「沒有設定」—— 預先寫入讓明確的 0 能保留。
 	cfg.LogMaxSizeMB = 50
@@ -468,14 +476,19 @@ func Load(path string) (Config, error) {
 			}
 		case "LOG_MAX_SIZE_MB":
 			// 0 是合法的「不輪替」：沿用舊行為（無限追加）。只有正數才算設定
-			// 一個輪替上限，因此这里用 parseNonNegativeInt 而非 parsePositiveInt。
+			// 一個輪替上限，因此這裡用 parseNonNegativeInt 而非 parsePositiveInt。
 			if mb, ok := parseNonNegativeInt(val); ok {
 				cfg.LogMaxSizeMB = mb
 			}
 		case "LOG_MAX_FILES":
 			// 只接受正數：保留 0 個輪替檔等於「每次輪替直接丟掉舊檔」，那是
-			// 比「不輪替」更糟的資料損失，不是一個值得靜默接受的值。
+			// 比「不輪替」更糟的資料損失，不是一個值得靜默接受的值。超過
+			// maxLogFiles 時以最大值計，避免輪替的 rename 迴圈隨設定值
+			// 無界成長。
 			if n, ok := parsePositiveInt(val); ok {
+				if n > maxLogFiles {
+					n = maxLogFiles
+				}
 				cfg.LogMaxFiles = n
 			}
 		case "FORUM_NAME":

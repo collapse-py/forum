@@ -49,7 +49,7 @@ import (
 //
 // 這是這個套件唯一能觀察輸出的方式：logf → logWithContext 寫進 std.logger，
 // 而 std.logger 是一個 *log.Logger。直接改 std.logger 可以，但必須同時把
-// mutex 拿對 —— 因此包成一個 helper，讓每支測試都不必重複那段容易出错的
+// mutex 拿對 —— 因此包成一個 helper，讓每支測試都不必重複那段容易出錯的
 // 取代與還原。
 func capture(t *testing.T) *syncBuffer {
 	t.Helper()
@@ -486,6 +486,7 @@ func TestAccessLogOmitsCallerAndDuplicateRequestID(t *testing.T) {
 		t.Errorf("存取記錄的訊息形狀不對:\n%s", out)
 	}
 }
+
 // TestSanitizeLogValueFieldsAreQuoted 守住 text 輸出的欄位引號化。
 //
 // 本測試取代了舊的 TestSanitizeLogValueKeepsColumnFormUnambiguous。那時的結論是
@@ -652,6 +653,40 @@ func TestInitReportsUnopenableFile(t *testing.T) {
 	}
 }
 
+// TestInitClampsMaxFiles 釘住 LOG_MAX_FILES 的硬上限。
+//
+// 沒有上限時，Init 的一個大數字會讓每次輪替跑上億次 rename（見
+// maxFilesLimit 的說明）—— 症狀是服務在換檔那一刻卡死，而不是一個
+// 可以從日誌看出來的錯誤。
+func TestInitClampsMaxFiles(t *testing.T) {
+	// TempDir 必須先呼叫：它的清理函式比下面這個晚註冊，LIFO 下會先執行
+	// TempDir 的 RemoveAll；若檔案句柄還沒關，Windows 會讓清理失敗。
+	path := filepath.Join(t.TempDir(), "forum.log")
+	t.Cleanup(func() {
+		Close()
+		std.mu.Lock()
+		std.logger = log.New(os.Stdout, "", 0)
+		std.file = nil
+		std.format = "text"
+		std.level = INFO
+		std.maxBytes = 0
+		std.maxFiles = 0
+		std.written = 0
+		std.mu.Unlock()
+	})
+
+	if err := Init("INFO", path, "text", 0, maxFilesLimit+1); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	std.mu.Lock()
+	got := std.maxFiles
+	std.mu.Unlock()
+	if got != maxFilesLimit {
+		t.Errorf("maxFiles = %d, want %d（硬上限）", got, maxFilesLimit)
+	}
+}
+
 // TestInitWritesToFile 覆蓋 Init 成功開檔的那一條路徑。
 //
 // 同時驗證兩件事：檔案真的收到內容、以及重新 Init 不會讓檔案描述符洩漏
@@ -726,12 +761,12 @@ func TestCloseIsIdempotent(t *testing.T) {
 // 增長是 docs/KNOWN_ISSUES.md 記錄的缺口。這支測試驗三件事：
 //
 //  1. 超過上限時目前檔被改名 .1，並重新開檔（目前檔變小）。
-//  2. 輪替檔依序推移：第二次換檔时 .1 变成 .2。
-//  3. 輪替檔數被 maxFiles 封顶：不存在 .3。
+//  2. 輪替檔依序推移：第二次換檔時 .1 變成 .2。
+//  3. 輪替檔數被 maxFiles 封頂：不存在 .3。
 //
-// 阈值刻意在 Init 之後直接改 std.maxBytes：Init 的參數單位是 MB，而測試
-// 不想寫一 MB 的日誌才能触发第一次輪替。改的是同一個欄位，語意與 config
-// 傳入的 MB 值经过 Init 換算後完全相同。
+// 閾值刻意在 Init 之後直接改 std.maxBytes：Init 的參數單位是 MB，而測試
+// 不想寫一 MB 的日誌才能觸發第一次輪替。改的是同一個欄位，語意與 config
+// 傳入的 MB 值經過 Init 換算後完全相同。
 func TestLogRotationRotatesAndCapsFiles(t *testing.T) {
 	dir := t.TempDir()
 	// 清理函式必須註冊在 t.TempDir() **之後**：t.Cleanup 以 LIFO 執行，
@@ -844,7 +879,7 @@ func TestLogRotationDisabledWithZero(t *testing.T) {
 		Infof("無限追加的第 %d 行", i)
 	}
 	if _, err := os.Stat(path + ".1"); err == nil {
-		t.Fatal("maxBytes 為 0 時不应輪替，卻出現了 .1")
+		t.Fatal("maxBytes 為 0 時不應輪替，卻出現了 .1")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(data), "第 49 行") {
@@ -878,6 +913,64 @@ func TestConcurrentLoggingIsRaceFree(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestConcurrentLoggingDuringRotationIsRaceFree 覆蓋「併行寫入」與「輪替」
+// 同時發生的情境。
+//
+// 為什麼需要它：輪替（rotateLocked）會在服務期間**改寫 std.logger**（換成
+// 新的 MultiWriter 或退回 stdout），而寫入路徑（logWithContext）也要讀
+// std.logger。兩者若沒有同一把鎖，就是一個資料競爭 —— 讀到撕裂的指標會
+// 讓下一個 Print 對著不存在的 logger 呼叫而 panic。
+//
+// 這個測試在**只有 -race 時**才會失敗（沒有 race detector 時，資料競爭
+// 通常只是「剛好沒出事」），所以 CI 的 test -race 步驟是它的守門人。
+//
+// 與 TestConcurrentLoggingIsRaceFree 的差別：那一支把 std 換成記憶體
+// writer（std.file = nil），因此**不會**觸發輪替；這一支刻意讓輪替真的
+// 發生，因此才是那個競爭的守門人。
+func TestConcurrentLoggingDuringRotationIsRaceFree(t *testing.T) {
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		Close()
+		std.mu.Lock()
+		std.logger = log.New(os.Stdout, "", 0)
+		std.file = nil
+		std.format = "text"
+		std.level = INFO
+		std.maxBytes = 0
+		std.maxFiles = 0
+		std.written = 0
+		std.logPath = ""
+		std.mu.Unlock()
+	})
+	path := filepath.Join(dir, "forum.log")
+	if err := Init("INFO", path, "text", 1, 2); err != nil {
+		t.Fatalf("Init 回錯誤: %v", err)
+	}
+	// 上限調到很小，讓每一次寫入都接近輪替門檻 —— 輪替在測試期間會發生
+	// 很多次，競爭才有機會被 race detector 看到。
+	std.mu.Lock()
+	std.maxBytes = 200
+	std.mu.Unlock()
+
+	line := strings.Repeat("x", 100)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				Infof("%s-%d-%d", line, n, j)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// 收尾：輪替確實發生過（否則這支測試測不到東西）。
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("沒有出現輪替檔 .1，這支測試沒有真的走到輪替: %v", err)
+	}
 }
 
 // TestMetadataFromContextFillsPlaceholders 覆蓋 MetadataFromContext 的三個補值分支。

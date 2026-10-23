@@ -63,9 +63,12 @@ const idleTimeout = 60 * time.Second
 // flushTimeout 是停止流程最後那次分鐘彙總寫入的期限。
 //
 // 獨立於 SHUTDOWN_TIMEOUT_SECONDS：排空等待的是「使用者的請求」，這裡等的是
-// 「自己寫資料庫」，兩者不該共用同一個預算。給 5 秒是因為這是幾十列的
+// 「自己寫資料庫」，兩者不該共用同一個預算。給 3 秒是因為這是幾十列的
 // INSERT，寫不出去只會是資料庫本身有問題，而不該讓它拖住整個停止流程。
-const flushTimeout = 5 * time.Second
+//
+// 它與 backgroundStopTimeout **併行**，兩者不相加：停止流程的總預算是
+// SHUTDOWN_TIMEOUT_SECONDS + 3 秒，預設 18 秒，小於 compose 的 20 秒。
+const flushTimeout = 3 * time.Second
 
 // newHTTPServer 以設定檔組出帶逾時的 *http.Server（尚未開始監聽）。
 //

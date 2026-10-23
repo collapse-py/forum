@@ -79,6 +79,7 @@ var requiredTables = []string{
 	"forum_announcements",
 	"forum_notifications",
 	"forum_media",
+	"forum_media_deletions",
 	"forum_post_bookmarks",
 	"forum_daily_stats",
 }
@@ -393,6 +394,8 @@ func TestUnicodeRoundTrip(t *testing.T) {
 	}{
 		{"ASCII", "plain ascii"},
 		{"繁體中文", "這是一篇繁體中文的論壇貼文，包含標點符號：「引號」與『書名號』。"},
+		// 下面的簡體與混用文字是刻意的測試資料：這個測試驗的是 utf8mb4
+		// 對各種文字的寫入與讀回，不是專案註解的用字。
 		{"簡體中文", "这是一篇简体中文的论坛帖子"},
 		{"日文", "これは日本語の投稿です。こんにちは、世界。"},
 		{"韓文", "이것은 한국어 게시물입니다."},
@@ -558,7 +561,7 @@ func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 // seedForumPost 塞入一列貼文（用於驗證遷移不清資料）。
 //
 // created_at 與 image_url 顯式給值：兩者都是 NOT NULL 而沒有 DEFAULT 的欄位
-//（image_url 見 mysql.go 第 2 步的說明），嚴格模式下省略它們的 INSERT 會以
+// （image_url 見 mysql.go 第 2 步的說明），嚴格模式下省略它們的 INSERT 會以
 // Error 1364 失敗。這支 helper 曾經只給 author_email 與 content，於是每一次
 // 執行都以 1364 收場 —— 而它要驗證的「第二次遷移不會清掉資料」從來沒被測到。
 func seedForumPost(t *testing.T, db *sql.DB, content, email string) {

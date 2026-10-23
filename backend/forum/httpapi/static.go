@@ -128,6 +128,49 @@ func isBlockedStaticPath(urlPath string) bool {
 	return false
 }
 
+// setPublicCacheControl 設定公開快取的 Cache-Control，並移除 session cookie。
+//
+// 為什麼要移除：session 續期中介層在 handler 之前就會寫入帶 session token 的
+// Set-Cookie（見 server.go 的 Refresh 順序），而 public 允許共享快取儲存整份
+// 回應；RFC 9111 §3.1 要求快取連同所有回應表頭一起儲存，Set-Cookie 也在內。
+// 靜態資產不需要續期 cookie，session 的 server-side TTL 仍會由頁面與 API
+// 請求延長。少了這一步，共享快取可能把登入者的 token 送給下一個訪客。
+func setPublicCacheControl(w http.ResponseWriter, value string) {
+	w.Header().Set("Cache-Control", value)
+	w.Header().Del("Set-Cookie")
+}
+
+// hashedAssetHandler 服務 /assets/ 底下帶內容 hash 的建置資產（Vite 產物）。
+//
+// 檔名帶內容 hash，內容變了檔名就變，因此可以宣告一年 immutable；但正因為
+// 它是 public，回應上的 Set-Cookie 必須拿掉（見 setPublicCacheControl）。
+func hashedAssetHandler(frontendDir string) http.Handler {
+	fs := http.FileServer(http.Dir(frontendAssetsRoot(frontendDir)))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 僅 GET 掛 immutable：非 GET 請求不該帶著這份快取指示。
+		if r.Method == http.MethodGet {
+			setPublicCacheControl(w, "public, max-age=31536000, immutable")
+		}
+		// StripPrefix 讓底層 FileServer 以 assets/ 之後的路徑去對應磁碟目錄。
+		http.StripPrefix("/assets/", fs).ServeHTTP(w, r)
+	})
+}
+
+// sourceAssetHandler 服務 /asset/ 底下的一手素材（PWA 圖示、logo、字型）。
+//
+// 這裡沒有明確的 Cache-Control：檔名沒有人工 hash，不能宣告長期快取。但
+// http.FileServer 會帶 Last-Modified，共享快取仍可能依啟發式規則暫存；因此
+// GET 回應一樣移除 Set-Cookie。真正的快取策略留給反向代理設定。
+func sourceAssetHandler(frontendDir string) http.Handler {
+	fs := http.StripPrefix("/asset/", http.FileServer(http.Dir(frontendAssetRoot(frontendDir))))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Del("Set-Cookie")
+		}
+		fs.ServeHTTP(w, r)
+	})
+}
+
 // safeStaticFileServer 包一層安全性與快取策略的 FileServer。
 //
 // 存在的意義：http.FileServer 只做「把 URL 對應到磁碟檔案」一件事，既不擋
@@ -154,11 +197,11 @@ func safeStaticFileServer(root string) http.Handler {
 				// 可以宣告 immutable。帶 query string 代表呼叫端在做 cache-busting
 				// （例如 ?v=時間戳），同一路徑的內容會隨參數而變，因此也視為
 				// 內容不會原地改動。
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				setPublicCacheControl(w, "public, max-age=31536000, immutable")
 			} else if isCacheableStaticPath(cleanPath) {
 				// 其他靜態資源給一天快取：這些檔名沒有 hash，必須留一個
 				// 重新驗證的窗口給開發期更新。
-				w.Header().Set("Cache-Control", "public, max-age=86400")
+				setPublicCacheControl(w, "public, max-age=86400")
 			}
 		}
 		fs.ServeHTTP(w, r)

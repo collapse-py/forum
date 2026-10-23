@@ -23,6 +23,7 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 	forum_post_bookmarks         收藏關聯，以 (post_id, author_email) 複合主鍵表示「一人一文一收藏」
 	forum_media                  上傳檔案的所有權紀錄，以檔名為主鍵（檔名是檔案伺服器上的鍵）
 	                             （第 33 步；「刪除自己的圖片」與「換圖」的授權依據）
+	forum_media_deletions        待刪除的圖片檔名佇列（第 37 步；與貼文硬刪同一個交易寫入，失敗可重試）
 	forum_request_metrics        分鐘級請求統計（監控頁的持久化來源；純衍生資料，可整表刪除）
 	forum_daily_stats            日別新增量彙總（內容趨勢頁的讀取來源；純衍生資料，可整表重建）
 	forum_admin_actions           管理員操作稽核紀錄（欄位級 diff；只能由時間清理，不可透過 API 刪除）
@@ -36,11 +37,11 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
     製造「以為有原子性、實際沒有」的假象。加上 DDL 在 MySQL 中會取得隱式鎖，線性執行反而能
     避免兩個實例同時啟動時互相鎖住 metadata 而死鎖。代價是遷移中途失敗會留下半套 schema，
     但因為每一步都是冪等的，下一次啟動會自動補齊剩餘步驟。
-  2. 所有 DDL 儘量使用 IF NOT EXISTS 語法，讓 MigrateMySQL 可以安全地重複執行（啟動時必定會
-     執行一次）。仍舊需要 information_schema 探測的步驟，是因為舊版 MySQL 沒有
-     DROP COLUMN IF EXISTS / 唯一索引「不存在才建立」這類語法。探測與建立之間的窗口
-     （兩個實例同時啟動時會被命中）由 addIndexIfNotExists / addUniqueIndexIfNotExists
-     容忍 Error 1061 補上 —— 見 TestMigrateMySQLIsSafeWithConcurrentStartup。
+ 2. 所有 DDL 儘量使用 IF NOT EXISTS 語法，讓 MigrateMySQL 可以安全地重複執行（啟動時必定會
+    執行一次）。仍舊需要 information_schema 探測的步驟，是因為舊版 MySQL 沒有
+    DROP COLUMN IF EXISTS / 唯一索引「不存在才建立」這類語法。探測與建立之間的窗口
+    （兩個實例同時啟動時會被命中）由 addIndexIfNotExists / addUniqueIndexIfNotExists
+    容忍 Error 1061 補上 —— 見 TestMigrateMySQLIsSafeWithConcurrentStartup。
  3. 全部資料表統一 ENGINE=InnoDB（交易與外鍵語意）與 DEFAULT CHARSET=utf8mb4。utf8mb4 是
     完整 Unicode（含 emoji 與 4-byte supplementary 平面），論壇內文屬使用者輸入，用舊的 utf8
     （MySQL 的 3-byte utf8mb3）會在寫入時直接報錯。
@@ -222,7 +223,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//    儲存契約：只放檔名（如 "9f8c1a.png"），完整網址由應用層以
 	//    FILES_SERVER_PUBLIC_URL 組成；舊資料的轉換見第 18 步。
 	//    宣告 NOT NULL 卻未給 DEFAULT，代表所有既有列在 MySQL 嚴格模式下會被填入空字串
-	//    （DDL 會以列層級的隱式默认值補齊），因此 createForumPost 仍需顯式傳入值。
+	//    （DDL 會以列層級的隱式預設值補齊），因此 createForumPost 仍需顯式傳入值。
 	if _, err := db.Exec(`
 		ALTER TABLE forum_posts ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL;
 	`); err != nil {
@@ -906,15 +907,14 @@ func MigrateMySQL(db *sql.DB) error {
 	//     時間欄位一律由應用層寫入 time.Now()（主機本地時區），TIMESTAMP 會
 	//     做時區轉換，讓同一列裡的兩個欄位表示不同時區。
 	//
-	//     不加索引：唯一會用到它的查詢都是「已經拿著 id 找到那一列」（編輯、
-	//     按讚、留言的存在性檢查），走主鍵；而列表端的過濾是與排序欄位一起
-	//     出現的附加條件，不是篩選的主體（理由同第 28 步不加索引的判斷）。
+	//     查詢側的索引在第 36 步補上（清理排程每小時掃過期貼文）：當時
+	//     「唯一會用到它的查詢都是拿著 id 找到那一列」的判斷是對的，因為
+	//     還沒有清理排程；排程上線後那條判斷就不成立了。
 	//
-	//     資料不會自動消失：軟刪把「從資料庫抹除」的責任從 handler 移了出去，
-	//     因此需要一個清理機制才能真正回收空間。當前刻意沒有排程器 ——
-	//     貼文量在這個站點的規模下，保留數百筆已刪貼文的成本低於一個會
-	//     自動刪資料的排程所帶來的風險。需要時機成熟再加（見
-	//     docs/KNOWN_ISSUES.md）。
+	//     資料會自動消失：軟刪把「從資料庫抹除」的責任從 handler 移了出去，
+	//     而清理排程（forum/purge）接管了它 —— 保留期由 POST_RETENTION_DAYS
+	//     決定（預設 90 天），到期後連留言／按讚／收藏／檢舉與不再被引用的
+	//     附圖一併清掉。
 	if _, err := db.Exec(`
 		ALTER TABLE forum_posts
 			ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL AFTER updated_at;
@@ -1092,21 +1092,21 @@ func MigrateMySQL(db *sql.DB) error {
 	//     為什麼需要：/admin/stats 的日別序列過去每次讀取都即時計算
 	//     （GROUP BY DATE(created_at)），掃描量被視窗限制住。當內容量
 	//     成長到「最近 90 天」也不再有界時，這個查詢會開始變慢——
-	//     docs/KNOWN_ISSUES.md 與 stats_handlers.go 檔頭都寫明了「那时該
-	//     加一張每日彙總表」。这张表就是那個補上。
+	//     docs/KNOWN_ISSUES.md 與 stats_handlers.go 檔頭都寫明了「那時該
+	//     加一張每日彙總表」。這張表就是那個補上。
 	//
-	//     形狀：一列一天，四个計數是「那一天新增的」使用者／貼文／留言／
+	//     形狀：一列一天，四個計數是「那一天新增的」使用者／貼文／留言／
 	//     按讚。貼文計數含後來被軟刪除的——它回答的是「那天產生了多少」，
 	//     不是「今天還看得到多少」（後者在用戶管理與文章列表都有）。
 	//
 	//     它是純衍生資料，與 forum_request_metrics 同一個定位：整表刪除
-	//     只会让趋势頁少一段歷史，論壇的任何功能都不依賴它。彙總由
-	//     data.RefreshDailyStats 定期重算最近几天，更早的日期由
+	//     只會讓趨勢頁少一段歷史，論壇的任何功能都不依賴它。彙總由
+	//     data.RefreshDailyStats 定期重算最近幾天，更早的日期由
 	//     data.BackfillDailyStats 從來源表回填一次（INSERT IGNORE，已存在的
 	//     日期不覆寫——那些日期可能已被清理排程硬刪，重算反而會少算）。
 	//
-	//     主鍵就是日期：一天一列是这张表的唯一契约，而「按日期範圍讀」
-	//     正是唯一的查詢形状，不需要其他索引。
+	//     主鍵就是日期：一天一列是這張表的唯一契約，而「按日期範圍讀」
+	//     正是唯一的查詢形狀，不需要其他索引。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_daily_stats (
 			day DATE NOT NULL,
@@ -1115,6 +1115,66 @@ func MigrateMySQL(db *sql.DB) error {
 			new_comments INT NOT NULL DEFAULT 0,
 			new_likes INT NOT NULL DEFAULT 0,
 			PRIMARY KEY (day)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+	`); err != nil {
+		return err
+	}
+
+	// 36) 查詢用索引：軟刪除清理排程、檢舉工單與圖片引用檢查。
+	//
+	//     這些查詢都是「結果集很小、但會經常跑」的型態。沒有索引時它們是
+	//     全表掃描，而掃描的成本與**整張表**成正比 —— 表愈大，愈會在
+	//     平常的請求路徑上拖慢整個站（清理排程與正常請求共用同一個連線池）。
+	//
+	//     a) forum_posts (deleted_at, id)：清理排程每小時取「已刪除且超過
+	//        保留期」的下一批（WHERE deleted_at IS NOT NULL AND deleted_at < ?
+	//        ORDER BY deleted_at, id LIMIT ?）。單欄 deleted_at 索引只能加速
+	//        WHERE，排序仍要 filesort；複合索引讓範圍與排序都由同一棵 B-tree
+	//        完成，LIMIT 可以在索引上停下。舊的單欄索引
+	//        idx_forum_posts_deleted_at 在既有部署留著也無害（它是複合索引的
+	//        前綴），新安裝不再建立。
+	//
+	//     b) forum_reports (target_type, target_id)：硬刪貼文時用 JOIN 刪除
+	//        「指向該貼文留言」的檢舉工單（見 purge.deletePosts）。唯一鍵
+	//        (reporter_email, target_type, target_id) 的前綴是檢舉者，查不到
+	//        「某個目標被誰檢舉」，因此需要這條以目標開頭的索引。
+	//
+	//     c) forum_posts.image_url 與 forum_profiles.avatar_url：圖片引用檢查
+	//        （「這個檔案還被誰引用？」）。等值比對可以用索引；前綴長度 64
+	//        足以涵蓋檔名（UUID v4 + 副檔名，約 40 個字元），而 utf8mb4 下
+	//        64 個字元是 256 bytes，遠低於 InnoDB 的 3072 bytes 上限。
+	//
+	//     刻意不加 forum_posts.content 的索引：全文檢索本來就是全表掃描，
+	//     而且那條路徑（ES 或 MySQL LIKE）用不上 B-tree 索引。
+	if err := addIndexIfNotExists(db, "forum_posts", "idx_forum_posts_deleted_at_id", "deleted_at, id"); err != nil {
+		return err
+	}
+	if err := addIndexIfNotExists(db, "forum_reports", "idx_forum_reports_target", "target_type, target_id"); err != nil {
+		return err
+	}
+	if err := addIndexIfNotExists(db, "forum_posts", "idx_forum_posts_image_url", "image_url(64)"); err != nil {
+		return err
+	}
+	if err := addIndexIfNotExists(db, "forum_profiles", "idx_forum_profiles_avatar_url", "avatar_url(64)"); err != nil {
+		return err
+	}
+
+	// 37) 圖片刪除佇列（forum_media_deletions）。
+	//
+	//     為什麼需要：清理排程硬刪貼文後，附圖的檔案刪除發生在交易之外。
+	//     檔案伺服器可能失敗，程式也可能在 Commit 與刪檔之間崩潰；此時貼文
+	//     已經不存在，下一次 Prune 不會再看到那些檔名。若只記一筆日誌，那個
+	//     檔案就永遠不會被回收。這張表把「待刪除的檔名」與貼文交易寫在一起：
+	//     交易成功 = 佇列一定有紀錄，重試因此是安全的。
+	//
+	//     filename 是主鍵：同一個檔名被多篇貼文引用時只需要刪一次。
+	//     created_at 只用來排序（先進先出），並有索引支援 LIMIT 批次。
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS forum_media_deletions (
+			filename VARCHAR(128) NOT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (filename),
+			KEY idx_forum_media_deletions_created_at (created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 	`); err != nil {
 		return err

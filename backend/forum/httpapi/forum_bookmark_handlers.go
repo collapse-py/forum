@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"forum/forum/logger"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // handleForumBookmarks 回傳「我收藏的貼文」分頁。
@@ -147,8 +149,12 @@ func (s *Server) handleForumPostBookmark(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	bookmarked := existing > 0
-	if bookmarked {
+	// wasBookmarked 是「這次請求送出之前」的狀態；nowBookmarked 是「這次請求
+	// 做完之後」的狀態（回應要回後者）。兩者分開是因為並發時最終狀態可能
+	// 不是「切換」出來的（見下面的 1062 分支）。
+	wasBookmarked := existing > 0
+	nowBookmarked := !wasBookmarked
+	if wasBookmarked {
 		// DELETE 而非 UPDATE 設成某個停用旗標：收藏沒有「歷史」語意，
 		// 讓資料列完全消失可以讓唯一的索引同時是複合主鍵（與按讚、追蹤
 		// 同樣的取捨）。
@@ -162,12 +168,23 @@ func (s *Server) handleForumPostBookmark(w http.ResponseWriter, r *http.Request)
 	} else if _, err := tx.ExecContext(r.Context(),
 		`INSERT INTO forum_post_bookmarks (post_id, author_email, created_at) VALUES (?, ?, ?)`,
 		postID, author, time.Now()); err != nil {
-		// 並發下兩個請求都可能通過上面的檢查，複合主鍵會讓其中一個收到
-		// 1062。刻意不為它特別分流（理由與按讚相同）：收藏只是一個開關，
-		// 使用者再按一次即可。
-		logger.ErrorfContext(r.Context(), "[FORUM] 新增收藏失敗 post_id=%d: %v", postID, err)
-		internalError(w, "unable to add bookmark")
-		return
+		// 1062 = ER_DUP_ENTRY：並發下兩個請求都可能通過上面的檢查，複合主鍵
+		// 會讓其中一個收到 1062 —— 而那一筆其實**已經是收藏狀態**了（另一個
+		// 請求剛剛插進來）。因此它不是錯誤，而是「以資料庫為準的最終狀態」。
+		//
+		// 分流成 200 + bookmarked:true（而不是 500）的理由：收藏是一個開關，
+		// 而「連按兩下」是最常見的觸發方式 —— 回 500 會讓使用者看到一個
+		// 錯誤訊息，而實際上他的操作成功了。
+		//
+		// 型別斷言而非 errors.As：go-sql-driver 直接回傳 *mysql.MySQLError，
+		// 中間沒有包裝層（與 handleForumReport 同一個理由）。
+		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1062 {
+			nowBookmarked = true
+		} else {
+			logger.ErrorfContext(r.Context(), "[FORUM] 新增收藏失敗 post_id=%d: %v", postID, err)
+			internalError(w, "unable to add bookmark")
+			return
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -178,5 +195,5 @@ func (s *Server) handleForumPostBookmark(w http.ResponseWriter, r *http.Request)
 
 	// 回傳切換後的狀態：連點兩下的合併結果只有後端知道，前端不該自己猜
 	// （與按讚、追蹤同一條契約）。
-	writeOK(w, map[string]bool{"bookmarked": !bookmarked})
+	writeOK(w, map[string]bool{"bookmarked": nowBookmarked})
 }

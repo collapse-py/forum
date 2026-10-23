@@ -370,6 +370,9 @@ func TestCovMigrateMySQLRunsAllSteps(t *testing.T) {
 		"ALTER TABLE forum_profiles ADD COLUMN IF NOT EXISTS avatar_url",
 		"ADD INDEX idx_forum_posts_feed",
 		"ADD UNIQUE INDEX uq_forum_profiles_nickname",
+		"ADD INDEX idx_forum_posts_deleted_at_id",
+		"ADD INDEX idx_forum_reports_target",
+		"CREATE TABLE IF NOT EXISTS forum_media_deletions",
 	} {
 		if !src.saw(want) {
 			t.Errorf("遷移路線沒有執行到 %q", want)
@@ -477,6 +480,11 @@ func TestCovMigrateMySQLExecErrors(t *testing.T) {
 		{"建立媒體表", "CREATE TABLE IF NOT EXISTS forum_media", ""},
 		{"建立收藏表", "CREATE TABLE IF NOT EXISTS forum_post_bookmarks", ""},
 		{"建立日彙總表", "CREATE TABLE IF NOT EXISTS forum_daily_stats", ""},
+		{"deleted_at_id 索引", "ADD INDEX idx_forum_posts_deleted_at_id", ""},
+		{"reports.target 索引", "ADD INDEX idx_forum_reports_target", ""},
+		{"posts.image_url 索引", "ADD INDEX idx_forum_posts_image_url", ""},
+		{"profiles.avatar_url 索引", "ADD INDEX idx_forum_profiles_avatar_url", ""},
+		{"建立圖片刪除佇列", "CREATE TABLE IF NOT EXISTS forum_media_deletions", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -283,7 +283,7 @@ HTML 內的 `<style>` 區塊在啟動時算 SHA-256 寫進 `style-src` 的 hash 
 2. **檔名白名單**只接受 `[A-Za-z0-9._-]`，副檔名在 `{.jpg,.jpeg,.png,.gif,.webp}`，
    **不含 svg**（SVG 可內嵌腳本）。
 3. **資料庫只存檔名**，`imageUrl` 在讀取時才用 `FILES_SERVER_PUBLIC_URL` 現組 —— 因此
-   就算資料庫被塞進髒值，呈現出去的还是設定檔決定的網域。
+   就算資料庫被塞進髒值，呈現出去的還是設定檔決定的網域。
 
 > 這一條是**縱深防禦**，而縱深防禦的條件是每一層都獨立成立。若日後有人為了「支援外部
 > 圖片」而放寬 `forumImageFileName`，`javascript:` 就會立刻變得可用 —— 那個改動必須
@@ -389,7 +389,7 @@ GET /api/forum/public-posts?user=<SHA-256(email)>
 
 **部署環境**
 
-- [ ] 停止上限 > `SHUTDOWN_TIMEOUT_SECONDS`（Docker `stop_grace_period` / systemd
+- [ ] 停止上限 > `SHUTDOWN_TIMEOUT_SECONDS` + 3 秒收尾（預設 18 秒；Docker `stop_grace_period` / systemd
       `TimeoutStopSec`）
 - [ ] 代理放行 `Service-Worker-Allowed` 與 `/service-worker.js`
 - [ ] 代理**沒有**吃掉 `/files/*` 的 `?token=` 查詢參數

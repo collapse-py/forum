@@ -72,8 +72,19 @@ jobs:
       # -race 的測試必須真的跑了東西。coverageprofile 的存在就是為了這一點：
       # 若某個套件完全沒有測試，它不會出現在 profile 裡，因此下面用
       # coverage-floor 那個 job 來確保「有測試的套件沒有消失」。
+      #
+      # 刻意不寫 -covermode=count：Go 1.26 起 -race 只接受 -covermode=atomic，
+      # 指定別的 mode 會讓 go 直接結束（cmd/go/internal/work/init.go：
+      # `-covermode must be "atomic", not "count", when -race is enabled`），
+      # 整條 pipeline 會在這一步死掉。
+      #
+      # 而 count 與 atomic 量出來的覆蓋率百分比**完全相同**（覆蓋率只看
+      # 「這段敘述有沒有被執行過」，與計數器是不是 atomic 無關；2026-10-22
+      # 在本地以兩種 mode 各跑一次全模組，總數 87.4% 與逐套件數字逐一相同）。
+      # 因此這裡讓 Go 自己選（-race 之下預設就是 atomic）：少一次測試執行，
+      # 也少一份要在文件與註解之間同步的數字。
       - name: test -race
-        run: go test ./... -race -covermode=count -coverprofile=coverage.out
+        run: go test ./... -race -coverprofile=coverage.out
 
       # 逐套件的覆蓋率地板（每個套件都要 ≥ 75.0%）。
       #
@@ -83,8 +94,20 @@ jobs:
       #
       # 2026-10-21 實測：最低的是 metrics 76.9% 與 httpapi 87.0%，其餘都在
       # 88% 以上（logcaller 沒有敘述，不在此列）。
+      #
+      # --expect-packages 是第三道閘門，補的是前兩道都看不見的那一種退化：
+      # 某個套件的測試被**整包刪掉**時，它不會以 0% 出現在 profile 裡，而是
+      # 從 profile 裡消失 —— 因此逐套件地板量不到它，而總覆蓋率甚至會因為
+      # 分母變小而上升。`go list` 的輸出就是「應該存在的套件清單」。
+      #
+      # `{{if .GoFiles}}` 這個過濾是必要的：只含測試檔的套件（例如
+      # forum/forum/logcaller）沒有任何敘述，因此不會出現在 cover profile 裡
+      # —— 把它算進去會讓這道閘門每次都誤報。
       - name: 檢查逐套件覆蓋率地板
-        run: go run ./tools/coveragefloor coverage.out 75.0 --per-package
+        run: |
+          set -euo pipefail
+          packages="$(go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | paste -sd, -)"
+          go run ./tools/coveragefloor coverage.out 75.0 --per-package --expect-packages "$packages"
 
       - name: 上傳覆蓋率
         if: always()
@@ -119,8 +142,11 @@ jobs:
 
       # 這個模組過去是 0% 覆蓋（Phase 3.4 才補上測試）。留著 -race 是因為
       # 它現在有了 upload 與 delete 兩條會碰磁碟的路徑，以及一個 Redis 用戶端。
+      #
+      # 同樣不寫 -covermode=count：Go 1.26 起 -race 只接受 atomic（理由見
+      # backend job 的同一段註解）。
       - name: test -race
-        run: go test ./... -race -covermode=count -coverprofile=coverage.out
+        run: go test ./... -race -coverprofile=coverage.out
 
       # 逐套件地板與 backend 相同（75.0%）。這個模組只有一個套件，因此這道
       # 閘門與總數是同一件事；它存在的原因是「兩個模組用同一條線」，而不是
@@ -128,9 +154,15 @@ jobs:
       #
       # 工具在 backend 模組裡（那是它唯一的位置），因此這一步的工作目錄是
       # backend，而被檢查的 profile 在 ../files_server。
+      #
+      # --expect-packages 的清單來自 files_server 自己的 go list（工作目錄
+      # 要切過去），理由見 backend job 的同一段註解。
       - name: 檢查逐套件覆蓋率地板
         working-directory: backend
-        run: go run ./tools/coveragefloor ../files_server/coverage.out 75.0 --per-package
+        run: |
+          set -euo pipefail
+          packages="$(cd ../files_server && go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | paste -sd, -)"
+          go run ./tools/coveragefloor ../files_server/coverage.out 75.0 --per-package --expect-packages "$packages"
 
       - name: 上傳覆蓋率
         if: always()
@@ -205,11 +237,37 @@ jobs:
           go-version: '1.26.x'
           check-latest: true
 
+      # 下載到 backend/coverage/<artifact 名稱>/。
+      #
+      # 兩個容易踩的坑，這裡都刻意避開：
+      #   1. path 是相對 github.workspace 解析的，**不是**相對下面
+      #      defaults.run.working-directory（那個只影響 run: 步驟）。寫
+      #      `path: coverage` 會落在 <repo>/coverage，而 run: 步驟的工作目錄
+      #      是 <repo>/backend，找檔案時會變成 <repo>/backend/coverage/... 而
+      #      找不到。因此這裡寫 `path: backend/coverage`。
+      #   2. 兩份 artifact 裡的檔名都叫 coverage.out。用 merge-multiple:
+      #      true 解壓到同一個目錄，第二份會**覆蓋**第一份 —— 量到的會是
+      #      單一模組而不是合併值。因此改成各自一個子目錄，再自己合併。
       - uses: actions/download-artifact@v4
         with:
-          path: coverage
+          path: backend/coverage
           pattern: '*-coverage'
-          merge-multiple: true
+          merge-multiple: false
+
+      # 合併兩個模組的 cover profile。
+      #
+      # Go 的 cover profile 是行導向的：第一行是 `mode: ...`，之後每行是一段
+      # 範圍。兩個模組的 profile 合併時只有第一份保留 mode 行（第二份的 mode
+      # 行必須去掉，否則工具會把它當成一筆格式壞掉的紀錄而失敗）。
+      #
+      # 兩邊的套件名稱不會互相蓋掉：backend 的路徑帶模組前綴（forum/forum/...），
+      # files_server 的路徑是模組根底下的檔案（server.go → "." 這一組）。
+      - name: 合併兩個模組的覆蓋率 profile
+        run: |
+          set -euo pipefail
+          head -n 1 coverage/backend-coverage/coverage.out > coverage/merged.out
+          tail -n +2 coverage/backend-coverage/coverage.out >> coverage/merged.out
+          tail -n +2 coverage/files-server-coverage/coverage.out >> coverage/merged.out
 
       # 地板從 75.0 起算（2026-10-21 實測合併後 87.7%，留 12.7 個百分點的餘裕）。
       #
@@ -231,7 +289,7 @@ jobs:
       # 因此逐套件的那道閘門放在各模組自己的 job 裡（profile 不跨模組合併，
       # 套件名稱不會互相蓋掉）。
       - name: 檢查覆蓋率地板
-        run: go run ./tools/coveragefloor coverage/coverage.out 75.0
+        run: go run ./tools/coveragefloor coverage/merged.out 75.0
 
   invariants:
     name: invariants (audit / admin auth / blocklist mount)
@@ -327,6 +385,19 @@ jobs:
           FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
         run: go test ./forum/purge/... -run MySQL -v -timeout 10m
 
+      # 稽核查詢與清理（audit 套件）、監控彙總落盤（metrics 套件）。
+      #
+      # 這兩個套件的 MySQL 測試與上面三組是同一種情況：沒有 DSN 時它們全部
+      # skip，所以 backend job（不給 DSN）不會跑到它們 —— 這個 job 不跑，
+      # 它們就永遠不會執行。特別是 audit 的 TestPruneRemovesOnlyExpiredMySQL：
+      # 它是唯一證明「稽核清理不會刪掉保留期內的紀錄」的測試，而那條 SQL
+      # 一旦寫錯（少了日期條件、少了 target 條件），sqlmock 與單元測試都
+      # 答不出來。
+      - name: 稽核與監控彙總（真實 MySQL）
+        env:
+          FORUM_TEST_MYSQL_DSN: 'root:root@tcp(127.0.0.1:3306)/?parseTime=True&loc=UTC&multiStatements=true'
+        run: go test ./forum/audit/... ./forum/metrics/... -run MySQL -v -timeout 10m
+
   secrets:
     name: secrets (config.conf 不得進版控)
     runs-on: ubuntu-latest
@@ -350,7 +421,11 @@ jobs:
           set -euo pipefail
           status=0
           for path in backend/config/config.conf files_server/config.conf; do
-            if git log --all --full-history -- "$path" --quiet | grep -q .; then
+            # --format=%H 而不是 --quiet：git log 沒有 --quiet 這個選項，
+            # 而把它寫在 `--` 之後會被當成 pathspec（被當成「檔名是 --quiet
+            # 的路徑」而永遠匹配不到）。--format=%H 每個 commit 印一行雜湊，
+            # 語意明確：只要有輸出就代表這條路徑曾經被提交過。
+            if git log --all --full-history --format=%H -- "$path" | grep -q .; then
               echo "::error::$path 曾經被提交進版控（憑證可能已外洩，必須輪替）"
               status=1
             fi

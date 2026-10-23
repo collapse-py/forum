@@ -239,7 +239,15 @@ export function ProfilePage() {
         form: body,
         fallback: t('error.fallbackAvatarUpload'),
       });
-      setAvatarEdit(uploaded.url ?? '');
+      /*
+       * 缺 url 必須是錯誤，而不是空字串：avatarEdit 的 '' 是「移除頭像」的
+       * 語意（見 removeAvatar）。把「上傳的回應沒有 url」當成移除，會讓
+       * 使用者下一次按「保存」時把既有的頭像刪掉，而且沒有任何錯誤訊息。
+       */
+      if (!uploaded?.url) {
+        throw new Error(t('error.fallbackAvatarUpload'));
+      }
+      setAvatarEdit(uploaded.url);
       setStatus({ message: '', isError: false });
     } catch (error) {
       if (error instanceof LoginRequiredError) {

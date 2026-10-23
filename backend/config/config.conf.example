@@ -102,13 +102,15 @@ TRUSTED_PROXY_CIDRS=
 #  HTTP 逾時與優雅停止
 # ------------------------------------------------------------
 # 收到 SIGINT（Ctrl-C、docker stop）或 SIGTERM（systemd、k8s）時，後端會
-# 停止接受新連線、等在途請求完成、寫出最後一次監控彙總，然後以 exit code 0
-# 結束。超過下面這個秒數仍有請求沒完成，就強制中斷它們。
+# 停止接受新連線、等在途請求完成，然後**併行**收尾背景工作與最後一次監控
+# 彙總（各上限 3 秒），最後以 exit code 0 結束。超過下面這個秒數仍有請求
+# 沒完成，就強制中斷它們。
 
-# 等待在途請求的秒數。必須**小於**部署環境的停止上限，否則部署端會先動手
-# 殺掉行程，等於回到「請求被硬生生中斷」的狀態：
+# 等待在途請求的秒數。部署環境的停止上限必須**大於**這個值再加上 3 秒收尾
+# （預設總上限 18 秒），否則部署端會先動手殺掉行程，等於回到「請求被硬生生
+# 中斷」的狀態：
 #   systemd  → TimeoutStopSec（預設 90s）
-#   Docker   → --stop-timeout（預設 10s，這裡要調到比它大）
+#   Docker   → --stop-timeout（預設 10s，這裡要調到至少 20s）
 #   k8s      → terminationGracePeriodSeconds（預設 30s）
 # 0 與負值不會被接受（會沿用預設值），因為「不等」等於把優雅停止關掉。
 SHUTDOWN_TIMEOUT_SECONDS=15
@@ -257,6 +259,8 @@ LOG_FILE=server.log
 LOG_FORMAT=text
 # 日誌檔輪替：目前檔寫到 LOG_MAX_SIZE_MB 時改名為 <LOG_FILE>.1，既有 .1
 # 改名 .2，依此推移；保留 LOG_MAX_FILES 個輪替檔，最舊的被刪除。
+# LOG_MAX_FILES 至少 1，超過 1000 以 1000 計：輪替要從 .maxFiles 逐檔
+# 改名到 .1，沒有上限時一個大數字會讓每次輪替跑上億次 rename。
 # LOG_MAX_SIZE_MB 設為 0 表示「不輪替」（沿用舊的無限追加行為）。
 # 若外部已有 logrotate 管理這個檔案，設 0 避免兩套機制互相干涉。
 LOG_MAX_SIZE_MB=50

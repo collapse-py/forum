@@ -115,6 +115,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	// 空白匯入：驅動透過 init() 向 database/sql 註冊，因此 main 只需要
@@ -131,6 +132,47 @@ import (
 // 「設定檔載入失敗」—— 那個訊息不會告訴人「你的工作目錄不對」。讓兩處共用
 // 同一個常量的話，改路徑時不會漏掉其中一處。
 const configPath = "config/config.conf"
+
+// backgroundWG 追蹤背景 goroutine 的結束。
+//
+// 為什麼需要它：stopBackground() 只是取消 context，而被取消的 goroutine 需要
+// 一點時間才會真的回來 —— 它可能正處在一次資料庫呼叫的中間。main 隨後
+// return，defer 就會關掉 DB 與 Redis；那一刻還在跑的 goroutine 會拿到
+// 「sql: database is closed」，而它的成果（清理掉的一批列、寫出的一批統計）
+// 就白做了。
+//
+// 這是 package 層級的變數而不是 startServices 的回傳值：背景 goroutine 有
+// 六個，分散在 startServices 的各處，而「停止時要等它們」是整個行程的性質
+// 而不是某一個函式的。
+//
+// 刻意不涵蓋限流清理（httpapi 內部）：那一支只動記憶體，不碰資料庫與
+// Redis，因此資料庫關掉之後它跑完或被砍掉都沒有差別。
+var backgroundWG sync.WaitGroup
+
+// backgroundStopTimeout 是等待背景工作收尾的上限；與 flushTimeout 併行。
+//
+// 有上限是因為背景工作不該讓停止流程卡住：部署端在超時之後會強制殺掉
+// 行程，而那個結局比「一個背景查詢失敗」更糟。3 秒足以讓一次資料庫寫入
+// 走完，也足以讓排程類的迴圈看到 ctx 的取消；停止流程的總預算是
+// SHUTDOWN_TIMEOUT_SECONDS + 3 秒（預設 18 秒，小於 compose 的 20 秒）。
+const backgroundStopTimeout = 3 * time.Second
+
+// waitBackground 等背景 goroutine 結束，最多等 timeout。
+//
+// 超時時只記警告：行程即將結束，而強制中斷一個還在跑的背景工作沒有任何
+// 更好的替代方案 —— 那條 goroutine 寫出去的資料本來就是「best-effort」。
+func waitBackground(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		backgroundWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logger.Warnf("[SERVER] 背景工作在 %s 內沒有全部結束（資料庫連線將被關閉）", timeout)
+	}
+}
 
 // main 依固定順序建立所有相依元件，最後進入阻塞監聽直到收到停止訊號。
 //
@@ -241,9 +283,9 @@ func main() {
 	 *
 	 * 同步執行、排在開始服務之前：回填的量有界（「有資料的天數」），而若
 	 * 交給背景，統計頁的頭幾次請求會看到空表——日別序列全是 0，而「全 0」
-	 * 在圖上看起來像「這站沒有內容」，不是「彙總还没建立」。
-	 * 失敗只記警告：彙總表是純衍生資料，刷新排程（下方）会在下一个 tick
-	 * 重算最近几天，更早的日期则永远由下一次启动的回填补上。
+	 * 在圖上看起來像「這站沒有內容」，不是「彙總還沒建立」。
+	 * 失敗只記警告：彙總表是純衍生資料，刷新排程（下方）會在下一個 tick
+	 * 重算最近幾天，更早的日期則永遠由下一次啟動的回填補上。
 	 */
 	if err := data.BackfillDailyStats(context.Background(), db); err != nil {
 		logger.Warnf("[STATS] 日別彙總回填失敗（內容趨勢頁將不完整，直到刷新排程追上）: %v", err)
@@ -264,7 +306,6 @@ func main() {
 	// defer 只是保險：正常路徑會在停止流程裡明確呼叫 stopBackground。
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
-
 	srv, registry := startServices(backgroundCtx, cfg, db, redisClient)
 
 	// 逾時設定集中在 newHTTPServer 裡，這裡只負責組裝與啟動。
@@ -324,28 +365,42 @@ func main() {
 	stopBackground()
 
 	/*
-	 * 最後一次分鐘彙總寫入，由主流程**同步**執行。
+	 * 等背景工作回來，同時做最後一次分鐘彙總寫入。
 	 *
-	 * 為什麼不只靠 StartFlusher 收到 ctx.Done() 的那次寫入：那是背景
-	 * goroutine，而接下來 main 就會 return、行程隨即結束 —— 那次寫入很可能
-	 * 還沒跑完。同步寫入才能保證「停止前的最後一段流量」真的落到資料庫。
+	 * 兩者刻意**併行**：
 	 *
-	 * 與背景那次寫入不會重複計數：FlushPending 在鎖內先把候選分鐘標記成
-	 * flushed 再送出，因此兩邊同時呼叫時各取各的、互不重疊。
+	 *  1. FlushPending 在鎖內先把候選分鐘標記成 flushed 再送出，與背景
+	 *     flusher 同時呼叫時各取各的、互不重疊。
+	 *  2. 循序執行的最壞情況是 SHUTDOWN_TIMEOUT_SECONDS + 3 + 3，預設
+	 *     21 秒，已經超過 compose 的 stop_grace_period 20 秒 —— 部署端
+	 *     會在最後一次寫入完成前送 SIGKILL。併行後上限是 15 + 3 = 18 秒，
+	 *     留 2 秒給訊號處理與關閉連線。
 	 *
-	 * 用全新的 context 而非已逾時的 shutdownCtx：排空逾時不代表資料庫不可
-	 * 寫入，而這個 context 只服務一次寫入，不需要與請求共用期限。
+	 * 背景工作仍必須在 defer 的 db.Close() 之前結束：某個 goroutine 若正
+	 * 處在一次資料庫呼叫的中間，db.Close() 會讓它拿到「database is closed」，
+	 * 它的成果就白做了。最後一次彙總也必須發生在 db.Close() 之前。
 	 */
-	if registry != nil {
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		if registry == nil {
+			return
+		}
+		// 用全新的 context：排空逾時不代表資料庫不可寫入，而這個 context
+		// 只服務一次寫入，不需要與請求共用期限。
 		flushCtx, cancelFlush := context.WithTimeout(context.Background(), flushTimeout)
+		defer cancelFlush()
 		if written := registry.FlushPending(flushCtx, db); written > 0 {
 			logger.Infof("[MONITOR] 停止前已寫出最後 %d 分鐘的請求統計", written)
 		}
-		cancelFlush()
-	}
+	}()
+
+	waitBackground(backgroundStopTimeout)
+	<-flushDone
 
 	logger.Infof("[SERVER] Forum server stopped")
 }
+
 /*
 startServices 組裝 HTTP handler 與所有背景工作，回傳 Server 與監控容器。
 
@@ -417,7 +472,9 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 	 * 重建是 O(全部貼文) 的工作，讓它跑完可能還要數秒，而那一刻行程本來就要
 	 * 結束；下次啟動時會再重建一次，因此中斷它不會留下永久性的落後狀態。
 	 */
+	backgroundWG.Add(1)
 	go func() {
+		defer backgroundWG.Done()
 		if cfg.ESURL != "" {
 			// 驗證種類先記下來：它只有三個值、不含任何機密內容。要記它是因為
 			// 「ES 開了安全性但我們沒給驗證」這個組合失效時，每個請求都只會
@@ -448,12 +505,14 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 	 * ReconcileSearchIndex）。
 	 *
 	 * 六小時一次是取捨：幽靈只影響 total 多算幾筆與「搜得到但點進去 404」
-	 * 的邊界情形，而每輪對帳是一次全表主鍵掃描加一次索引全量分页——對一個
-	 * 論壇的規模，這個成本在六小時的间隔下可以忽略，而縮短间隔換到的
-	 * 收敛速度對使用者幾乎不可見。
+	 * 的邊界情形，而每輪對帳是一次全表主鍵掃描加一次索引全量分頁——對一個
+	 * 論壇的規模，這個成本在六小時的間隔下可以忽略，而縮短間隔換到的
+	 * 收斂速度對使用者幾乎不可見。
 	 */
 	if srv.SearchEnabled() {
+		backgroundWG.Add(1)
 		go func() {
+			defer backgroundWG.Done()
 			ticker := time.NewTicker(6 * time.Hour)
 			defer ticker.Stop()
 			for {
@@ -527,6 +586,10 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 			DB:             db,
 			Interval:       20 * time.Second,
 			RetentionHours: cfg.MonitorRetentionHours,
+			// 把 flusher 納入等待：它在 ctx 被取消時會做一次收尾寫入，而
+			// 那次寫入必須發生在資料庫連線被關掉**之前**（否則「停止前的
+			// 最後一段流量」會少一截）。
+			WG: &backgroundWG,
 		}); err != nil {
 			// 拿不到 *sql.DB 只會發生在 main 的組裝被改動時；此時監控頁
 			// 仍可用（只是沒有重啟前的歷史），因此記警告即可。
@@ -550,7 +613,11 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 	 * 另做收尾寫入 —— 稽核紀錄的寫入發生在請求裡（在途請求完成後資料就已在
 	 * 資料庫），清理本身沒有任何待收的東西。
 	 */
-	go audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
+	backgroundWG.Add(1)
+	go func() {
+		defer backgroundWG.Done()
+		audit.NewPruner(db, time.Duration(cfg.AuditRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
+	}()
 
 	/*
 	 * 啟動軟刪除貼文的定期清理（保留期到期後硬刪）。
@@ -561,18 +628,25 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 	 * 檔頭）。
 	 *
 	 * 檔案刪除能力來自 srv.DeleteFile（httpapi.Server 持有檔案伺服器的位址
-	 * 與 token）；沒有檔案伺服器時它仍然可用——列照刪，檔案留著。
+	 * 與 token）。檔案伺服器故障時列照刪，檔名留在 forum_media_deletions
+	 * 佇列，下一個 tick 重試。
 	 */
-	go purge.NewPruner(db, srv, time.Duration(cfg.PostRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
+	backgroundWG.Add(1)
+	go func() {
+		defer backgroundWG.Done()
+		purge.NewPruner(db, srv, time.Duration(cfg.PostRetentionDays)*24*time.Hour, time.Hour).Run(backgroundCtx)
+	}()
 
 	/*
 	 * 啟動日別彙總（forum_daily_stats）的刷新排程。
 	 *
-	 * 每十分钟重算最近三天（為什麼是「重算」而不是「累加」、窗口為什麼是
+	 * 每十分鐘重算最近三天（為什麼是「重算」而不是「累加」、窗口為什麼是
 	 * 三天，見 data/rollup.go 的檔頭）。失敗只記日誌：下一 tick 會重試，
 	 * 而彙總表缺一段只是統計頁少一段資料，不影響論壇的任何功能。
 	 */
+	backgroundWG.Add(1)
 	go func() {
+		defer backgroundWG.Done()
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -605,16 +679,20 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 	 * 而且接下來的啟動日誌一條都不會再出現。與上面的稽核清理同一個寫法。
 	 */
 	if srv.Blocks() != nil {
-		go ipban.NewPruner(srv.Blocks(), time.Hour).Run(backgroundCtx,
-			func(removed int, err error) {
-				if err != nil {
-					logger.Warnf("[BLOCKLIST] 無法清理過期封鎖: %v", err)
-					return
-				}
-				if removed > 0 {
-					logger.Infof("[BLOCKLIST] 已清理 %d 筆過期封鎖", removed)
-				}
-			})
+		backgroundWG.Add(1)
+		go func() {
+			defer backgroundWG.Done()
+			ipban.NewPruner(srv.Blocks(), time.Hour).Run(backgroundCtx,
+				func(removed int, err error) {
+					if err != nil {
+						logger.Warnf("[BLOCKLIST] 無法清理過期封鎖: %v", err)
+						return
+					}
+					if removed > 0 {
+						logger.Infof("[BLOCKLIST] 已清理 %d 筆過期封鎖", removed)
+					}
+				})
+		}()
 		logger.Infof("[BLOCKLIST] IP 封鎖名單已啟用")
 	} else {
 		logger.Warnf("[BLOCKLIST] 未啟用 IP 封鎖名單（缺少 Redis 連線）")
@@ -624,7 +702,6 @@ func startServices(backgroundCtx context.Context, cfg config.Config, db *sql.DB,
 	logger.Infof("[PURGE] 軟刪除貼文保留 %d 天，過期貼文每小時清理一次", cfg.PostRetentionDays)
 	return srv, registry
 }
-
 
 // ---------------------------------------------------------------------------
 // -check：設定檔報告
@@ -831,6 +908,25 @@ func checkConfig(path string) error {
 	fmt.Fprintf(out, "日誌\n")
 	fmt.Fprintf(out, "  等級 / 格式        : %s / %s\n", cfg.LogLevel, cfg.LogFormat)
 	fmt.Fprintf(out, "  輸出檔案           : %s\n", orNotSet(cfg.LogFile, "未設定 → 只輸出到 stdout"))
+	// 輪替的兩個值刻意也印出來：它們的失效是**靜默的**（設定成 0 或太小都
+	// 不會讓服務啟動失敗，只是日誌檔案在磁碟滿之前會先長到撐滿空間）。
+	// 而報告存在的理由就是「回答這個行程會以什麼組態啟動」。
+	if cfg.LogMaxSizeMB <= 0 {
+		fmt.Fprintf(out, "  輪替上限           : 不輪替（LOG_MAX_SIZE_MB = 0）\n")
+	} else {
+		fmt.Fprintf(out, "  輪替上限           : %d MB\n", cfg.LogMaxSizeMB)
+	}
+	fmt.Fprintf(out, "  保留的輪替檔       : %d 檔\n", cfg.LogMaxFiles)
+	fmt.Fprintln(out)
+
+	// 11. 軟刪除貼文的保留期。
+	//
+	// 這一組一定要印：它是全站唯一會**不可逆地刪掉使用者內容**的設定，
+	// 而它的失效完全沒有症狀 —— 服務正常啟動、正常回應，只有背景排程會
+	// 在 N 天後把軟刪除的貼文（連同留言、按讚、收藏、檢舉與不再被引用的
+	// 附圖）硬刪掉。設定成 7 與設定成 90 的差別，在啟動之後就看不到了。
+	fmt.Fprintf(out, "資料保留\n")
+	fmt.Fprintf(out, "  軟刪除貼文保留     : %d 天（到期後硬刪，之後無法還原）\n", cfg.PostRetentionDays)
 	fmt.Fprintln(out)
 
 	// 最後跑一次 Validate —— 上面那些是人可讀的資訊，這一個是機器可判定的結論，
@@ -970,8 +1066,8 @@ func reportHealth(path string) error {
 		return fmt.Errorf("設定檔不可用：%w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
-	defer cancel()
+	// 探測本身不需要一個共用的 context：每個探測各自開一個（見下），
+	// 因此這裡沒有 ctx 可取消。
 
 	// MySQL。刻意開一個**獨立的**連線而不是重用任何全域狀態：healthcheck 是
 	// 另一個行程（Docker 每次探測都重新執行 CMD），它必須能獨立運作。
@@ -988,7 +1084,12 @@ func reportHealth(path string) error {
 		// 設定上限，避免 Ping 逾時時連線池無限增長。
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(0)
-		pingErr := db.PingContext(ctx)
+		// 每個探測各自一個 context：共用一個的話，MySQL 慢下來時會吃掉 Redis
+		// 的預算（1.9 秒的 MySQL 會讓 Redis 只剩 0.1 秒，而 Redis 其實完全
+		// 正常 —— 症狀是一個沒有任何資訊的 unhealthy）。
+		pingCtx, cancelPing := context.WithTimeout(context.Background(), healthProbeTimeout)
+		pingErr := db.PingContext(pingCtx)
+		cancelPing()
 		_ = db.Close()
 		if pingErr != nil {
 			return fmt.Errorf("MySQL 不可用：%w", pingErr)
@@ -1004,7 +1105,10 @@ func reportHealth(path string) error {
 			Password: cfg.RedisPassword,
 			DB:       cfg.RedisDB,
 		})
-		pingErr := client.Ping(ctx).Err()
+		// 與 MySQL 同一個理由：各自一個 context。
+		pingCtx, cancelPing := context.WithTimeout(context.Background(), healthProbeTimeout)
+		pingErr := client.Ping(pingCtx).Err()
+		cancelPing()
 		_ = client.Close()
 		if pingErr != nil {
 			return fmt.Errorf("Redis 不可用：%w", pingErr)

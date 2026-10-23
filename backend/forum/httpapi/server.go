@@ -847,17 +847,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "announcements.html"))
 	})
-	assetServer := http.FileServer(http.Dir(frontendAssetsRoot(frontendDir)))
-	mux.Handle("/assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 僅 GET 掛 immutable：建置工具產出的資產檔名帶內容 hash，內容變了
-		// 檔名就會變，所以可以安心地宣告「一年內不會變」。非 GET 請求不該
-		// 帶著這份快取標頭 —— 萬一之後有其他方法走到這裡，標頭語意就不對了。
-		if r.Method == http.MethodGet {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		}
-		// StripPrefix 讓底層 FileServer 以 assets/ 之後的路徑去對應磁碟目錄。
-		http.StripPrefix("/assets/", assetServer).ServeHTTP(w, r)
-	}))
+	mux.Handle("/assets/", hashedAssetHandler(frontendDir))
 	// 登入頁同時註冊帶尾斜線與不帶兩個樣式：前者的子樹比對讓 "/forum/login/"
 	// 進得來，handleForumLoginPage 內的列舉再把未定義的子路徑擋成 404。
 	mux.HandleFunc("/forum/login", s.handleForumLoginPage(frontendDir))
@@ -886,7 +876,7 @@ func (s *Server) Handler() http.Handler {
 	// /asset/ 是給後台與 PWA 使用的一手素材（圖示等）。路徑由 frontendAssetRoot
 	// 解析而非寫死，理由見該函式：寫死 `../frontend/asset` 在容器裡會指向
 	// /frontend/asset，而映像裡的檔案在 /app/frontend/asset。
-	mux.Handle("/asset/", http.StripPrefix("/asset/", http.FileServer(http.Dir(frontendAssetRoot(frontendDir)))))
+	mux.Handle("/asset/", sourceAssetHandler(frontendDir))
 
 	//  "/" 是 catch-all 路由。位置無關緊要（匹配只看具體程度），"/" 是最不
 	// 具體的樣式，所以前面沒被認領的路徑自然會落到這裡。

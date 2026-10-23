@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 /* ==========================================================================
@@ -114,4 +116,28 @@ func TestForumImageDeleteRequiresLogin(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("未登入的回應 = %d, want 401", recorder.Code)
 	}
+}
+
+// TestForumPostBookmarkDuplicateInsertIsNotAnError 釘住「連按兩下收藏」的
+// 行為。
+//
+// 兩個並發請求都可能讀到「尚未收藏」而都送出 INSERT，而複合主鍵讓其中一個
+// 收到 1062 —— 但那一筆其實**已經是收藏狀態**了（另一個請求剛插進來）。
+// 因此它不是錯誤，而是「以資料庫為準的最終狀態」：回 200 + bookmarked:true。
+//
+// 回 500 會讓使用者看到一個錯誤訊息，而實際上他的操作成功了 —— 而「連按兩下」
+// 是最常見的觸發方式。
+func TestForumPostBookmarkDuplicateInsertIsNotAnError(t *testing.T) {
+	h := newCovHarness(t)
+	covCommentsPostVisible(h)
+	h.rows("FROM forum_post_bookmarks WHERE post_id = ? AND author_email = ?",
+		[]string{"count"}, []driverValue{int64(0)})
+	h.execError("INSERT INTO forum_post_bookmarks",
+		&mysql.MySQLError{Number: 1062, Message: "Duplicate entry"})
+
+	recorder := h.do(h.srv.handleForumPostBookmark, http.MethodPost,
+		"/api/forum/posts/7/bookmark", "", "me@example.com", false)
+
+	covWantStatus(t, recorder, http.StatusOK)
+	covCommentsWantBody(t, recorder, `"bookmarked":true`)
 }

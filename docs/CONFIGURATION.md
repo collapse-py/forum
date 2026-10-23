@@ -33,7 +33,7 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `COOKIE_SECURE` | `false` | 走 HTTPS 就必須 `true`（見 [SECURITY](SECURITY.md)） |
 | `SERVER_PORT` | `:8088` | `net/http` 的 `host:port` |
 | `READ_HEADER_TIMEOUT_SECONDS` | `10` | 讀完**請求標頭**的期限。只卡標頭不卡本文 |
-| `SHUTDOWN_TIMEOUT_SECONDS` | `15` | 停止時等待在途請求的秒數。必須小於部署環境的停止上限 |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `15` | 停止時等待在途請求的秒數。之後還有最多 3 秒的收尾，部署環境的停止上限必須大於這個總和 |
 | `PUBLIC_BASE_URL` | `http://localhost` + `SERVER_PORT` | 尾斜線會被自動去掉 |
 | `TRUSTED_ORIGINS` | `[PUBLIC_BASE_URL]` | CSRF 來源白名單。**留空等於關閉 CSRF 防護** |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。**容器部署必須填 `172.28.0.0/16`** |
@@ -58,6 +58,21 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `LOG_LEVEL` / `LOG_FILE` / `LOG_FORMAT` | `INFO` / `server.log` / `text` | 格式可選 `json`；輸出行格式見[日誌輸出格式](#日誌輸出格式) |
 | `MONITOR_RETENTION_HOURS` | `24` | 監控分鐘彙總在資料庫保留幾小時 |
 | `AUDIT_RETENTION_DAYS` | `90` | 稽核紀錄保留幾天 |
+| `POST_RETENTION_DAYS` | `90` | **軟刪除的貼文保留幾天**。到期後會被硬刪（連同留言、按讚、收藏、檢舉工單），**不可逆** |
+| `LOG_MAX_SIZE_MB` | `50` | 日誌檔輪替的大小上限（MB）。`0` = 不輪替 |
+| `LOG_MAX_FILES` | `5` | 保留的輪替檔數（不含目前檔）。至少 1；超過 1000 以 1000 計（避免輪替的 rename 迴圈無界成長） |
+
+### 兩組「設定錯了也不會有症狀」的鍵
+
+`POST_RETENTION_DAYS` 與 `LOG_MAX_SIZE_MB` 的失效**完全沒有症狀**：服務照常啟動、
+照常回應、日誌乾淨、HTTP 狀態碼全對。
+
+- `POST_RETENTION_DAYS` 是全站唯一會**不可逆地刪掉使用者內容**的設定。設定成 7 與
+  設定成 90 的差別，在啟動之後就看不到 —— 只有背景清理排程知道。因此 `forum -check`
+  的報告刻意印出這個值。
+- `LOG_MAX_SIZE_MB = 0` 代表「不輪替」，同樣沒有症狀，只是日誌檔會一直長到磁碟滿
+  （而磁碟滿之後的失敗模式是「輪替失敗」——那時日誌會退回只寫 stdout，且檔案輸出
+  停止；這一條會在 stderr 印一行警告）。
 
 ### 站名
 

@@ -14,7 +14,7 @@ purge 套件的測試（backend/forum/purge/purge_test.go）。
 
 【為什麼不用 sqlmock】
 
-與 data/migration_test.go 的理由相同：sqlmock 只能回傳「预先写好的答案」，
+與 data/migration_test.go 的理由相同：sqlmock 只能回傳「預先寫好的答案」，
 而清理排程的正確性恰恰是「DELETE 之後 SELECT 看不到」——那需要真的資料庫
 真的刪。
 */
@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,12 +86,18 @@ func TestEscapeLike(t *testing.T) {
 }
 
 // recordingDeleter 記錄被「刪除」的檔名，並可模擬檔案伺服器的故障。
+//
+// 刪檔在正式程式裡是並行的，因此 deleted 的 append 必須加鎖；測試端在
+// Prune 返回後才讀取，透過 WaitGroup 的 join 取得 happens-before。
 type recordingDeleter struct {
+	mu      sync.Mutex
 	deleted []string
 	fail    bool
 }
 
 func (d *recordingDeleter) DeleteFile(_ context.Context, name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.fail {
 		return errors.New("file server down")
 	}
@@ -98,9 +105,21 @@ func (d *recordingDeleter) DeleteFile(_ context.Context, name string) error {
 	return nil
 }
 
+func (d *recordingDeleter) setFail(fail bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.fail = fail
+}
+
+func (d *recordingDeleter) deletedNames() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.deleted...)
+}
+
 var purgeDBCounter atomic.Int64
 
-// purgeTestDB 建立一個跑完整 MigrateMySQL 的拋棄式資料庫；未設定
+// purgeTestDB 建立一個跑清理排程專用 schema 的拋棄式資料庫；未設定
 // FORUM_TEST_MYSQL_DSN 時 skip（與 data/migration_test.go 同一個約定）。
 func purgeTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -154,8 +173,8 @@ func purgeTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// migrateForPurge 只建立清理排程會觸碰的表，避免整個 MigrateMySQL 的
-// 34 步在每次測試都跑一遍。列的形状與 data/mysql.go 逐字相同（測試驗的是
+// migrateForPurge 只建立清理排程會觸碰的表，避免完整 MigrateMySQL 的
+// 37 步在每次測試都跑一遍。列的形狀與 data/mysql.go 逐字相同（測試驗的是
 // 「清理排程的 SQL 對真實 schema 成立」，用同一份 DDL 才有意義）。
 func migrateForPurge(db *sql.DB) error {
 	stmts := []string{
@@ -168,7 +187,8 @@ func migrateForPurge(db *sql.DB) error {
 			updated_at DATETIME NULL,
 			pinned TINYINT NOT NULL DEFAULT 0,
 			deleted_at DATETIME NULL,
-			PRIMARY KEY (id)
+			PRIMARY KEY (id),
+			KEY idx_forum_posts_deleted_at_id (deleted_at, id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS forum_post_comments (
 			id BIGINT NOT NULL AUTO_INCREMENT,
@@ -178,7 +198,8 @@ func migrateForPurge(db *sql.DB) error {
 			author_email VARCHAR(255) NOT NULL,
 			content TEXT NOT NULL,
 			created_at DATETIME NOT NULL,
-			PRIMARY KEY (id)
+			PRIMARY KEY (id),
+			KEY idx_forum_post_comments_post_id (post_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS forum_post_likes (
 			post_id BIGINT NOT NULL,
@@ -201,7 +222,8 @@ func migrateForPurge(db *sql.DB) error {
 			status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
 			created_at DATETIME NOT NULL,
 			reviewed_at DATETIME NULL,
-			reviewed_by VARCHAR(255) NOT NULL DEFAULT ''
+			reviewed_by VARCHAR(255) NOT NULL DEFAULT '',
+			KEY idx_forum_reports_target (target_type, target_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS forum_profiles (
 			author_email VARCHAR(255) NOT NULL,
@@ -216,6 +238,12 @@ func migrateForPurge(db *sql.DB) error {
 			owner_email VARCHAR(255) NOT NULL,
 			created_at DATETIME NOT NULL,
 			PRIMARY KEY (filename)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS forum_media_deletions (
+			filename VARCHAR(128) NOT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (filename),
+			KEY idx_forum_media_deletions_created_at (created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	}
 	for _, s := range stmts {
@@ -254,8 +282,13 @@ func TestPruneMySQL(t *testing.T) {
 	if expired == 0 {
 		t.Fatal("無法插入過期貼文")
 	}
-	if _, err := db.Exec(`INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, 'b@example.com', '留言', ?)`, expired, old); err != nil {
+	commentRes, err := db.Exec(`INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, 'b@example.com', '留言', ?)`, expired, old)
+	if err != nil {
 		t.Fatalf("插入留言失敗: %v", err)
+	}
+	commentID, err := commentRes.LastInsertId()
+	if err != nil {
+		t.Fatalf("讀取留言 id 失敗: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (?, 'c@example.com', ?)`, expired, old); err != nil {
 		t.Fatalf("插入按讚失敗: %v", err)
@@ -265,6 +298,12 @@ func TestPruneMySQL(t *testing.T) {
 	}
 	if _, err := db.Exec(`INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, created_at) VALUES ('post', ?, 'e@example.com', '檢舉', ?)`, expired, old); err != nil {
 		t.Fatalf("插入檢舉失敗: %v", err)
+	}
+	// 留言檢舉走的是 deletePosts 的 JOIN 路徑；沒有這筆的話，那條 SQL 只會
+	// 在單元測試的替身上被驗到，真實 MySQL 的語意（別名、JOIN、target_type）
+	// 不會被執行。
+	if _, err := db.Exec(`INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, created_at) VALUES ('comment', ?, 'h@example.com', '檢舉留言', ?)`, commentID, old); err != nil {
+		t.Fatalf("插入留言檢舉失敗: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO forum_media (filename, owner_email, created_at) VALUES ('old_a.png', 'a@example.com', ?)`, old); err != nil {
 		t.Fatalf("插入媒體紀錄失敗: %v", err)
@@ -315,19 +354,70 @@ func TestPruneMySQL(t *testing.T) {
 		t.Fatalf("指向過期貼文的檢舉應一併清除，實際 %d", countRows(db, "forum_reports"))
 	}
 
-	if len(deleter.deleted) != 1 || deleter.deleted[0] != "old_a.png" {
-		t.Fatalf("只應回收不再被引用的附圖，實際 %v", deleter.deleted)
+	deletedFiles := deleter.deletedNames()
+	if len(deletedFiles) != 1 || deletedFiles[0] != "old_a.png" {
+		t.Fatalf("只應回收不再被引用的附圖，實際 %v", deletedFiles)
 	}
 	if countRows(db, "forum_media") != 1 {
 		var remaining string
 		_ = db.QueryRow("SELECT filename FROM forum_media").Scan(&remaining)
 		t.Fatalf("forum_media 應只剩 shared.png，實際 %q", remaining)
 	}
+	if countRows(db, "forum_media_deletions") != 0 {
+		t.Fatalf("成功刪檔後 forum_media_deletions 應清空，實際 %d", countRows(db, "forum_media_deletions"))
+	}
 
 	// 第二次 Prune 應是冪等的：沒有東西可刪。
 	again, err := p.Prune(context.Background())
 	if err != nil || again != 0 {
 		t.Fatalf("第二次 Prune 應回 (0, nil)，得到 (%d, %v)", again, err)
+	}
+}
+
+// TestDeletePostsRechecksRestoredPostsMySQL 在真實 MySQL 上驗證 H1 的
+// TOCTOU 防線：取回（fetchExpiredPosts）之後才被還原的貼文，deletePosts
+// 不能在交易裡把它硬刪。
+//
+// 單元測試用 driver 替身模擬「鎖定查詢只回一個 id」；這一支驗的是同一條
+// 路徑在真實 schema 上的 SQL 語意（FOR UPDATE + deleted_at 條件）。
+func TestDeletePostsRechecksRestoredPostsMySQL(t *testing.T) {
+	db := purgeTestDB(t)
+
+	old := time.Now().Add(-100 * 24 * time.Hour)
+	id := insertPost(db, "restore@example.com", "取回後被還原", "", &old)
+	if id == 0 {
+		t.Fatal("無法插入過期貼文")
+	}
+
+	cutoff := time.Now().Add(-90 * 24 * time.Hour)
+	p := NewPruner(db, nil, 90*24*time.Hour, time.Hour)
+	posts, err := p.fetchExpiredPosts(context.Background(), cutoff, 10)
+	if err != nil {
+		t.Fatalf("fetchExpiredPosts: %v", err)
+	}
+	if len(posts) != 1 || posts[0].id != id {
+		t.Fatalf("取回的過期貼文 = %+v, want id=%d", posts, id)
+	}
+
+	// 模擬管理員在取回與刪除之間按下還原。
+	if _, err := db.Exec(`UPDATE forum_posts SET deleted_at = NULL WHERE id = ?`, id); err != nil {
+		t.Fatalf("還原貼文失敗: %v", err)
+	}
+
+	deleted, err := p.deletePosts(context.Background(), posts, cutoff)
+	if err != nil {
+		t.Fatalf("deletePosts: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deletePosts 刪除了已被還原的貼文: %v", deleted)
+	}
+
+	var deletedAt sql.NullTime
+	if err := db.QueryRow(`SELECT deleted_at FROM forum_posts WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+		t.Fatalf("讀回貼文失敗（可能已被硬刪）: %v", err)
+	}
+	if deletedAt.Valid {
+		t.Errorf("deleted_at = %v, want NULL", deletedAt.Time)
 	}
 }
 
@@ -349,12 +439,29 @@ func TestPruneKeepsImageWhenFileServerFails(t *testing.T) {
 		t.Fatalf("Prune 失敗: %v", err)
 	}
 
-	// 檔案伺服器故障：貼文列照刪，forum_media 列保留（見檔頭：外部系統的
-	// 故障不影響列的清理，孤兒檔案由下一次清理或使用者端收斂）。
+	// 檔案伺服器故障：貼文列照刪，forum_media 列保留，檔名留在佇列。
 	if countRows(db, "forum_posts") != 0 {
 		t.Fatalf("貼文列應被清理")
 	}
 	if countRows(db, "forum_media") != 1 {
 		t.Fatalf("檔案刪除失敗時 forum_media 列應保留，實際 %d", countRows(db, "forum_media"))
+	}
+	if countRows(db, "forum_media_deletions") != 1 {
+		t.Fatalf("檔案刪除失敗時檔名應留在佇列，實際 %d", countRows(db, "forum_media_deletions"))
+	}
+
+	// 檔案伺服器恢復後，下一次 Prune（即使沒有過期貼文）必須從佇列重試。
+	deleter.setFail(false)
+	if _, err := p.Prune(context.Background()); err != nil {
+		t.Fatalf("重試 Prune 失敗: %v", err)
+	}
+	if countRows(db, "forum_media") != 0 {
+		t.Fatalf("重試成功後 forum_media 列應被移除，實際 %d", countRows(db, "forum_media"))
+	}
+	if countRows(db, "forum_media_deletions") != 0 {
+		t.Fatalf("重試成功後佇列應清空，實際 %d", countRows(db, "forum_media_deletions"))
+	}
+	if got := deleter.deletedNames(); len(got) != 1 || got[0] != "old_a.png" {
+		t.Fatalf("重試成功後應刪除 old_a.png，實際 %v", got)
 	}
 }

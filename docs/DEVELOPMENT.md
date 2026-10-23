@@ -82,6 +82,8 @@ cd ../backend && go run ./tools/coveragefloor <單一模組的 coverage.out> 75.
 
 它刻意是**獨立的 Go 模組**：它需要 `golang.org/x/tools`，而 backend 的相依項刻意維持在四個（miniredis、mysql、go-redis、oauth2）。把分析工具的相依塞進 runtime 相依裡，等於讓每個部署環境都多下載一份只有 CI 需要的程式碼。
 
+（這一段講的是 `tools/invariants`，**不是** `backend/tools/coveragefloor`：後者只用到標準函式庫（`bufio`／`fmt`／`io`／`os`／`sort`／`strconv`／`strings`），而且住在 backend 模組裡（`forum/tools/coveragefloor`）—— 因為它要讀的是 backend 產出的 cover profile，而工具本身沒有任何 runtime 相依的需求。另外，backend 的直接相依現在是**六個**（多了測試用的 `go-sqlmock` 與 `gorilla/websocket`）。）
+
 第四條跨越 Go / TypeScript / HTML 三種語言，`go/analysis` 表達不了，因此它是**一個測試**而不是 analyzer。兩種失敗模式（編譯失敗 vs 測試失敗）刻意不混在同一個工具裡，以免搞混哪一條失效了。
 
 ---
@@ -97,13 +99,14 @@ cd ../backend && go run ./tools/coveragefloor <單一模組的 coverage.out> 75.
 | `frontend` | `npm ci`、`typecheck`、`build`、`verify-catalogs` |
 | `coverage-floor` | 合併兩個模組的覆蓋率，檢查是否 ≥ **75.0** |
 | `invariants` | 建置並執行分析器，加上分析器自測 |
-| `migrations` | 起真實 MySQL 8.0.29，跑 `forum/data` 的遷移測試 |
+| `migrations` | 起真實 MySQL 8.0.29，跑 `forum/data` 的遷移測試，以及 `forum/httpapi`、`forum/purge`、`forum/audit`、`forum/metrics` 裡需要真實 MySQL 的那幾組 |
 | `secrets` | 確認 `config.conf` 從未被追蹤、範本檔的憑證鍵仍是佔位符（附反向自我測試） |
 
 兩件事值得知道：
 
 - `secrets` 用 `fetch-depth: 0` 掃**整份歷史** —— 只掃工作區的話，一個「刪掉檔案」的 commit 就足以讓真正的憑證留在倉庫裡。
 - **覆蓋率地板的作用是防止退化，不是製造動機。** 地板是 **75.0**，而且是**逐套件**量的：每個套件都要 ≥ 75.0%，`backend` 與 `files_server` 各自的 job 各量一次，`coverage-floor` job 另外量合併後的總數。兩道閘門擋的不是同一種退化 —— 總數看不見「某個套件被掏空」，而那正是會出事的地方。
+- **第三道閘門補上那兩道都量不到的一種退化。** 一個套件的測試被**整包刪掉**時，它不會以 0% 出現在 cover profile 裡，而是**從 profile 裡消失** —— 因此逐套件地板量不到它（它已經不在被量的集合裡），而總覆蓋率甚至會因為分母變小而**上升**。因此 `coveragefloor` 另有 `--expect-packages`：CI 把 `go list` 的輸出交給它，少了哪一個套件就 fail。清單用 `{{if .GoFiles}}` 過濾，因為只含測試檔的套件（例如 `forum/forum/logcaller`）沒有任何敘述，不會出現在 profile 裡。
 
   目前實測（2026-10-21，本機 `go test ./...`，不含真實 MySQL）：
 
@@ -114,7 +117,7 @@ cd ../backend && go run ./tools/coveragefloor <單一模組的 coverage.out> 75.
   | `forum/forum/purge` | 93.5% | `forum/forum/httpapi` | 87.0% |
   | `forum/forum/ipban` | 92.9% | `forum`（main） | 78.5% |
   | `forum/forum/es` | 92.8% | `forum/forum/metrics` | 76.9% |
-  | `forum/forum/logger` | 91.1% | `forum/tools/coveragefloor` | 98.3% |
+  | `forum/forum/logger` | 91.1% | `forum/tools/coveragefloor` | 98.1% |
   | `forum/forum/auth` | 92.0% | `files_server` | 91.6% |
 
   backend 合計 **87.4%**、files_server **91.6%**、合併 **87.7%**（`forum/forum/logcaller` 沒有敘述，不列入）。

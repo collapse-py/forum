@@ -20,9 +20,16 @@ coveragefloor 是一個極小的 CI 閘門：讀入 go test -coverprofile 產生
 
 	go run ./tools/coveragefloor <coverage.out> <地板百分比> --per-package
 
+	go run ./tools/coveragefloor <coverage.out> <地板百分比> --expect-packages <逗號分隔的套件清單>
+
 第二個用法多一道「逐套件」檢查：除了總覆蓋率，每一個套件也要各自達到地板。
 兩者的差別是「總數過關但某個套件被掏空」——那種退化在總數上看不出來，卻正是
 真正會出事的地方（被掏空的那個套件正是壞掉時爆炸半徑最大的那個）。
+
+第三個用法補上逐套件檢查**量不到**的那一種退化：一個套件的測試被整包刪掉時，
+它不會以 0% 出現在 profile 裡，而是從 profile 裡消失 —— 因此逐套件檢查量不到
+它，而總覆蓋率甚至會因為分母變小而上升。呼叫端交出「應該存在的套件清單」
+（CI 裡是 go list 的輸出），少了哪一個就 fail。
 
 【輸出】
 
@@ -48,7 +55,7 @@ import (
 )
 
 // main 只負責把行程的進入點接到 run：真正的判斷與輸出都在 run 裡，
-// 因為 run 不碰 os.Exit，測試才能斷言四條離開路徑（0 / 1 / 2 / 2）。
+// 因為 run 不碰 os.Exit，測試才能斷言三種離開碼（0 / 1 / 2）。
 func main() {
 	os.Exit(run(os.Args, os.Stdout, os.Stderr))
 }
@@ -68,22 +75,63 @@ func main() {
 // 不是只傳參數，是為了讓測試用的呼叫與真實呼叫長得一模一樣。
 //
 // 第三個參數（選用）是 --per-package：除了總覆蓋率，每個套件也要各自達到
-// 地板。總數與逐套件是兩種不同的退化，前者看得見、后者看不見，因此兩道
+// 地板。總數與逐套件是兩種不同的退化，前者看得見、後者看不見，因此兩道
 // 閘門一起用。
 func run(args []string, stdout, stderr io.Writer) int {
 	perPackage := false
-	switch {
-	case len(args) == 3:
-	case len(args) == 4 && args[3] == perPackageFlag:
-		perPackage = true
-	default:
-		fmt.Fprintf(stderr, "用法: coveragefloor <coverage.out> <地板百分比> [--per-package]\n")
+	var expectPackages []string
+
+	// 位置參數只有兩個（profile 與地板值），旗標可以出現在任何位置。
+	//
+	// 刻意不用「len(args) == 3 或 4」那種寫法：它讓第三個旗標沒有地方放，
+	// 而每加一個旗標就要改一次那個條件 —— 那是旗標數量與解析邏輯綁在一起的
+	// 典型形狀。
+	positional := make([]string, 0, 2)
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		switch {
+		case arg == perPackageFlag:
+			perPackage = true
+		case arg == expectPackagesFlag:
+			// 下一個 token 是另一個旗標時，把它當成套件清單會產生一個
+			// 看起來像套件名稱、實際上永遠不會存在的值（例如
+			// "--per-package"），錯誤訊息因此指向錯誤的地方。
+			if i+1 >= len(rest) || strings.HasPrefix(rest[i+1], "-") {
+				fmt.Fprintf(stderr, "%s 需要一個值（逗號分隔的套件清單）\n", expectPackagesFlag)
+				return 2
+			}
+			i++
+			packages := splitPackageList(rest[i])
+			if len(packages) == 0 {
+				// 明確傳入空值（--expect-packages "" 或 " , "）若被當成
+				// 「沒有要求」，這道閘門就會靜默停用 —— 那正是它要防的
+				// 退化。空值只能是用法錯誤。
+				fmt.Fprintf(stderr, "%s 需要至少一個套件名稱（逗號分隔）\n", expectPackagesFlag)
+				return 2
+			}
+			expectPackages = packages
+		case strings.HasPrefix(arg, expectPackagesFlag+"="):
+			packages := splitPackageList(strings.TrimPrefix(arg, expectPackagesFlag+"="))
+			if len(packages) == 0 {
+				fmt.Fprintf(stderr, "%s 需要至少一個套件名稱（逗號分隔）\n", expectPackagesFlag)
+				return 2
+			}
+			expectPackages = packages
+		default:
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) != 2 {
+		fmt.Fprintf(stderr,
+			"用法: coveragefloor <coverage.out> <地板百分比> [%s] [%s <套件清單>]\n",
+			perPackageFlag, expectPackagesFlag)
 		return 2
 	}
-	path := args[1]
-	floorPercent, err := strconv.ParseFloat(args[2], 64)
+	path := positional[0]
+	floorPercent, err := strconv.ParseFloat(positional[1], 64)
 	if err != nil {
-		fmt.Fprintf(stderr, "地板值 %q 不是數字: %v\n", args[2], err)
+		fmt.Fprintf(stderr, "地板值 %q 不是數字: %v\n", positional[1], err)
 		return 2
 	}
 
@@ -123,6 +171,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// 「應該存在的套件」檢查在最後：它是一道獨立於覆蓋率數字的閘門，而它的
+	// 失敗原因（某個套件的測試被整包刪掉）必須在逐套件報告之後才看，否則
+	// 讀者會以為是某個套件的百分比太低。
+	if len(expectPackages) > 0 {
+		if failed := reportMissingPackages(profile.packages, expectPackages, stderr); failed {
+			return 1
+		}
+	}
+
 	if actual < floorPercent {
 		// 刻意建議「把地板一起調低」而不是「補測試」：地板代表的是「這個專案
 		// 曾經測到哪裡」，把它調低是一個需要說明理由的決定，而補測試是預設
@@ -140,6 +197,62 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // perPackageFlag 是開啟「逐套件檢查」的旗標。
 const perPackageFlag = "--per-package"
+
+// expectPackagesFlag 是交給工具「應該存在的套件清單」的旗標。
+//
+// 它補的是逐套件地板補不上的那一格。
+const expectPackagesFlag = "--expect-packages"
+
+// splitPackageList 把逗號分隔的套件清單切成一片。
+//
+// 空字串回傳 nil（而不是空切片）。呼叫端把「明確傳入但切完是空」視為
+// 用法錯誤（見 run 的 --expect-packages 分支）：否則 `--expect-packages ""`
+// 會靜默關掉「應該存在的套件」這道閘門。
+func splitPackageList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// reportMissingPackages 確認預期清單裡的套件都出現在覆蓋率檔中。
+//
+// 回傳值的語意與 reportPackages 一致：**true 表示有問題**（有套件不見了）。
+//
+// 為什麼需要這道閘門：一個套件的測試被**整包刪掉**時，它不會以「0%」出現
+// 在 profile 裡，而是**從 profile 裡消失** —— 因此逐套件地板量不到它（它
+// 已經不在被量的集合裡），而總覆蓋率甚至會因為分母變小而**上升**。兩道
+// 地板都看不見這種退化。
+//
+// 因此呼叫端要把「應該存在的套件清單」交給這個工具（CI 裡是 go list 的
+// 輸出）：少了哪一個就 fail，並且明確說出「測試被整包刪掉」這個原因。
+func reportMissingPackages(packages map[string]packageCoverage, expected []string, stderr io.Writer) bool {
+	missing := make([]string, 0, len(expected))
+	for _, name := range expected {
+		if _, ok := packages[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return false
+	}
+	sort.Strings(missing)
+	fmt.Fprintf(stderr,
+		"\n下列套件沒有出現在覆蓋率檔裡：\n  %s\n"+
+			"它們的測試可能整包被刪掉了 —— 一個套件從 profile 裡消失不會讓\n"+
+			"逐套件地板變紅（因為它已經不在被量的集合裡），而總覆蓋率甚至會\n"+
+			"因為分母變小而上升。兩道地板都看不見這種退化。\n",
+		strings.Join(missing, "\n  "))
+	return true
+}
 
 // packageCoverage 是一個套件的覆蓋率統計。
 type packageCoverage struct {
@@ -212,16 +325,20 @@ type coverageProfile struct {
 // 格式是每行一筆：<file>:<startLine>.<startCol>,<endLine>.<endCol> <numStmt> <count>，
 // 而 count 大於 0 代表那一段被執行過。
 //
-// 刻意同時支援 count 與 set 兩種 mode：兩者的判斷方式相同（count != 0），
-// 而 CI 的 backend job 刻意用 -covermode=count（它的數字才是量測基準），
-// 但本地有人用 -covercovermode=set 產生的檔案跑這個工具時不該失敗。
+// 刻意同時支援 count、set 與 atomic 三種 mode：三者的判斷方式相同
+// （count != 0 即為「有被執行過」），而覆蓋率百分比與計數器是不是 atomic
+// 無關（2026-10-22 在本地以 count 與 atomic 各跑一次全模組，總數與逐套件
+// 數字逐一相同）。CI 的 backend job 在 -race 之下只能使用 atomic
+// （Go 1.26 起 -race 只接受 atomic），而本地有人用別的 mode 產生的檔案
+// 跑這個工具時不該失敗。
 //
 // 「檔案不存在」與「格式壞掉」分成兩種錯誤回報：前者通常是路徑錯，後者是
 // 版本不相容，而兩者的處置完全不同。
 //
 // 套件的分組依「檔案路徑的目錄部分」：cover profile 裡的路徑是相對於模組
 // 根目錄的（forum/forum/httpapi/server.go），而套件就是那個目錄。根目錄
-// 底下的檔案（main.go）歸在 "." 這一組。
+// 底下的檔案（main.go）落在「forum」這個模組前綴底下，而沒有前綴的
+// （files_server 模組的 server.go）才會是 "." 這一組。
 func readProfile(path string) (coverageProfile, error) {
 	profile := coverageProfile{packages: map[string]packageCoverage{}}
 	file, err := os.Open(path)
@@ -238,7 +355,9 @@ func readProfile(path string) (coverageProfile, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	sawMode := false
+	lineNo := 0
 	for scanner.Scan() {
+		lineNo++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -251,15 +370,15 @@ func readProfile(path string) (coverageProfile, error) {
 		// 不需要處理引號（cover profile 不會產生含空白的檔名）。
 		fields := strings.Fields(line)
 		if len(fields) != 3 {
-			return coverageProfile{}, fmt.Errorf("第 %d 行不是三個欄位: %q", profile.statements, line)
+			return coverageProfile{}, fmt.Errorf("第 %d 行不是三個欄位: %q", lineNo, line)
 		}
 		numStmt, convErr := strconv.Atoi(fields[1])
 		if convErr != nil {
-			return coverageProfile{}, fmt.Errorf("欄位 %q 不是整數: %w", fields[1], convErr)
+			return coverageProfile{}, fmt.Errorf("第 %d 行的欄位 %q 不是整數: %w", lineNo, fields[1], convErr)
 		}
 		count, convErr := strconv.Atoi(fields[2])
 		if convErr != nil {
-			return coverageProfile{}, fmt.Errorf("欄位 %q 不是整數: %w", fields[2], convErr)
+			return coverageProfile{}, fmt.Errorf("第 %d 行的欄位 %q 不是整數: %w", lineNo, fields[2], convErr)
 		}
 		profile.statements += numStmt
 		covered := 0

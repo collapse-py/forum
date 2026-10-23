@@ -102,19 +102,43 @@ export function ForumAdminPage() {
 
   /* --- 資料載入 ----------------------------------------------------------- */
 
+  /*
+   * posts 的請求序號。
+   *
+   * 分頁列表與搜尋結果寫進**同一個** posts 狀態，因此兩條路徑必須共用一個
+   * 「哪一個請求才是最新的那一個」判定。少了它會出現兩種症狀：
+   *   - 慢的舊回應蓋掉快的舊回應 → 畫面看起來像資料錯亂。
+   *   - 搜尋結果蓋掉分頁結果 → 畫面顯示搜尋結果，但搜尋框已經被清空、
+   *     「清除搜尋」鈕也不見了，管理員會以為自己看的是完整清單。
+   */
+  const postsRequestRef = useRef(0);
+
   const loadPosts = useCallback(async (target: number, deleted: boolean) => {
     setPosts(loadingList<AdminPost>());
     setPostsSummary(msg('common.loading'));
+    const requestId = ++postsRequestRef.current;
     try {
-      const data = await adminApi<PagedResponse<AdminPost>>(
-        `/api/admin/forum/posts?page=${target}${deleted ? '&deleted=1' : ''}`,
-      );
-      const total = Math.max(1, Number(data?.pages) || 1);
-      // 刪到最後一頁的最後一筆時，請求的頁碼可能已經不存在；退回最後一頁
-      // 而不是顯示一個空列表（與舊版的 if (page > pages) page = pages 相同）。
-      const effective = target > total ? total : target;
-      setPages(total);
-      if (effective !== target) setPage(effective);
+      let effective = target;
+      let total = 1;
+      let data: PagedResponse<AdminPost> | undefined;
+      // 頁碼被修正時必須重抓那一頁。刻意用迴圈而不是遞迴：遞迴會讓
+      // useCallback 的推導型別變成循環相依（TS7022）。
+      for (;;) {
+        data = await adminApi<PagedResponse<AdminPost>>(
+          `/api/admin/forum/posts?page=${effective}${deleted ? '&deleted=1' : ''}`,
+        );
+        // 已經有更晚的請求了：這一頁的結果不該生效。
+        if (requestId !== postsRequestRef.current) return;
+        total = Math.max(1, Number(data?.pages) || 1);
+        // 刪到最後一頁的最後一筆時，請求的頁碼可能已經不存在；退回最後一頁
+        // 而不是顯示一個空列表（與舊版的 if (page > pages) page = pages 相同）。
+        if (effective <= total) {
+          setPages(total);
+          break;
+        }
+        effective = total;
+      }
+      setPage(effective);
       const items = Array.isArray(data?.items) ? data.items : [];
       setPosts(readyList(items));
       setPostsSummary(
@@ -125,6 +149,7 @@ export function ForumAdminPage() {
         }),
       );
     } catch (error) {
+      if (requestId !== postsRequestRef.current) return;
       const message = errorText(error, msg('posts.listLoadFailed'));
       setPosts(failedList<AdminPost>(tr(message)));
       setPostsSummary(msg('common.loadFailed'));
@@ -163,10 +188,14 @@ export function ForumAdminPage() {
       setActiveQuery(trimmed);
       setPosts(loadingList<AdminPost>());
       setPostsSummary(msg('posts.searching'));
+      const requestId = ++postsRequestRef.current;
       try {
         const data = await adminApi<SearchResponse<AdminPost>>(
           `/api/admin/forum/search?q=${encodeURIComponent(trimmed)}&limit=${SEARCH_PAGE_SIZE}`,
         );
+        // 已經有更晚的請求了（管理員在搜尋進行中按了「清除搜尋」或切換
+        // 「只顯示已刪除」）：這一輪結果不該蓋掉它。
+        if (requestId !== postsRequestRef.current) return;
         const items = Array.isArray(data?.items) ? data.items : [];
         const total = Number(data?.total) || 0;
         const engine = String(data?.engine ?? '');
@@ -179,6 +208,7 @@ export function ForumAdminPage() {
             (engine === MYSQL_ENGINE ? t('posts.searchDegraded') : ''),
         );
       } catch (error) {
+        if (requestId !== postsRequestRef.current) return;
         const message = errorMessage(error, t('posts.searchFailed'));
         setPosts(failedList<AdminPost>(tr(message)));
         setPostsSummary(msg('posts.searchStatusFailed'));

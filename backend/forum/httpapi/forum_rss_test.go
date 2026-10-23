@@ -242,6 +242,51 @@ func TestForumRSSIsValidWhenEmpty(t *testing.T) {
 //     的斷言），否則同一個內容會在下一秒得到不同的 ETag，304 永遠不會發生。
 //   - 內容改變 → 新的雜湊 → 200。
 //   - 304 不帶 body 與 Content-Type。
+/* ==========================================================================
+   快取與 session 的邊界
+   ========================================================================== */
+
+// TestForumRSSNeverCarriesSessionCookie 釘住一條安全不變條件：RSS 回應
+// 不得帶著 session token 出去。
+//
+// 背景：每一個請求（含這一個）都會經過最外層的 session 續期 middleware，
+// 續期會在回應上寫入 `Set-Cookie: <session token>`。回應內容是公開的，但
+// 這個表頭不是。若回應同時標了 `Cache-Control: public`，共享快取
+// （nginx / Caddy / Cloudflare）就會把它存下來，而 RFC 9111 §3.1 要求
+// 快取連同收到的所有表頭一起存；回應沒有 Vary: Cookie，所以 cookie 不在
+// cache key 裡 —— 任何訪客都會拿到登入者的 token（完整帳號接管）。
+//
+// 因此兩件事必須同時成立：
+//  1. Cache-Control 是 private，不是 public。
+//  2. 回應上沒有 Set-Cookie（handler 必須把續期寫進來的那個拿掉）。
+//
+// 這個測試用「先把 Set-Cookie 塞進 recorder 的表頭」模擬 middleware 的
+// 行為：handler 必須自己清掉它，而不是假設「表頭本來就不會有」。
+func TestForumRSSNeverCarriesSessionCookie(t *testing.T) {
+	created := time.Date(2026, 10, 17, 8, 30, 0, 0, time.UTC)
+	server := newRSSTestServer(t, [][]driver.Value{{int64(1), "內容", created}})
+
+	recorder := httptest.NewRecorder()
+	// 模擬 session 續期 middleware 先寫進來的表頭。
+	recorder.Header().Set("Set-Cookie", "forum_session=s3cr3t-token; Path=/; HttpOnly")
+
+	server.handleForumRSS(recorder, httptest.NewRequest(http.MethodGet, "/feed.xml", nil))
+
+	if got := recorder.Header().Get("Set-Cookie"); got != "" {
+		t.Errorf("RSS 回應帶了 Set-Cookie %q —— 共享快取會把它一起存下來並發給所有訪客", got)
+	}
+	cache := recorder.Header().Get("Cache-Control")
+	if strings.Contains(cache, "public") {
+		t.Errorf("Cache-Control = %q，含 public —— 共享快取會存下這份回應", cache)
+	}
+	if !strings.Contains(cache, "private") {
+		t.Errorf("Cache-Control = %q, want 含 private", cache)
+	}
+	if !strings.Contains(cache, "max-age") {
+		t.Errorf("Cache-Control = %q, want 含 max-age（ETag 的 304 好處靠它）", cache)
+	}
+}
+
 func TestForumRSSCaching(t *testing.T) {
 	created := time.Date(2026, 10, 17, 8, 30, 0, 0, time.UTC)
 	server := newRSSTestServer(t, [][]driver.Value{{int64(1), "內容", created}})

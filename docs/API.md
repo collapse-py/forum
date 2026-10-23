@@ -219,8 +219,8 @@
 | 留言、按讚、檢舉呢？ | 資料都還在表裡，但**讀不到也不能再互動**：`GET /comments` 回 404，編輯／刪除自己的留言、按讚、收藏、留言、檢舉、置頂同樣一律 404。 |
 | 對一篇已刪除的貼文還能做什麼？ | 只有管理員能在後臺還原它（`POST /api/admin/forum/posts/{id}/restore`）。除此之外什麼都不能：它對外等同不存在，因此所有子資源端點都以母文章的可見性把關，而不是只看子資源自己還在不在。 |
 | 搜尋引擎呢？ | 刪除時移除 ES 文件（`unindexForumPost`）；全量重建也跳過已刪除的貼文。若移除失敗而留下幽靈文件，搜尋端會再用 MySQL 的可見性把它從結果與筆數中挑掉（必要時向後補齊該頁），因此回應宣稱的筆數不會多於畫面上看得到的。刪除是 best-effort，還原則會重新索引。 |
-| 可以救回來嗎？ | 可以。後臺的「只顯示已刪除」清單（`?deleted=1`）上有「還原」：`POST /api/admin/forum/posts/{id}/restore` 把 `deleted_at` 設回 `NULL` 並補一筆 `post.restore` 稽核。已經不是刪除狀態時回 200 但 `restored:false`（冪等，不記稽核）。剩下的限制見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文不會被清理)。 |
-| 資料什麼時候真正消失？ | 目前不會。軟刪除把「回收」從 handler 移出去，需要另外設計清理機制（見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文不會被清理)）。 |
+| 可以救回來嗎？ | 可以。後臺的「只顯示已刪除」清單（`?deleted=1`）上有「還原」：`POST /api/admin/forum/posts/{id}/restore` 把 `deleted_at` 設回 `NULL` 並補一筆 `post.restore` 稽核。已經不是刪除狀態時回 200 但 `restored:false`（冪等，不記稽核）。剩下的限制見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文會在保留期後被清理)。 |
+| 資料什麼時候真正消失？ | 超過 `POST_RETENTION_DAYS`（預設 90 天）之後會被**硬刪**：貼文本身，加上它的留言、按讚、收藏與指向它的檢舉工單，在同一個交易裡一起消失（`backend/forum/purge`，每小時跑一次、每個 tick 最多清 2,000 列）。那篇貼文的附圖在「不再被任何貼文或頭像引用」時會被回收。**保留期是硬期限**：到期後就不可逆了，`/restore` 對已硬刪的列回 404。詳見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#軟刪除的貼文會在保留期後被清理)。 |
 
 ---
 

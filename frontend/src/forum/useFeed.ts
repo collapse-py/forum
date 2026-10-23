@@ -89,10 +89,45 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
   const hasMoreRef = useRef(true);
   const loadingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  /*
+   * requestIdRef 認證「哪一個請求才是最新的那一個」。
+   *
+   * 為什麼 abort 不夠：中止一個請求不會讓它的 await 立刻返回 —— 它還會在
+   * 稍後走完 catch 與 finally。因此「我這一份結果還算不算數」不能只看
+   * aborted 旗標，要看自己的序號是不是仍然是最新的一個。少了這個判斷，
+   * 被中止的舊請求會在**新請求已經開始之後**才回來，而它會把自己的
+   * offset 累加回去、把列表覆蓋掉。
+   */
+  const requestIdRef = useRef(0);
+  /*
+   * itemsRef 是「目前列表」的鏡像。
+   *
+   * 為什麼需要它：remove() 必須在 **updater 之外**判斷「這一篇在不在列表
+   * 裡」，才能把 offset 的調整也放在 updater 之外 —— updater 內的副作用不
+   * 具冪等性（React 可能呼叫 updater 一次以上：重繪重試、concurrent render
+   * 被丟棄），扣兩次會讓分頁位置漂移 1~2，下一頁就會跳過或重複一篇。
+   *
+   * 它是 ref 而不是 state：remove() 由事件處理器呼叫（不在 render 期間），
+   * 因此讀到的是最近一次 render 的結果 —— 也就是當下的列表。
+   */
+  const itemsRef = useRef<ForumPost[]>([]);
+  itemsRef.current = state.items;
 
   const load = useCallback(
     (reset: boolean) => {
-      if (loadingRef.current) return;
+      if (loadingRef.current) {
+        /*
+         * reset 一定要執行：它的語意是「回到第一頁重新載入」，而被丟棄時
+         * 呼叫端會看到「按了沒反應」—— 最常見的是「取消追蹤之後重整清單」
+         * 與「首頁鈕」。那兩個呼叫點都傳 true，而它們被丟棄的症狀是
+         * 已經取消追蹤的人的貼文還留在畫面上。
+         *
+         * 因此中止進行中的那一個、從頭開始。非 reset 的載入則維持
+         * 「已在載入中就忽略」—— 那個保護是為了避免重複拉同一頁。
+         */
+        if (!reset) return;
+        abortRef.current?.abort();
+      }
       if (!reset && !hasMoreRef.current) return;
 
       if (reset) {
@@ -108,6 +143,10 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
 
       const controller = new AbortController();
       abortRef.current = controller;
+      const requestId = ++requestIdRef.current;
+      // 送出請求時的當下位置：必須在這裡讀，不能等到回應時才讀（那時列表
+      // 可能已經被更晚的 reset 清空）。
+      const offset = offsetRef.current;
 
   void (async () => {
     try {
@@ -119,12 +158,18 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
        */
       const separator = endpoint.includes('?') ? '&' : '?';
       const data = await requestJSON<ItemsResponse<ForumPost>>(
-        `${endpoint}${separator}limit=${pageSize}&offset=${offsetRef.current}`,
+        `${endpoint}${separator}limit=${pageSize}&offset=${offset}`,
         { signal: controller.signal, fallback: tr(msg('error.fallbackLoad')) },
       );
           const items = Array.isArray(data?.items) ? data.items : [];
           const hasMore = !!data.hasMore;
-          offsetRef.current += items.length;
+          /*
+           * 自己已經不是最新那一個請求了（被中止、或被更晚的 reset 取代）：
+           * 這一頁的結果與它的 offset 累加都不該生效 —— 否則舊的一頁會蓋掉
+           * 新的一頁，並讓分頁位置往前跳。
+           */
+          if (requestId !== requestIdRef.current) return;
+          offsetRef.current = reset ? items.length : offsetRef.current + items.length;
           hasMoreRef.current = hasMore;
           setState((current) => ({
             phase: 'ready',
@@ -134,6 +179,7 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
           }));
         } catch (error) {
           if (controller.signal.aborted) return;
+          if (requestId !== requestIdRef.current) return;
           const message = msg('feed.postsFailed');
           setState((current) =>
             reset
@@ -142,7 +188,14 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
           );
           void errorMessage(error, tr(message));
         } finally {
-          loadingRef.current = false;
+          /*
+           * 只讓「自己這一個請求」清掉載入中的標記。被中止的舊請求的 finally
+           * 會在新請求已經開始之後才執行 —— 那時它若無條件清掉標記，
+           * 第三個請求就會被當成「不在載入中」而疊上來。
+           */
+          if (requestId === requestIdRef.current) {
+            loadingRef.current = false;
+          }
         }
       })();
     },
@@ -167,11 +220,24 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
   }, []);
 
   const remove = useCallback((postId: number) => {
-    setState((current) => {
-      if (!current.items.some((post) => post.id === postId)) return current;
-      offsetRef.current = Math.max(0, offsetRef.current - 1);
-      return { ...current, items: current.items.filter((post) => post.id !== postId) };
-    });
+    /*
+     * 分頁位置的調整刻意放在 updater **之外**。
+     *
+     * updater 可能在一次 render 裡被呼叫多次（React 的重繪重試、
+     * concurrent render 被丟棄），而 updater 內的副作用不具冪等性：
+     * 扣兩次會讓分頁位置漂移 1~2，症狀是下一頁跳過或重複貼文。
+     *
+     * 「這篇還在列表裡嗎」的判斷也放在外面（itemsRef 的說明見上），而且
+     * 這個判斷**不可省**：一個頁面可能同時有兩份列表（動態與搜尋結果），
+     * 而刪掉「只在搜尋結果裡」的那一篇時，動態那份的 offset 不該被扣 ——
+     * 扣了它，動態的下一頁就會跳過一篇。
+     */
+    if (!itemsRef.current.some((post) => post.id === postId)) return;
+    offsetRef.current = Math.max(0, offsetRef.current - 1);
+    setState((current) => ({
+      ...current,
+      items: current.items.filter((post) => post.id !== postId),
+    }));
   }, []);
 
   return { state, load, patch, remove, items: state.items };
@@ -223,6 +289,13 @@ export async function toggleBookmark(postId: number): Promise<boolean> {
  * 發文頁與貼文編輯共用：兩者的差別只在拿到網址之後做什麼（前者放進發佈
  * 請求，後者放進 PUT 的 imageUrl），而「怎麼上傳」完全相同 —— 表單欄位名、
  * 端點與錯誤文案都不該有兩份。
+ *
+ * 缺 url 時**拋錯**，不傳空字串。
+ *
+ * 這個三態契約裡 '' 的意思是「移除圖片」（見 updateForumPost 的 imageUrl
+ * 契約）：把「上傳的回應沒有 url」當成「移除」，會讓呼叫端送出
+ * `imageUrl: ""` 而把使用者既有的附圖或頭像刪掉 —— 而且沒有任何錯誤訊息。
+ * 症狀是「上傳成功、貼文存得下、圖片不見了」。
  */
 export async function uploadForumImage(file: File): Promise<string> {
   const body = new FormData();
@@ -232,7 +305,11 @@ export async function uploadForumImage(file: File): Promise<string> {
     form: body,
     fallback: tr(msg('error.fallbackUpload')),
   });
-  return uploaded.url ?? '';
+  const url = uploaded?.url;
+  if (!url) {
+    throw new Error(tr(msg('error.fallbackUpload')));
+  }
+  return url;
 }
 
 /**

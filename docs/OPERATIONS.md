@@ -49,11 +49,15 @@ docker compose run --rm backend -check      # 容器內，不啟動任何服務
 
 1. 停止接受新連線
 2. 等在途請求完成，上限 `SHUTDOWN_TIMEOUT_SECONDS`（預設 15 秒）
-3. 寫出最後一次分鐘彙總
+3. **併行**收尾背景工作與最後一次分鐘彙總，各上限 3 秒
 4. 關閉資料庫連線
 5. 以 **exit code 0** 結束
 
 **超過上限仍有請求沒完成時會記警告並強制中斷。** 一個回 1 會讓部署端以為有東西壞了。
+
+背景收尾與最後一次彙總刻意併行，所以停止流程的總上限是 `15 + 3 = 18` 秒，而不是
+`15 + 3 + 3 = 21` 秒 —— 後者已經超過 compose 預設的 20 秒寬限，部署端會在最後一次
+寫入完成前送 `SIGKILL`。
 
 ### 部署端的停止上限必須大於它
 
@@ -69,7 +73,7 @@ compose 的設定：
 
 | 服務 | `stop_grace_period` | 為什麼是這個值 |
 | --- | --- | --- |
-| `backend` | 20s | 比 `SHUTDOWN_TIMEOUT_SECONDS`（15s）多 5 秒，那 5 秒給最後一次監控彙總與關閉連線 |
+| `backend` | 20s | `SHUTDOWN_TIMEOUT_SECONDS`（15s）之後還有最多 3 秒的背景收尾與最後一次監控彙總（兩者併行），總上限 18 秒，留 2 秒給訊號處理與關閉連線 |
 | `files_server` | 20s | 與 backend 相同。**對這個服務更重要**：一次 50 MB 的圖片上傳被砍斷時，後端已經把貼文寫進 MySQL 了，而檔案沒有落地 —— 症狀是資料庫裡有一篇文章引用一張不存在的圖片，**沒有任何日誌、沒有任何錯誤碼** |
 | `mysql` | 20s | InnoDB 需要時間 checkpoint |
 | `redis` | 10s | AOF 重寫很快 |
@@ -116,8 +120,10 @@ Go 編譯放進同一個 stage。詳細理由見 [ARCHITECTURE](ARCHITECTURE.md#
 
 ### healthcheck
 
-- `backend` 呼叫自己的 `/app/forum -healthz`（distroless 沒有 shell 與 curl）。`timeout 5s`
-  必須大於 `-healthz` 內部的 2 秒探測期限，否則結果是「探測被中斷」，那與「相依不可用」
+- `backend` 呼叫自己的 `/app/forum -healthz`（distroless 沒有 shell 與 curl）。`-healthz`
+  依序探測 MySQL 與 Redis，每個內部期限 2 秒，最壞合計 4 秒；`timeout 8s` 留給探測
+  4 秒 + 行程啟動與排程延遲 4 秒。舊值 5 秒只剩 1 秒餘裕，容器排程抖動就會讓探測在
+  第二個相依完成前被中斷，而 Docker 只會說「healthcheck timed out」，與「相依不可用」
   無法區別。
 - `mysql` 用 `mysqladmin status` 而**不是** `ping` —— `ping` 會在伺服器還在初始化時就
   成功，那一刻它對任何資料庫都回 "Access denied"。

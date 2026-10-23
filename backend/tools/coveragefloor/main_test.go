@@ -9,7 +9,7 @@ coveragefloor 的測試（main_test.go）。
  2. readCoverage 的錯誤分類：檔案不存在、不是 cover profile、欄位壞掉、
     行過長，四者都必須回錯誤而不是被當成「0 個敘述」——後者會讓閘門以
     一個指向錯誤原因的訊息 exit 2。
- 3. run 的四條離開路徑（0 / 1 / 2 / 2）與「哪個 writer 收到什麼」：
+ 3. run 的三種離開碼（0 / 1 / 2）與「哪個 writer 收到什麼」：
     stdout 只放量測結果、stderr 放錯誤。CI 日誌把兩者分開顯示，混在一起
     會讓失敗原因出現在一大段數字之後。
 */
@@ -161,6 +161,12 @@ func TestReadCoverageRejectsMalformedBlocks(t *testing.T) {
 			if !strings.Contains(err.Error(), c.want) {
 				t.Errorf("錯誤訊息 = %v, want 包含 %q", err, c.want)
 			}
+			// 行號必須是**檔案裡的行號**：壞行是第 2 行（第 1 行是 mode）。
+			// 這條斷言守住的是「錯誤訊息指向的位置是對的」—— 一個指向別處的
+			// 行號會讓維運去改錯地方的程式碼。
+			if !strings.Contains(err.Error(), "第 2 行") {
+				t.Errorf("錯誤訊息 = %v, want 包含 %q", err, "第 2 行")
+			}
 		})
 	}
 }
@@ -272,6 +278,88 @@ func TestRunRejectsUnknownFlag(t *testing.T) {
 	if !strings.Contains(stderr.String(), "用法") {
 		t.Errorf("stderr = %q, want 包含用法", stderr.String())
 	}
+}
+
+// TestRunFailsWhenExpectedPackageIsMissing 釘住「某個套件的測試被整包刪掉」
+// 這道退化。
+//
+// 這是兩道地板都看不見的那一種：被刪掉測試的套件不會以 0% 出現在 profile
+// 裡，而是**從 profile 裡消失** —— 因此逐套件地板量不到它，而總覆蓋率甚至
+// 會因為分母變小而上升。因此需要一道獨立的閘門：呼叫端交出「應該存在的
+// 套件清單」，少了哪一個就 fail。
+func TestRunFailsWhenExpectedPackageIsMissing(t *testing.T) {
+	// 套件名稱是**檔案路徑的目錄部分**（見 packageOf），因此 profile 裡的
+	// 「forum/forum/a/x.go」屬於套件「forum/forum/a」。
+	path := writeProfile(t, "mode: count\n"+
+		"forum/forum/a/x.go:1.1,2.2 1 1\n"+
+		"forum/forum/b/x.go:1.1,2.2 1 1\n")
+
+	t.Run("少了一個套件 → 失敗", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		// forum/forum/c 是被刪掉測試的套件：它不在 profile 裡。
+		code := run([]string{"coveragefloor", path, "10", "--expect-packages", "forum/forum/a,forum/forum/b,forum/forum/c"}, &stdout, &stderr)
+		if code != 1 {
+			t.Fatalf("run = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "forum/forum/c") {
+			t.Errorf("stderr = %q, want 包含 forum/forum/c", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "整包被刪掉") {
+			t.Errorf("stderr = %q, want 說明為什麼會這樣", stderr.String())
+		}
+	})
+
+	t.Run("清單都在 → 通過", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"coveragefloor", path, "10", "--expect-packages", "forum/forum/a,forum/forum/b"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run = %d, want 0（stderr=%q）", code, stderr.String())
+		}
+	})
+
+	t.Run("旗標在位置參數之前也可以", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"coveragefloor", "--expect-packages", "forum/forum/a,forum/forum/b", path, "10"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run = %d, want 0（stderr=%q）", code, stderr.String())
+		}
+	})
+
+	t.Run("清單缺值 → 用法錯誤", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"coveragefloor", path, "10", "--expect-packages"}, &stdout, &stderr); code != 2 {
+			t.Fatalf("run = %d, want 2", code)
+		}
+	})
+
+	t.Run("空清單 → 用法錯誤而不是靜默停用", func(t *testing.T) {
+		cases := [][]string{
+			{"coveragefloor", path, "10", "--expect-packages", ""},
+			{"coveragefloor", path, "10", "--expect-packages", "   "},
+			{"coveragefloor", path, "10", "--expect-packages", " , "},
+			{"coveragefloor", path, "10", "--expect-packages="},
+			{"coveragefloor", path, "10", "--expect-packages= , "},
+		}
+		for _, args := range cases {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 2 {
+				t.Errorf("run(%q) = %d, want 2（stderr=%q）", args, code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "至少一個套件名稱") {
+				t.Errorf("run(%q) 的 stderr = %q，want 指出空清單是用法錯誤", args, stderr.String())
+			}
+		}
+	})
+
+	t.Run("下一個旗標不是值 → 用法錯誤", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"coveragefloor", path, "10", "--expect-packages", "--per-package"}, &stdout, &stderr); code != 2 {
+			t.Fatalf("run = %d, want 2（stderr=%q）", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "缺少套件") {
+			t.Errorf("stderr = %q，不該把 --per-package 當成套件名稱", stderr.String())
+		}
+	})
 }
 
 /* ==========================================================================

@@ -484,9 +484,21 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
               <button
                 className="ghost-button"
                 type="button"
-                onClick={() => setImageChange(imageChange === null ? undefined : null)}
+                /*
+                 * 這顆鈕有兩種身分，取决于有沒有「進行中的變更」：
+                 *   - 沒有進行中的變更（undefined）：它是「移除圖片」，
+                 *     按下去把狀態設成 null（= 移除既有那張）。
+                 *   - 有進行中的變更（null 或選了新的檔案）：它是「取消」，
+                 *     按下去回到 undefined（= 不動既有那張）。
+                 *
+                 * 舊的寫法是「null 以外一律設成 null」，於是使用者選好一張
+                 * 新圖之後按這顆鈕，會把新選的檔案丟掉**而且**把既有那張也
+                 * 刪掉 —— 一次按鍵做兩件相反的事，而鈕上的字還寫著
+                 * 「移除圖片」，看不出它其實在做「取消」。
+                 */
+                onClick={() => setImageChange(imageChange === undefined ? null : undefined)}
               >
-                {imageChange === null ? t('common.cancel') : t('post.imageRemove')}
+                {imageChange === undefined ? t('post.imageRemove') : t('common.cancel')}
               </button>
             ) : null}
           </div>
@@ -519,8 +531,15 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
           type="button"
           aria-label={post.liked ? t('post.unlike') : t('post.like')}
           aria-pressed={!!post.liked}
-          disabled={!canInteract}
-          onClick={() => onLike(post)}
+          onClick={() => {
+            /*
+             * 未登入時刻意不 disabled：按下去會導去登入頁（onRequireLogin），
+             * 與追蹤鈕、檢舉鈕同一個行為。一顆死掉的灰鈕沒有任何線索說明
+             * 為什麼按不到。
+             */
+            if (canInteract) onLike(post);
+            else onRequireLogin();
+          }}
         >
           <LikeIcon liked={!!post.liked} />
           <span className="post-like-count">{post.likeCount || 0}</span>
@@ -545,8 +564,11 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
           type="button"
           aria-label={post.bookmarked ? t('post.unbookmark') : t('post.bookmark')}
           aria-pressed={!!post.bookmarked}
-          disabled={!canInteract}
-          onClick={() => onBookmark(post)}
+          onClick={() => {
+            // 與按讚鈕同一條規則：未登入不 disabled，按下去導去登入頁。
+            if (canInteract) onBookmark(post);
+            else onRequireLogin();
+          }}
         >
           <BookmarkIcon bookmarked={!!post.bookmarked} />
         </button>

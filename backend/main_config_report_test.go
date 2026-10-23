@@ -80,6 +80,44 @@ func TestCheckConfigReportsProductionRisks(t *testing.T) {
 	}
 }
 
+// TestCheckConfigReportsRetentionAndRotation 確認報告裡有那些「失效完全
+// 沒有症狀」的設定。
+//
+// 兩個例子：
+//   - POST_RETENTION_DAYS 是全站唯一會**不可逆地刪掉使用者內容**的設定，
+//     而服務照常啟動、照常回應 —— 只有背景排程會在 N 天後硬刪。
+//   - LOG_MAX_SIZE_MB = 0 代表「不輪替」，同樣沒有任何症狀，只是日誌檔會
+//     一直長到磁碟滿。
+//
+// 這道閘門存在的理由是「回答這個行程會以什麼組態啟動」，而這兩個值決定
+// 了行程啟動之後會做什麼 —— 因此它們必須在報告裡。
+func TestCheckConfigReportsRetentionAndRotation(t *testing.T) {
+	t.Setenv("FILES_SERVER_TOKEN", "")
+
+	cfgPath := writeConfigFile(t, strings.Join([]string{
+		"COOKIE_SECURE=false",
+		"POST_RETENTION_DAYS=7",
+		"LOG_MAX_SIZE_MB=0",
+		"LOG_MAX_FILES=3",
+	}, "\n")+"\n")
+
+	out := captureStdout(t, func() {
+		_ = checkConfig(cfgPath)
+	})
+
+	wants := []string{
+		"軟刪除貼文保留",
+		"7 天",
+		"不輪替",
+		"3 檔",
+	}
+	for _, want := range wants {
+		if !strings.Contains(out, want) {
+			t.Errorf("報告缺少 %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestCheckConfigReportsDevDefaultsAndExplicitTTL 走非正式環境的路徑：
 // 明示的 TTL、非空的代理白名單、合法的 ES 基本驗證，結論應為通過。
 func TestCheckConfigReportsDevDefaultsAndExplicitTTL(t *testing.T) {

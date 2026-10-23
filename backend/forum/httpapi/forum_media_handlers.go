@@ -120,6 +120,10 @@ func (s *Server) handleForumImageDelete(w http.ResponseWriter, r *http.Request) 
 	}
 	// owner 為空字串代表沒有紀錄（舊制檔案），此時無法證明所有權，與
 	// 「紀錄存在但擁有者是別人」回同一個 404：兩者對呼叫端是同一件事。
+	//
+	// 刻意用 http.NotFound（text/plain）而非 writeError 的 JSON：全站所有
+	// 404 都是這個形狀（見 forum_admin_handlers.go 檔頭的「回應格式的例外」，
+	// 前端只檢查 response.ok、不解析錯誤內容）。
 	if owner == "" || owner != email {
 		http.NotFound(w, r)
 		return
@@ -203,14 +207,51 @@ func (s *Server) forumMediaOwner(ctx context.Context, name string) (string, erro
 // 「_」，而 LIKE 的 _ 是「任意一個字元」—— 不跳脫的話 %/a_b.png 也會匹配
 // /aXb.png。方向是保守的（多算一個引用只會讓刪除被拒絕），但那個「多算」
 // 會讓使用者看到一個不存在的「圖片仍在使用中」，因此仍然不是可接受的行為。
+//
+// 查詢拆成兩段是為了讓索引派得上用場：`WHERE image_url = ? OR image_url LIKE ?`
+// 裡的 OR + 前綴 LIKE 會讓 MySQL 直接放棄索引（整張表掃描），而這條路徑
+// 會在**每次**換圖、刪圖、改頭像時跑到。先問等值（可用
+// idx_forum_posts_image_url / idx_forum_profiles_avatar_url），只有在等值
+// 沒查到時才補問 LIKE —— 語意完全相同（「有沒有人引用」），而常見情況是
+// 一個索引查找。
 func (s *Server) forumImageReferenceCount(ctx context.Context, name string) (int, error) {
+	exact, err := s.forumImageReferenceExact(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	if exact > 0 {
+		return exact, nil
+	}
+	// 等值沒有：可能是舊資料存的 /files/x.png 或完整網址，補問 LIKE。
+	return s.forumImageReferenceLike(ctx, name)
+}
+
+// forumImageReferenceExact 用等值比對算引用數（可用索引）。
+func (s *Server) forumImageReferenceExact(ctx context.Context, name string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM forum_posts WHERE image_url = ?) +
+			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url = ?)`,
+		name, name).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// forumImageReferenceLike 用「以 /檔名 結尾」比對算引用數（舊資料退路）。
+//
+// 刻意與等值查詢分開：這一段用得上索引（見 forumImageReferenceCount 的
+// 說明），而這一段用不上 —— LIKE 的前置萬用字元讓索引無能為力。
+func (s *Server) forumImageReferenceLike(ctx context.Context, name string) (int, error) {
 	pattern := forumImageLikePattern(name)
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE image_url = ? OR image_url LIKE ?) +
-			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url = ? OR avatar_url LIKE ?)`,
-		name, pattern, name, pattern).Scan(&count)
+			(SELECT COUNT(*) FROM forum_posts WHERE image_url LIKE ?) +
+			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url LIKE ?)`,
+		pattern, pattern).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -341,9 +382,9 @@ func (s *Server) deleteForumFile(ctx context.Context, name string) error {
 // DeleteFile 是 purge.FileDeleter 的實作：讓背景清理排程能回收檔案伺服器
 // 上的檔案，而不必把 FilesServerURL / token 的組裝複製到 purge 套件。
 //
-// 語意與 deleteForumFile 逐字相同（404 視為成功，因此重試安全），这里只是
-// 把未匯出的內部函式暴露成一個稳定的契約：排程的失敗處理（只記日誌）由
-// 呼叫端决定，而「怎麼連到檔案伺服器」只有一份實作。
+// 語意與 deleteForumFile 逐字相同（404 視為成功，因此重試安全），這裡只是
+// 把未匯出的內部函式暴露成一個穩定的契約：排程的失敗處理（只記日誌）由
+// 呼叫端決定，而「怎麼連到檔案伺服器」只有一份實作。
 func (s *Server) DeleteFile(ctx context.Context, name string) error {
 	return s.deleteForumFile(ctx, name)
 }

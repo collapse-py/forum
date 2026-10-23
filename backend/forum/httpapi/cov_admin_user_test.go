@@ -1875,6 +1875,8 @@ func TestCovAdminUserStaticServer(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		recorder := httptest.NewRecorder()
+		// 模擬 session 續期中介層在 handler 之前寫入的 Set-Cookie。
+		recorder.Header().Set("Set-Cookie", "forum_session=secret; Path=/; HttpOnly")
 		handler.ServeHTTP(recorder, httptest.NewRequest(testCase.method, testCase.path, nil))
 		if recorder.Code != testCase.wantStatus {
 			t.Errorf("%s %s = %d, want %d", testCase.method, testCase.path, recorder.Code, testCase.wantStatus)
@@ -1890,7 +1892,72 @@ func TestCovAdminUserStaticServer(t *testing.T) {
 		if got != testCase.wantCache {
 			t.Errorf("%s %s Cache-Control = %q, want %q", testCase.method, testCase.path, got, testCase.wantCache)
 		}
+		// public 回應會被共享快取保存，不能連 session token 一起存。
+		if strings.HasPrefix(got, "public") {
+			if cookie := recorder.Header().Get("Set-Cookie"); cookie != "" {
+				t.Errorf("%s %s 是 public 回應，不該保留 Set-Cookie，got %q", testCase.method, testCase.path, cookie)
+			}
+		}
 	}
+}
+
+// TestCovAdminUserAssetHandlersDropSessionCookie 釘住 /assets/ 與 /asset/ 的
+// 靜態資產回應不帶 Set-Cookie。
+//
+// 這兩條路由不經過 safeStaticFileServer（見 server.go 的路由表），因此它們
+// 的 cookie 清除是各自 handler 的責任；只測 safeStaticFileServer 會漏掉
+// 真正承載建置資產的那一條。
+func TestCovAdminUserAssetHandlersDropSessionCookie(t *testing.T) {
+	t.Run("/assets/（帶 hash、immutable）", func(t *testing.T) {
+		dir := t.TempDir()
+		assets := filepath.Join(dir, "assets")
+		if err := os.MkdirAll(assets, 0o755); err != nil {
+			t.Fatalf("建立 assets 目錄失敗: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(assets, "app.js"), []byte("console.log(1)"), 0o644); err != nil {
+			t.Fatalf("寫入 app.js 失敗: %v", err)
+		}
+
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Set-Cookie", "forum_session=secret; Path=/; HttpOnly")
+		hashedAssetHandler(dir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET /assets/app.js = %d, want %d", recorder.Code, http.StatusOK)
+		}
+		if got := recorder.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+			t.Errorf("Cache-Control = %q, want public, max-age=31536000, immutable", got)
+		}
+		if cookie := recorder.Header().Get("Set-Cookie"); cookie != "" {
+			t.Errorf("public 資產不該保留 Set-Cookie，got %q", cookie)
+		}
+	})
+
+	t.Run("/asset/（一手素材）", func(t *testing.T) {
+		parent := t.TempDir()
+		frontendDir := filepath.Join(parent, "dist")
+		assetDir := filepath.Join(parent, "asset")
+		if err := os.MkdirAll(frontendDir, 0o755); err != nil {
+			t.Fatalf("建立 frontend 目錄失敗: %v", err)
+		}
+		if err := os.MkdirAll(assetDir, 0o755); err != nil {
+			t.Fatalf("建立 asset 目錄失敗: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(assetDir, "logo.png"), []byte("png"), 0o644); err != nil {
+			t.Fatalf("寫入 logo.png 失敗: %v", err)
+		}
+
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Set-Cookie", "forum_session=secret; Path=/; HttpOnly")
+		sourceAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/asset/logo.png", nil))
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET /asset/logo.png = %d, want %d", recorder.Code, http.StatusOK)
+		}
+		if cookie := recorder.Header().Get("Set-Cookie"); cookie != "" {
+			t.Errorf("/asset/ 不該保留 Set-Cookie，got %q", cookie)
+		}
+	})
 }
 
 func TestCovAdminUserForumPages(t *testing.T) {

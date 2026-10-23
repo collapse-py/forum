@@ -17,6 +17,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_post_likes` | 按讚 | 複合 PK `(post_id, author_email)`，天然去重 |
 | `forum_post_bookmarks` | 收藏 | 複合 PK `(post_id, author_email)`，天然去重；`created_at` 是收藏時間（目前不用於排序）；收藏數**不公開**，見 [`API.md`](API.md#收藏) |
 | `forum_media` | 上傳檔案的所有權 | 主鍵是**檔名**（檔案伺服器以此為鍵）；`owner_email` 是上傳者，刪圖端點靠它回答「這是不是我的」。只記錄這個功能上線**之後**上傳的檔案 —— 更早的檔案沒有列，見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#這次改動之前留下的孤兒檔無法清除) |
+| `forum_media_deletions` | 待刪除的圖片檔名佇列 | 主鍵 `filename`；與貼文硬刪**同一個交易**寫入，`purge.Prune` 成功刪檔或確認仍被引用後才移除。詳見 [`ARCHITECTURE.md`](ARCHITECTURE.md#清理機制) |
 | `forum_reports` | 檢舉 | `target_type`（`post`/`comment`）+ `target_id` 的多型參照，無外鍵 |
 | `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一；`avatar_url` 只存**檔名**（讀取時組網址，語意指 `forum_posts.image_url`） |
 | `forum_users` | 帳號狀態 | `status` 為 `ACTIVE` / `SUSPENDED`。**沒有 role 欄位** |
@@ -24,6 +25,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_user_tag_assignments` | 標籤指派 | 複合 PK `(user_email, tag_id)` |
 | `forum_follows` | 追蹤關係 | 複合 PK `(follower_email, target_email)` |
 | `forum_notifications` | 站內通知 | `recipient_email` / `actor_email` 皆為 email（無外鍵，應用層維護）；`kind` 為 `comment` / `reply` / `follow`；`read_at` 可空＝未讀；`post_id` / `comment_id` 為 0 ＝該事件沒有這個目標 |
+| `forum_daily_stats` | 日別新增量彙總 | PK `(day)`；純衍生資料。由 `data.RefreshDailyStats` 每 10 分鐘重算最近三天，啟動時 `BackfillDailyStats` 補缺漏日期；記的是「那天產生了多少」的歷史量，軟刪除與清理都不改變它 |
 | `forum_request_metrics` | 分鐘級請求統計 | PK `(bucket_minute)`；純衍生資料，可整表刪除 |
 | `forum_admin_actions` | 管理員操作稽核 | `changes` 存欄位級 diff JSON；只能由時間清理 |
 | `forum_announcements` | 站內公告 | 同時只有一列 `active`；`expires_at` 可空＝永不自動過期 |

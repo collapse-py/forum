@@ -18,7 +18,7 @@ log 輸出格式與寫入目的地
 	切割（rotation）：LOG_FILE 超過 LOG_MAX_SIZE_MB 時，本實作自己換檔：
 		目前檔改名為 <LOG_FILE>.1，既有 .1 改名 .2，依此推移，超過
 		LOG_MAX_FILES 個輪替檔的最舊一筆被刪除，然後重新開啟 LOG_FILE。
-		计数以「寫入的位元組數」累加，Init 時以檔案現有大小為起點，因此
+		計數以「寫入的位元組數」累加，Init 時以檔案現有大小為起點，因此
 		「舊版無限增長留下的超大檔案」在第一次寫入後就會被輪替。
 		取捨：輪替是**行程內**的計數，多個行程共用同一 LOG_FILE 時各自
 		輪替各自的計數——一個日誌檔請只讓一個行程寫。刻意不呼叫外部
@@ -118,6 +118,14 @@ var levelNames = map[Level]string{
 	ERROR: "ERROR",
 }
 
+// maxFilesLimit 是保留輪替檔數的硬上限，與 config.maxLogFiles 一致。
+//
+// 輪替一次要從 .maxFiles 往 .1 逐檔改名；沒有上限時，Init 的一個大數字
+// （例如 100000000）會讓每次輪替跑上億次 rename，整個服務卡死。config
+// 已經先夾過一次，這裡是縱深防禦——Init 也可能被 config 以外的呼叫端
+// 直接使用。
+const maxFilesLimit = 1000
+
 /*
 Logger 是本套件的日誌寫入器，可安全地被多執行緒同時使用。欄位語意如下：
 
@@ -168,8 +176,8 @@ var std = &Logger{
 //   - maxBytesMB：LOG_MAX_SIZE_MB，單檔輪替的大小上限（MB）。0 或負值代表
 //     不輪替——沿用舊的「無限追加」行為。
 //   - maxFiles：LOG_MAX_FILES，保留的輪替檔數（不含目前檔）。非正值時以 1
-//     處理：「輪替但不留任何舊檔」等于「每次換檔直接丟掉舊檔」，那比
-//     不輪替更糟，所以至少保留一個。
+//     處理：「輪替但不留任何舊檔」等於「每次換檔直接丟掉舊檔」，那比
+//     不輪替更糟，所以至少保留一個；超過 maxFilesLimit 時以該上限計。
 //
 // 回傳值：只有開啟檔案失敗時才回傳錯誤（例如目錄不存在或權限不足）；
 // 設定不正確本身不視為錯誤，會安靜地退回預設值。
@@ -205,12 +213,23 @@ func Init(levelStr, logFile, format string, maxBytesMB, maxFiles int) error {
 		std.file = f
 		std.logPath = logFile
 		if maxBytesMB > 0 {
+			// 位元移位溢位：int64(maxBytesMB) << 20 在 maxBytesMB 大於
+			// MaxInt64>>20 時會溢成負數，而負數的 maxBytes 會被 writeLocked
+			// 當成「不輪替」—— 設定檔裡的一個大數字會讓輪替**靜默失效**，
+			// 而沒有任何錯誤訊息。夾住上限讓溢位不可能發生。
+			const shiftLimit = int64(^uint64(0)>>1) >> 20
+			if int64(maxBytesMB) > shiftLimit {
+				maxBytesMB = int(shiftLimit)
+			}
 			std.maxBytes = int64(maxBytesMB) << 20
 		} else {
 			std.maxBytes = 0
 		}
 		if maxFiles < 1 {
 			maxFiles = 1
+		}
+		if maxFiles > maxFilesLimit {
+			maxFiles = maxFilesLimit
 		}
 		std.maxFiles = maxFiles
 		// 起點用檔案現有大小：舊版「無限追加」留下的超大檔案，第一次寫入
@@ -224,8 +243,19 @@ func Init(levelStr, logFile, format string, maxBytesMB, maxFiles int) error {
 		// 但此處忽略它 —— 日誌失敗不應該讓呼叫端（每個 HTTP 請求）收到錯誤。
 		std.logger = log.New(io.MultiWriter(os.Stdout, f), "", 0)
 	} else {
-		// 未指定檔案：退回純 stdout。刻意把 std.file 保留為原值不歸零，
-		// 讓 Close 仍能關閉先前 Init 開啟的句柄。
+		// 未指定檔案：退回純 stdout。
+		//
+		// 輪替狀態必須一併歸零：writeLocked 的判斷是「file != nil 且
+		// maxBytes > 0」，若只把 logger 換成 stdout 而留下舊的 maxBytes，
+		// 寫入仍會累加計數並在到達上限時呼叫 rotateLocked —— 那會關掉仍
+		// 開著的句柄、並把一個已經不再寫入的日誌檔改名成 .1。
+		//
+		// std.file 刻意保留為原值不歸零，讓 Close 仍能關閉先前 Init 開啟的
+		// 句柄（否則會洩漏檔案描述符）。
+		std.maxBytes = 0
+		std.maxFiles = 0
+		std.written = 0
+		std.logPath = ""
 		std.logger = log.New(os.Stdout, "", 0)
 	}
 
@@ -350,9 +380,9 @@ func isUTF8Continuation(b byte) bool { return b&0xC0 == 0x80 }
 //     （2006-01-02 15:04:05.000）把位移丟掉了，彙整後的時間序是不可信的。
 //  2. 可被 time.Parse(time.RFC3339, …) 與任何日誌收集端直接解析，
 //     不需要自訂 parser。
-// 3. 固定寬度，位移格式統一（Z 或 ±HH:MM）。同一時區偏移的多行紀錄，字典序
-//    等於時間序，sort / awk 因此可用；混合不同偏移的主機仍須先解析再比對
-//    —— 那本來就是帶位移要解決的問題，而不是它引入的問題。
+//  3. 固定寬度，位移格式統一（Z 或 ±HH:MM）。同一時區偏移的多行紀錄，字典序
+//     等於時間序，sort / awk 因此可用；混合不同偏移的主機仍須先解析再比對
+//     —— 那本來就是帶位移要解決的問題，而不是它引入的問題。
 const timeLayout = "2006-01-02T15:04:05.000Z07:00"
 
 /*
@@ -415,11 +445,18 @@ func (l *Logger) logf(level Level, format string, args ...interface{}) {
 func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level, format string, args ...interface{}) {
 	// 雙重防呆：允許在未呼叫 Init 的情況下使用（logger 或 receiver 為 nil 時靜默返回），
 	// 避免初始化階段的 Fatalf 反過來觸發 panic 而看不到真正的原因。
-	if l == nil || l.logger == nil {
+	//
+	// receiver 的 nil 檢查可以在鎖外（nil 接收者的方法呼叫本來就不會拿到鎖），
+	// 但 **l.logger 的 nil 檢查刻意放在鎖內**：輪替（rotateLocked）會在服務
+	// 期間改寫 l.logger，而鎖外的讀取會與那個寫入形成資料競爭 —— 讀到撕裂的
+	// 指標會讓下一個 l.logger.Print() 對著不存在的 logger 呼叫而 panic。
+	// 這個競爭在加入輪替之前不存在（那時 l.logger 只由啟動時的 Init 寫入）。
+	if l == nil {
 		return
 	}
 	// 門檻判斷。刻意不套 mu：這裡只需要讀取一個 int，成本遠低於鎖的開銷；
 	// 代價是若在服務期間呼叫 Init，會與 Init 的寫入產生資料競爭（實務上不會發生）。
+	// l.level 與 l.logger 不同：輪替不改 level，因此這裡的競爭對象只有 Init。
 	if level < l.level {
 		return
 	}
@@ -427,6 +464,10 @@ func (l *Logger) logWithContext(ctx context.Context, callerSkip int, level Level
 	// 從這裡開始進入臨界區，確保「組裝 + 寫入」對其他 goroutine 是原子的。
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.logger == nil {
+		return
+	}
 
 	// 毫秒精度足夠排序又不至於讓每行過長；帶本機時區位移（見 timeLayout）。
 	now := time.Now().Format(timeLayout)
@@ -540,17 +581,23 @@ func (l *Logger) writeLocked(line string) {
 }
 
 // rotateLocked 換檔：目前檔改名 .1，既有 .1 改名 .2，依此推移；超過
-// maxFiles 個的最舊輪替檔被刪除，然後重新開啟目前檔。必须在 mu 已鎖定時
+// maxFiles 個的最舊輪替檔被刪除，然後重新開啟目前檔。必須在 mu 已鎖定時
 // 呼叫。
 //
-// 順序不可簡化：不先删掉 .maxFiles，Rename 到它時會覆寫（POSIX）或失敗
-// （某些平台），而「先删最舊、再逐檔往前推」是兩邊都安全的写法。
+// 順序不可簡化：不先刪掉 .maxFiles，Rename 到它時會覆寫（POSIX）或失敗
+// （某些平台），而「先刪最舊、再逐檔往前推」是兩邊都安全的寫法。
 //
 // 換檔失敗（例如目錄被移除、磁碟滿）的處置是「退回純 stdout」：日誌不能
 // 因為檔案系統故障而讓每個請求變慢或失敗，而 stdout 在容器環境本來就是
-// 主要目的地。这里刻意不重試——下一次寫入會再尝试開檔吗？不会：句柄已
+// 主要目的地。這裡刻意不重試——下一次寫入會再嘗試開檔嗎？不會：句柄已
 // 為 nil，直到下一次 Init。這是可接受的退化：日誌仍完整地到 stdout，
 // 只是少了檔案副本。
+//
+// 但「退化」必須**看得見**：所有失敗路徑都往 stderr 寫一行警告。不能用
+// 日誌本身來寫這行（此刻 logger 正處於半壞的狀態，而且寫入 logger 會
+// 遞迴回來），stderr 是唯一不依賴被修的元件的地方。沒有這行，磁碟滿的
+// 深夜會讓日誌檔副本悄悄停掉，而 stdout 若沒被收集，維運看到的就是
+// 「沒有任何錯誤」的空日誌。
 func (l *Logger) rotateLocked() {
 	if l.file == nil || l.maxFiles < 1 {
 		return
@@ -559,8 +606,11 @@ func (l *Logger) rotateLocked() {
 
 	// 最舊的一檔（.maxFiles）先刪：不刪的話，下一步「.maxFiles-1 推移成
 	// .maxFiles」的 rename 在 POSIX 會靜默覆寫、在 Windows 會因目標已存在
-	// 而失敗 —— 「先删最舊、再逐檔往前推」是兩邊都安全的順序。
-	_ = os.Remove(l.logPath + "." + strconv.Itoa(l.maxFiles))
+	// 而失敗 —— 「先刪最舊、再逐檔往前推」是兩邊都安全的順序。
+	oldest := l.logPath + "." + strconv.Itoa(l.maxFiles)
+	if err := os.Remove(oldest); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "[LOGGER] 輪替：刪除最舊的輪替檔失敗 path=%s: %v\n", oldest, err)
+	}
 	for i := l.maxFiles - 1; i >= 1; i-- {
 		source := l.logPath + "." + strconv.Itoa(i)
 		if _, err := os.Stat(source); err != nil {
@@ -569,21 +619,39 @@ func (l *Logger) rotateLocked() {
 		// 目標是 i+1 而不是 i：.1 要推移成 .2、.2 推移成 .3，依此推移。
 		// 寫成與 source 相同的 i 會讓 Rename 變成 no-op（同名改名），
 		// 症狀是永遠只存在一個輪替檔、更舊的紀錄靜默消失。
-		_ = os.Rename(source, l.logPath+"."+strconv.Itoa(i+1))
+		if err := os.Rename(source, l.logPath+"."+strconv.Itoa(i+1)); err != nil {
+			fmt.Fprintf(os.Stderr, "[LOGGER] 輪替：推移輪替檔失敗 source=%s: %v\n", source, err)
+		}
 	}
 	// 最舊的一檔（.maxFiles）在最前面已被刪掉，這裡把目前檔推移成 .1。
-
-	_ = os.Rename(l.logPath, l.logPath+".1")
+	//
+	// 改名失敗時（例如目標 .1 已存在而平台拒絕覆蓋、或檔案被鎖住）必須
+	// 記下來：那一輪的內容仍在目前檔裡，而下面會用 O_APPEND 重開**同一個
+	// 檔案**。此時把 written 歸零會讓計數與檔案的實際大小脫鉤，檔案會
+	// 長到約兩倍上限而沒有人發現。
+	renamed := true
+	if err := os.Rename(l.logPath, l.logPath+".1"); err != nil {
+		renamed = false
+		fmt.Fprintf(os.Stderr, "[LOGGER] 輪替：目前檔改名失敗 path=%s: %v\n", l.logPath, err)
+	}
 
 	f, err := os.OpenFile(l.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		l.file = nil
 		l.written = 0
 		l.logger = log.New(os.Stdout, "", 0)
+		fmt.Fprintf(os.Stderr, "[LOGGER] 輪替：重新開啟日誌檔失敗 path=%s: %v —— 日誌只剩 stdout\n", l.logPath, err)
 		return
 	}
 	l.file = f
 	l.written = 0
+	if !renamed {
+		// 改名失敗 → 目前檔就是舊的那一份（含上一輪的內容）：計數要從它的
+		// 實際大小開始，否則大小上限會被架空。
+		if stat, statErr := f.Stat(); statErr == nil {
+			l.written = stat.Size()
+		}
+	}
 	l.logger = log.New(io.MultiWriter(os.Stdout, f), "", 0)
 }
 

@@ -285,7 +285,10 @@ var softDeleteExceptions = []struct {
 		// 計數刻意把軟刪除的貼文也算進去：貼文可以還原（後台 /restore），
 		// 還原之後圖片必須還在。「先刪圖、後還原」是一個合法的使用者順序，
 		// 而把它排除的症狀是還原後得到一張破掉的圖。
-		marker: "FROM forum_posts WHERE image_url = ? OR image_url LIKE ?",
+		//
+		// 這個 marker 同時對應兩條查詢（等值與 LIKE 退路）：它們是同一個
+		// 判斷的兩段，而兩段都必須包含軟刪除的貼文。
+		marker: "COUNT(*) FROM forum_posts WHERE image_url",
 		reason: "圖片引用計數必須包含軟刪除的貼文，否則還原後的圖片會被刪掉",
 	},
 	{

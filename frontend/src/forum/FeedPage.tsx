@@ -290,6 +290,11 @@ export function FeedPage() {
    * 依賴刻意不放 searching 本身以外的狀態值：IntersectionObserver 重建一次
    * 成本很低，但每個關鍵字都重建會讓舊的 observer 在 disconnect 前觸發一次，
    * 導致送出兩個請求。
+   *
+   * **兩個分支都必須掛 sentinelRef**（見下方兩處 ref）。React 只會把 ref
+   * 交給「當下掛著的那一個」節點，因此少了任何一邊，那一邊的期間就拿不到
+   * 節點、effect 會直接 return、觀察器從未被建立 —— 症狀是那一種結果
+   * 永遠停在第一頁。
    */
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -418,7 +423,15 @@ export function FeedPage() {
               </div>
             ) : null}
             {search.state.items.map(renderPost)}
-            <div className="feed-status" role="status" aria-live="polite">
+            {/*
+              * 這裡也必須掛 sentinelRef：搜尋分支與動態分支是同一顆 sentinel
+              * 的兩個宿主，而 React 只會讓「當下掛著的那一個」拿到 ref。
+              * 若只有動態分支掛，搜尋一開始（動態區段被卸載 → ref 變成
+              * null）effect 就會因為「拿不到節點」而直接 return，觀察器
+              * 從未被建立 —— 症狀是搜尋結果永遠停在第一頁，狀態列一直寫
+              * 「載入更多搜尋結果...」而怎麼捲都不會有新的內容。
+              */}
+            <div className="feed-status" ref={sentinelRef} role="status" aria-live="polite">
               {tr(search.state.status)}
             </div>
           </section>

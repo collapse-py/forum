@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { errorMessage, errorText, goToLogin, requestJSON } from '../core';
+import { LoginRequiredError, errorMessage, errorText, goToLogin, requestJSON } from '../core';
 import type { ForumPost, ForumProfile } from '../types';
 import { msg, t, tr, usePageTitle, type Message } from '../i18n';
 import { FollowButton } from './FollowButton';
@@ -218,6 +218,12 @@ export function OthersProfilePage() {
           const result = await toggleLike(post.id);
           patchPost(post.id, { liked: result.liked, likeCount: result.count });
         } catch (error) {
+          // session 過期時要導去登入頁，而不是顯示「按讚失敗」——
+          // 與 FeedPage／ProfilePage／BookmarksPage 的同一條規則。
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
           setFail(errorText(error, msg('feed.likeFailed')));
         }
       })();
@@ -236,6 +242,10 @@ export function OthersProfilePage() {
           const bookmarked = await toggleBookmark(post.id);
           patchPost(post.id, { bookmarked });
         } catch (error) {
+          if (error instanceof LoginRequiredError) {
+            goToLogin();
+            return;
+          }
           setFail(errorText(error, msg('error.fallbackBookmark')));
         }
       })();
@@ -263,6 +273,12 @@ export function OthersProfilePage() {
         patchPost(post.id, patch);
         setOk(msg('posts.edited'));
       } catch (error) {
+        // session 過期時要導去登入頁：留在這一頁只會讓編輯框一直開著，
+        // 而錯誤訊息說的是「編輯失敗」，使用者會以為內容有問題。
+        if (error instanceof LoginRequiredError) {
+          goToLogin();
+          throw error;
+        }
         setFail(errorText(error, msg('posts.editFailed')));
         // 見 FeedPage 的 handleUpdate：丟回去讓 PostCard 保留輸入框。
         throw error;

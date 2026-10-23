@@ -845,6 +845,14 @@ type FlusherOptions struct {
 	Interval time.Duration
 	// RetentionHours 為資料庫內保留的小時數，小於等於 0 時用 24。
 	RetentionHours int
+	// WG 為選用的等待組。給定時，flusher 的 goroutine 會在結束時呼叫
+	// Done()，因此呼叫端可以在關閉資料庫連線**之前**等它回來。
+	//
+	// 為什麼需要：flusher 在 ctx 被取消時會做一次收尾寫入，而那一刻資料庫
+	// 可能已經被關掉 —— 那次寫入會失敗（只留下一行警告），「停止前的最後
+	// 一段流量」就少了一截。呼叫端（main 的停止流程）用這個欄位把 flusher
+	// 納入它等待的背景工作。
+	WG *sync.WaitGroup
 }
 
 // StartFlusher 以背景 goroutine 定期把已結束的分鐘桶寫進 MySQL，直到 ctx 被取消。
@@ -875,8 +883,14 @@ func (r *Registry) StartFlusher(ctx context.Context, opts FlusherOptions) error 
 	// defer ticker.Stop()，而 StartFlusher 會立刻回傳 —— ticker 在 goroutine
 	// 第一次 select 之前就被停掉，症狀是「監控時間軸永遠不落庫、直到關機
 	// 那一刻才補寫一次」，而手動呼叫 FlushPending 卻是好的。
+	if opts.WG != nil {
+		opts.WG.Add(1)
+	}
 	go func() {
 		defer ticker.Stop()
+		if opts.WG != nil {
+			defer opts.WG.Done()
+		}
 		for {
 			select {
 			case <-ctx.Done():

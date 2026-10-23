@@ -62,6 +62,9 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
 
 **跨站共通**
 
+- **軟刪除與保留期清理**：刪除是軟刪除（`deleted_at`），後臺的「只顯示已刪除」清單可以還原；
+  超過 `POST_RETENTION_DAYS`（預設 90 天）之後會被**硬刪**，連同留言、按讚、收藏與檢舉
+  工單 —— 保留期是硬期限，到期後就不可逆了
 - **Redis 版可撤銷 Session**：滑動續期，Redis 掛掉等於全部登入失效
 - **三段式 IP 限流**：內容寫入（10/60s）、圖片上傳（5/60s）、OAuth 跳轉（10/60s）各自
   獨立額度，依端點成本區分
@@ -183,6 +186,9 @@ docker compose --env-file deploy/settings.conf up -d       # 3. 起服務
 - `TRUSTED_ORIGINS` —— CSRF 來源白名單，**留空等於關閉 CSRF 防護**
 - `TRUSTED_PROXY_CIDRS` —— 可信任反向代理的位址段
 - `COOKIE_SECURE` —— 走 HTTPS 就必須 `true`
+- `POST_RETENTION_DAYS` —— 軟刪除貼文的保留天數（預設 90）。**這是唯一會不可逆地刪掉
+  使用者內容的設定**，而且設錯時沒有任何症狀（服務照常啟動）—— 因此 `forum -check`
+  的報告會印出它
 - `FILES_SERVER_TOKEN`（唯一支援環境變數的設定）與 files_server 的 `[upload] token`
   必須相同；`MEDIA_TOKEN_KEY_PREFIX` 與 files_server 的 `token_key_prefix` 必須相同
   （兩邊的兜底值現在是同一個字面值，因此「兩邊都漏設」不會再造成
@@ -255,8 +261,8 @@ node tools/i18n/verify-catalogs.mjs      # 翻譯目錄與語系宣稱（可從�
    「限流看起來有開，只是擋不住任何人」—— 輪替 `X-Forwarded-For` 就重置額度。
    監控頁的 `clientIpTrust.mode` 會顯示 `legacy-headers`，那就是沒設定的訊號；
    存取記錄裡的 IP 也走同一份模型，因此兩邊的數字從此對得起來。
-2. **`httpapi` 約 2,500 行、仍有約 88% 沒有測試覆蓋。** 優先順序建議依「壞掉時的
-   爆炸半徑」排：批次／匯出 → 貼文 CRUD → 公告 → 統計。
+2. **`httpapi` 已有 87.0% 的敘述覆蓋率，但剩下的 13% 集中在最會出事的地方。**
+   優先順序建議依「壞掉時的爆炸半徑」排：批次／匯出 → 貼文 CRUD → 公告 → 統計。
 3. **`docker compose` 尚未在本機實測過**（撰寫本文時的開發環境沒有可用的 Docker
    daemon）。映像與 compose 檔只經過靜態檢查。第一次實際部署時請特別留意
    `docker compose run --rm backend -check` 的輸出。

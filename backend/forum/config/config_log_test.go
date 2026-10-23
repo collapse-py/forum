@@ -9,7 +9,8 @@ LOG_MAX_SIZE_MB 的 0 有明確語意（不輪替），而負數與非數字必�
 	非數字  → 若被接受，int 零值會被誤解成「不輪替」
 
 LOG_MAX_FILES 則只接受正數：0 個輪替檔等於「每次輪替直接丟掉舊檔」，
-那是比不輪替更糟的資料損失。
+那是比不輪替更糟的資料損失；超過 maxLogFiles（1000）則以最大值計，
+避免輪替的 rename 迴圈隨設定值無界成長。
 
 parseNonNegativeInt 的三態在此一併釘住（它是這個檔唯一為 0 開門的解析器）。
 */
@@ -28,7 +29,7 @@ func TestParseNonNegativeInt(t *testing.T) {
 		{"7", 7, true},
 		{" 12", 0, false}, // 前導空白：strconv 拒絕，刻意不猜
 		{"-1", 0, false},
-		{"-0", 0, true},  // -0 數學上就是 0，是合法的不輪替
+		{"-0", 0, true}, // -0 數學上就是 0，是合法的不輪替
 		{"abc", 0, false},
 		{"", 0, false},
 		{"1.5", 0, false},
@@ -70,5 +71,12 @@ func TestLogRotationSettingsParse(t *testing.T) {
 	cfg = loadString(t, "LOG_MAX_FILES=0\n")
 	if cfg.LogMaxFiles != 5 {
 		t.Errorf("LOG_MAX_FILES=0 未被拒絕，得到 %d（那是比不輪替更糟的資料損失）", cfg.LogMaxFiles)
+	}
+
+	// 上限：超過 maxLogFiles 以最大值計，避免輪替的 rename 迴圈隨設定值
+	// 無界成長（每次輪替要從 .maxFiles 逐檔改名到 .1）。
+	cfg = loadString(t, "LOG_MAX_FILES=1000000\n")
+	if cfg.LogMaxFiles != maxLogFiles {
+		t.Errorf("LOG_MAX_FILES=1000000 未被夾到 %d，得到 %d", maxLogFiles, cfg.LogMaxFiles)
 	}
 }

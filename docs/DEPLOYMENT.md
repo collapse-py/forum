@@ -38,8 +38,9 @@ flowchart LR
    提醒你。這個服務的 `/delete` 也接受 `.` 與 `..` 以外的所有檔名（見
    `files_server/storage.go` 的 deleteFile）。
 9. **停止訊號要送得對，而且要給夠時間。** 後端收到 `SIGTERM` / `SIGINT` 後會排空在途
-   請求，上限是 `SHUTDOWN_TIMEOUT_SECONDS`（預設 15 秒）。部署環境的停止上限必須
-   **大於**它：
+   請求，上限是 `SHUTDOWN_TIMEOUT_SECONDS`（預設 15 秒）；之後背景工作與最後一次分鐘
+   彙總**併行**收尾，各上限 3 秒。總上限是 `15 + 3 = 18` 秒，部署環境的停止上限必須
+   **大於**它（compose 用 20 秒）：
 
    | 環境 | 預設停止上限 | 怎麼調 |
    | --- | --- | --- |

@@ -123,7 +123,18 @@ export function NewPostPage() {
   const publishedRef = useRef(false);
   useEffect(() => {
     if (!loggedIn || publishedRef.current) return undefined;
-    const timer = window.setTimeout(() => saveDraft(content), DRAFT_SAVE_DELAY_MS);
+    const timer = window.setTimeout(() => {
+      /*
+       * 閘門要在計時器**裡面**再查一次。
+       *
+       * effect 主體的檢查只擋得住「發佈完成之後才排定的計時器」，擋不住
+       * 「發佈完成之前就排好、發佈完成之後才到期」的那一個 —— 而那正是
+       * 症狀最明顯的那一個（使用者按發佈，草稿清掉，接著計時器到期又把
+       * 剛發佈的內容寫回去；回到這一頁時看到自己剛發的那篇躺在輸入框裡）。
+       */
+      if (publishedRef.current) return;
+      saveDraft(content);
+    }, DRAFT_SAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [content, loggedIn]);
 
