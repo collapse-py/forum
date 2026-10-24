@@ -29,6 +29,7 @@ import {
   requestJSON,
 } from '../core';
 import type { ForumPost, ForumProfile, UploadResponse } from '../types';
+import { ForumGlyph } from '../icons';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import { ForumAvatar } from './ForumAvatar';
 import { PostCard } from './PostCard';
@@ -440,9 +441,7 @@ export function ProfilePage() {
 
       <main className="forum-main profile-main">
         <a className="back-link" href="/forum">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}
         </a>
 
@@ -509,21 +508,15 @@ export function ProfilePage() {
               */}
               <a className="profile-entry-link" href="/forum/following">
                 <span>{t('profile.followingEntry')}</span>
-                <span className="material-symbols-outlined" aria-hidden="true">
-                  chevron_right
-                </span>
+                <ForumGlyph name="chevron_right" />
               </a>
               <a className="profile-entry-link" href="/forum/bookmarks">
                 <span>{t('profile.bookmarksEntry')}</span>
-                <span className="material-symbols-outlined" aria-hidden="true">
-                  chevron_right
-                </span>
+                <ForumGlyph name="chevron_right" />
               </a>
               <a className="profile-entry-link" href="/forum/notifications">
                 <span>{t('notification.profileEntry')}</span>
-                <span className="material-symbols-outlined" aria-hidden="true">
-                  chevron_right
-                </span>
+                <ForumGlyph name="chevron_right" />
               </a>
             </div>
           ) : null}

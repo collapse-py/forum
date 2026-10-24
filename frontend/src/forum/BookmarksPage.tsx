@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { LoginRequiredError, errorMessage, errorText, goToLogin, requestJSON } from '../core';
+import { ForumGlyph } from '../icons';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import type { ForumPost } from '../types';
 import { PostCard } from './PostCard';
@@ -242,9 +243,7 @@ export function BookmarksPage() {
 
       <main className="forum-main bookmarks-main">
         <a className="back-link" href="/forum">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}
         </a>
 

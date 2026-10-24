@@ -20,16 +20,12 @@
       在這一頁就能發現它 —— 訂閱的是全站動態，不是這一頁的內容。
     -->
     <link rel="alternate" type="application/rss+xml" title="{{FORUM_NAME}}" href="/feed.xml" />
-    <link rel="stylesheet" href="/style.css?v=202610171200" />
+    <link rel="stylesheet" href="/style.css?v=202610241200" />
     <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
     <link rel="icon" href="/asset/logo.png" type="image/png" />
     <link rel="apple-touch-icon" href="/asset/logo.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+TC:wght@400;500;700;900&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0..1,0&display=swap"
-      rel="stylesheet"
-    />
     <style>
       /*
        * 自己的個人資料（/forum/profile）樣式
@@ -60,7 +56,7 @@
       body {
         color: var(--text);
         background: var(--bg);
-        font-family: Inter, "Noto Sans TC", sans-serif;
+        font-family: Inter, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
       }
 
       /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
@@ -163,18 +159,19 @@
         background: #f7f7f7;
       }
 
-      /* 箭頭用既有的 Material Symbols 字型，與 .back-link 的 arrow_back 同一套
-         （字型在 style.css 與各頁的 <link> 預先載入，不新增資產）。 */
-      .profile-entry-link .material-symbols-outlined {
+      /* 箭頭改用內聯 SVG（icons.tsx 的 ForumGlyph），取代過去的 Material Symbols
+         字型 —— 那是一個 493 KiB 的第三方字檔，而這一頁只用到一個 chevron。 */
+      .profile-entry-link .forum-glyph {
         color: var(--muted);
-        font-size: 22px;
+        width: 22px;
+        height: 22px;
       }
 
-      /* RTL：Material Symbols 的 chevron_right 不會跟著 dir 翻面。與 style.css
+      /* RTL：chevron_right 是固定朝右的字形，不會跟著 dir 翻面。與 style.css
          RTL 節「▸ 這個字形本身方向固定，展開/收起的三角要在 RTL 換成 ◂」是同一個
          問題，這裡用旋轉解決而不是換字形（換字形要改 React 端的內容，會讓這個
          方向判斷散到兩處）。 */
-      [dir="rtl"] .profile-entry-link .material-symbols-outlined {
+      [dir="rtl"] .profile-entry-link .forum-glyph {
         transform: rotate(180deg);
       }
 

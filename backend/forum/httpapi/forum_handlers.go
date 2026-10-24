@@ -173,6 +173,7 @@ type forumPost struct {
 	Edited       bool      `json:"edited,omitempty"`
 	CommentCount int       `json:"commentCount"`
 	ImageURL     string    `json:"imageUrl,omitempty"`
+	ImageURLs    []string  `json:"imageUrls,omitempty"`
 }
 
 // forumComment 是留言列表與新增留言回應共用的傳輸物件。
@@ -244,8 +245,9 @@ type updateForumCommentRequest struct {
 //	           其他值 = 換成這張圖（先過 forumFileAttachable 的所有權檢查）。
 //	         JSON 的 null 與省略欄位都會解成 nil，兩者同義：不變更。
 type updateForumPostRequest struct {
-	Content  string  `json:"content"`
-	ImageURL *string `json:"imageUrl"`
+	Content    string    `json:"content"`
+	ImageURL   *string   `json:"imageUrl"`
+	ImageURLs  *[]string `json:"imageUrls"`
 }
 
 // createForumPostRequest 是 POST /api/forum/posts 的請求主體。
@@ -254,8 +256,9 @@ type updateForumPostRequest struct {
 //	ImageURL 為 /api/forum/images 上傳後回傳的網址；寫入前只做 TrimSpace
 //	         並取出檔名，取不到就回 400（不接受第三方網址，見 createForumPost）。
 type createForumPostRequest struct {
-	Content  string `json:"content"`
-	ImageURL string `json:"imageUrl"`
+	Content   string   `json:"content"`
+	ImageURL  string   `json:"imageUrl"`
+	ImageURLs []string `json:"imageUrls"`
 }
 
 // forumReportRequest 是檢舉端點的請求主體，post 與 comment 共用。
@@ -523,12 +526,13 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 		// 先把庫值（純檔名）取出來，並用它判斷「這頁有沒有圖」：舊資料若存的是
 		// 無法辨識的值，這裡會得到空字串，而不會為了它去簽發一個沒人用得到的
 		// token。token 延遲到真的有圖片時才簽發，純文字頁完全不碰 Redis。
-		imageName := s.forumImageFileName(post.ImageURL)
+		imageNames := s.forumImageFileNames(post.ImageURL)
 		// 頭像與附圖**共用同一把** token：一頁一把，前端離開時一次釋放全部
 		// （見 useMediaTokenRelease）。這也代表「只有作者有頭像」的純文字動態
 		// 仍然需要一把 token —— 少了這個判斷，那一頁的頭像會全部載不出來。
 		avatarName := s.forumImageFileName(post.AuthorAvatar)
-		if (imageName != "" || avatarName != "") && mediaToken == "" {
+		hasImage := len(imageNames) > 0
+		if (hasImage || avatarName != "") && mediaToken == "" {
 			mediaToken, err = s.createMediaToken(ctx)
 			if err != nil {
 				logger.ErrorfContext(ctx, "[FORUM] 建立圖片 token 失敗: %v", err)
@@ -538,7 +542,16 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 		// 庫值只是檔名，給瀏覽器的完整網址在此現組：公開主機 + /files/ + 檔名
 		// + token。任何一步失敗都會得到空字串（前端因此不顯示縮圖），
 		// 絕不會把內部位址送出去。頭像走的是同一個函式與同一把 token。
-		post.ImageURL = s.forumImageURL(imageName, mediaToken)
+		imageURLs := make([]string, 0, len(imageNames))
+		for _, name := range imageNames {
+			imageURLs = append(imageURLs, s.forumImageURL(name, mediaToken))
+		}
+		post.ImageURLs = imageURLs
+		if len(imageURLs) > 0 {
+			post.ImageURL = imageURLs[0]
+		} else {
+			post.ImageURL = ""
+		}
 		post.AuthorAvatar = s.forumImageURL(avatarName, mediaToken)
 		// 先把原始 email 存起來再覆寫 Author：下游都需要 email 來查暱稱、
 		// 雜湊與標籤，而 Author 欄位對外只能放顯示名稱。
@@ -882,8 +895,14 @@ func (s *Server) handleForumImageTokensRelease(w http.ResponseWriter, r *http.Re
 // 讓純文字頁完全不碰 Redis（與 listForumPosts 的延遲簽發同一個考量）。
 func (s *Server) firstForumImageName(posts []adminForumPost) string {
 	for _, post := range posts {
-		if name := s.forumImageFileName(post.ImageURL); name != "" {
-			return name
+		for _, raw := range append([]string{post.ImageURL}, post.ImageURLs...) {
+			if name := s.forumImageFileName(raw); name != "" {
+				return name
+			}
+		}
+		names := s.forumImageFileNames(post.ImageURL)
+		if len(names) > 0 {
+			return names[0]
 		}
 	}
 	return ""
@@ -1002,6 +1021,57 @@ func validForumImageFileName(name string) string {
 // 不必分辨「沒有圖」與「圖壞了」：兩者在 JSON 都是省略 imageUrl、在畫面上
 // 都是不顯示縮圖。公開位址設定無效時同樣回傳空字串，寧可看不到圖，也不要
 // 產生一個壞掉的網址寫進瀏覽器歷史。
+// forumImageFileNames 把資料庫的 image_url 欄位（可能是單一檔名、舊式網址或
+// JSON 陣列）解析成純檔名切片。空值回傳 nil。
+func (s *Server) forumImageFileNames(raw string) []string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+	// JSON 陣列（新制）。
+	if strings.HasPrefix(value, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(value), &arr); err == nil {
+			out := make([]string, 0, len(arr))
+			seen := map[string]bool{}
+			for _, v := range arr {
+				name := s.forumImageFileName(v)
+				if name == "" || seen[name] {
+					continue
+				}
+				seen[name] = true
+				out = append(out, name)
+			}
+			return out
+		}
+	}
+	// 舊制單一值。
+	if name := s.forumImageFileName(value); name != "" {
+		return []string{name}
+	}
+	return nil
+}
+
+// forumImageFileNamesToJSON 把檔名切片序列化為資料庫儲存的 JSON 陣列字串。
+func forumImageFileNamesToJSON(names []string) string {
+	if names == nil {
+		names = []string{}
+	}
+	// 去重、過濾空值。
+	seen := map[string]bool{}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
+}
+
 func (s *Server) forumImageURL(imageURL, token string) string {
 	name := s.forumImageFileName(imageURL)
 	if name == "" {
@@ -1559,27 +1629,71 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "unable to load forum post")
 		return
 	}
-	// 舊資料的 image_url 可能是 /files/x.png 或完整網址（見 forumImageFileName
-	// 的相容說明），因此一律先收斂成純檔名再比較與回收。nextImage 預設寫回原值：
-	// 「沒送 imageUrl」與「送了同一個檔名」都不改動這一欄。
-	currentImage := s.forumImageFileName(currentImageRaw)
-	nextImage := currentImageRaw
-	// 更新成功後要回收的舊檔名（空字串＝沒有要回收的）。
-	releasedImage := ""
-	if req.ImageURL != nil {
+	currentNames := s.forumImageFileNames(currentImageRaw)
+	nextNames := append([]string{}, currentNames...)
+	releasedNames := make([]string, 0)
+	if req.ImageURLs != nil {
+		// 全量替換。
+		nextNames = make([]string, 0, len(*req.ImageURLs))
+		for _, u := range *req.ImageURLs {
+			if strings.TrimSpace(u) == "" {
+				continue
+			}
+			name := s.forumImageFileName(u)
+			if name == "" {
+				badRequest(w, "附圖必須是上傳到本站的圖片")
+				return
+			}
+			nextNames = append(nextNames, name)
+		}
+		// 去重
+		{
+			seen := map[string]bool{}
+			dedup := nextNames[:0]
+			for _, n := range nextNames {
+				if seen[n] {
+					continue
+				}
+				seen[n] = true
+				dedup = append(dedup, n)
+			}
+			nextNames = dedup
+		}
+		// 所有權檢查
+		for _, name := range nextNames {
+			if containsString(currentNames, name) {
+				continue
+			}
+			attachable, err := s.forumFileAttachable(r.Context(), name, author)
+			if err != nil {
+				logger.ErrorfContext(r.Context(), "[FORUM] 檢查換圖所有權失敗 filename=%s: %v", name, err)
+				internalError(w, "unable to verify image ownership")
+				return
+			}
+			if !attachable {
+				badRequest(w, "附圖必須是自己上傳的圖片")
+				return
+			}
+		}
+		// 回收被移除的
+		for _, old := range currentNames {
+			if !containsString(nextNames, old) {
+				releasedNames = append(releasedNames, old)
+			}
+		}
+	} else if req.ImageURL != nil {
 		value := strings.TrimSpace(*req.ImageURL)
 		if value == "" {
-			// 移除附圖。舊檔不一定刪得掉（別人也在用就用不著刪，見
-			// releaseForumImage），所以這裡只負責記錄「更新後試著回收它」。
-			nextImage, releasedImage = "", currentImage
+			// 移除所有附圖
+			releasedNames = append(releasedNames, currentNames...)
+			nextNames = nil
 		} else {
 			name := s.forumImageFileName(value)
 			if name == "" {
 				badRequest(w, "附圖必須是上傳到本站的圖片")
 				return
 			}
-			// 同一個檔名＝沒有換圖，跳過所有權檢查（它已經在這一列上）。
-			if name != currentImage {
+			if !containsString(currentNames, name) {
 				attachable, err := s.forumFileAttachable(r.Context(), name, author)
 				if err != nil {
 					logger.ErrorfContext(r.Context(), "[FORUM] 檢查換圖所有權失敗 filename=%s: %v", name, err)
@@ -1590,33 +1704,31 @@ func (s *Server) handleForumPostUpdate(w http.ResponseWriter, r *http.Request) {
 					badRequest(w, "附圖必須是自己上傳的圖片")
 					return
 				}
-				nextImage, releasedImage = name, currentImage
 			}
+			// 單圖模式：替換成單一張
+			for _, old := range currentNames {
+				if old != name {
+					releasedNames = append(releasedNames, old)
+				}
+			}
+			nextNames = []string{name}
 		}
 	}
-	// 單一 UPDATE 具原子性，不需要交易（同 createForumPost 的說明）。
-	// deleted_at IS NULL 讓「編輯一篇已刪除的貼文」落到 404 而不是成功：
-	// 那篇貼文在任何頁面都已經不存在，編輯它只會產生一筆沒人看到的改動。
-	// updated_at 每次都會變，因此即使內容與附圖都原樣送回，MySQL 回報的
-	// 仍是「已變更」而不是 0 列。
+	nextImageJSON := forumImageFileNamesToJSON(nextNames)
 	result, err := s.db.ExecContext(r.Context(),
 		`UPDATE forum_posts SET content = ?, image_url = ?, updated_at = ? WHERE id = ? AND author_email = ? AND deleted_at IS NULL`,
-		req.Content, nextImage, time.Now(), postID, author)
+		req.Content, nextImageJSON, time.Now(), postID, author)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 編輯本人貼文失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to update forum post")
 		return
 	}
-	// 0 列同時代表「不存在」與「不是你的」，不區分以免藉回應差異探測作者權限
-	// （與 handleForumPostDelete 同一個理由）。
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		http.NotFound(w, r)
 		return
 	}
-	// 更新成功之後才回收舊檔：順序反過來（先刪檔、UPDATE 失敗）會留下一篇
-	// 指著不存在檔案的貼文。回收是 best-effort，失敗只記日誌（見 releaseForumImage）。
-	if releasedImage != "" {
-		s.releaseForumImage(r.Context(), releasedImage, author)
+	for _, released := range releasedNames {
+		s.releaseForumImage(r.Context(), released, author)
 	}
 	// 索引必須跟著更新，否則搜尋結果會是舊內容 —— 而「改了字、搜尋還是舊字」
 	// 是使用者最難自己察覺的一種錯誤。刻意 best-effort：索引失敗只記日誌，
@@ -2543,17 +2655,41 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 	// 使用者自帶的第三方網址。第三方網址在舊版是允許的，但它與 CSP 的
 	// img-src 白名單互相矛盾（本來就載不出來），現在於寫入時直接回 400，
 	// 讓「貼不上去」變成明確可見的回應，而不是一張永遠破掉的圖。
-	imageName := ""
-	var mediaToken string
+	imageNames := make([]string, 0)
 	if strings.TrimSpace(req.ImageURL) != "" {
-		imageName = s.forumImageFileName(req.ImageURL)
-		if imageName == "" {
+		name := s.forumImageFileName(req.ImageURL)
+		if name == "" {
 			badRequest(w, "附圖必須是上傳到本站的圖片")
 			return
 		}
-		// 所有權檢查：檔名是使用者可控的值，沒有這一關就能把別人的圖片掛到
-		// 自己的貼文上（熱連結）；更糟的是日後「換圖／移除」的自動回收只看
-		// 引用計數，會因此刪掉別人的檔案（見 forumFileAttachable）。
+		imageNames = append(imageNames, name)
+	}
+	for _, u := range req.ImageURLs {
+		if strings.TrimSpace(u) == "" {
+			continue
+		}
+		name := s.forumImageFileName(u)
+		if name == "" {
+			badRequest(w, "附圖必須是上傳到本站的圖片")
+			return
+		}
+		imageNames = append(imageNames, name)
+	}
+	// 去重
+	{
+		seen := map[string]bool{}
+		dedup := imageNames[:0]
+		for _, n := range imageNames {
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			dedup = append(dedup, n)
+		}
+		imageNames = dedup
+	}
+	var mediaToken string
+	for _, imageName := range imageNames {
 		attachable, err := s.forumFileAttachable(r.Context(), imageName, author)
 		if err != nil {
 			logger.ErrorfContext(r.Context(), "[FORUM] 檢查附圖所有權失敗 filename=%s: %v", imageName, err)
@@ -2564,10 +2700,8 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, "附圖必須是自己上傳的圖片")
 			return
 		}
-		// 重新簽發 token，而沿用請求帶來的那一個不是選項：那是使用者可控的
-		// 查詢參數，把它原樣送回等於反射未驗證的輸入。發文成功後前端會導向
-		// /forum 並在 pagehide 釋放上傳時那把 token，新簽的這把只出現在回應裡、
-		// 沒有被前端使用，會由 MediaTokenTTLSecs 到期作廢。
+	}
+	if len(imageNames) > 0 {
 		token, err := s.createMediaToken(r.Context())
 		if err != nil {
 			logger.ErrorfContext(r.Context(), "[FORUM] 建立圖片 token 失敗: %v", err)
@@ -2576,12 +2710,13 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 		}
 		mediaToken = token
 	}
+	imageJSON := forumImageFileNamesToJSON(imageNames)
 
 	// 單一 INSERT 具原子性，不需要交易。寫入的是檔名，不是網址。
 	createdAt := time.Now()
 	result, err := s.db.ExecContext(r.Context(),
 		`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, ?, ?)`,
-		author, req.Content, imageName, createdAt)
+		author, req.Content, imageJSON, createdAt)
 	if err != nil {
 		internalError(w, "unable to create forum post")
 		return
@@ -2624,7 +2759,18 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 	// time.Now()：兩者可能相差不到一秒，而列表與首頁插入的項目必須顯示同一個時間。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"ok":           true,
-		"item":         forumPost{ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author), AuthorTags: authorTags, AuthorAvatar: authorAvatarURL, Content: req.Content, ImageURL: s.forumImageURL(imageName, mediaToken), CreatedAt: createdAt},
+		"item":         forumPost{ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author), AuthorTags: authorTags, AuthorAvatar: authorAvatarURL, Content: req.Content, ImageURL: func() string {
+			if len(imageNames) == 0 {
+				return ""
+			}
+			return s.forumImageURL(imageNames[0], mediaToken)
+		}(), ImageURLs: func() []string {
+			out := make([]string, 0, len(imageNames))
+			for _, n := range imageNames {
+				out = append(out, s.forumImageURL(n, mediaToken))
+			}
+			return out
+		}(), CreatedAt: createdAt},
 	})
 }
 
@@ -2633,6 +2779,15 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 // 注意它每次呼叫都會得到不同結果，因此不是穩定的化名：同一個未設暱稱的
 // 使用者在兩次請求中會顯示不同的代號。跨請求的身分一致性由 publicForumKey
 // 負責，前端應以 AuthorKey（而非 Author）作為識別與比對的依據。
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func publicForumAuthor(_ string) string {
 	// 參數刻意以底線命名：這函式不需要也不該取得 email——一旦有人誤以為
 	// 可以在這裡塞入 email 的衍生資訊（例如雜湊前綴），就會開啟一個

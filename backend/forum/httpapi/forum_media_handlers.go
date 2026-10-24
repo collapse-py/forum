@@ -219,11 +219,7 @@ func (s *Server) forumImageReferenceCount(ctx context.Context, name string) (int
 	if err != nil {
 		return 0, err
 	}
-	if exact > 0 {
-		return exact, nil
-	}
-	// 等值沒有：可能是舊資料存的 /files/x.png 或完整網址，補問 LIKE。
-	return s.forumImageReferenceLike(ctx, name)
+	return exact, nil
 }
 
 // forumImageReferenceExact 用等值比對算引用數（可用索引）。
@@ -231,7 +227,7 @@ func (s *Server) forumImageReferenceExact(ctx context.Context, name string) (int
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE image_url = ?) +
+			(SELECT COUNT(*) FROM forum_posts WHERE image_url IS NOT NULL AND JSON_CONTAINS(COALESCE(NULLIF(image_url, ''), '[]'), JSON_QUOTE(?))) +
 			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url = ?)`,
 		name, name).Scan(&count)
 	if err != nil {
@@ -240,23 +236,6 @@ func (s *Server) forumImageReferenceExact(ctx context.Context, name string) (int
 	return count, nil
 }
 
-// forumImageReferenceLike 用「以 /檔名 結尾」比對算引用數（舊資料退路）。
-//
-// 刻意與等值查詢分開：這一段用得上索引（見 forumImageReferenceCount 的
-// 說明），而這一段用不上 —— LIKE 的前置萬用字元讓索引無能為力。
-func (s *Server) forumImageReferenceLike(ctx context.Context, name string) (int, error) {
-	pattern := forumImageLikePattern(name)
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE image_url LIKE ?) +
-			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url LIKE ?)`,
-		pattern, pattern).Scan(&count)
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
-}
 
 // forumFileAttachable 回答「這個檔案可不可以被這個人掛到自己的內容上」。
 //
@@ -289,9 +268,9 @@ func (s *Server) forumFileAttachable(ctx context.Context, name, email string) (b
 	var count int
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE author_email = ? AND (image_url = ? OR image_url LIKE ?)) +
+			(SELECT COUNT(*) FROM forum_posts WHERE author_email = ? AND image_url IS NOT NULL AND JSON_CONTAINS(COALESCE(NULLIF(image_url, ''), '[]'), JSON_QUOTE(?))) +
 			(SELECT COUNT(*) FROM forum_profiles WHERE author_email = ? AND (avatar_url = ? OR avatar_url LIKE ?))`,
-		email, name, pattern, email, name, pattern).Scan(&count)
+		email, name, email, name, pattern).Scan(&count)
 	if err != nil {
 		return false, err
 	}

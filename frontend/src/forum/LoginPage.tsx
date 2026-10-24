@@ -11,9 +11,10 @@
 
 import { useEffect, useState } from 'react';
 
+import { ForumGlyph } from '../icons';
 import { t, usePageTitle } from '../i18n';
 import { SITE_MARK, SITE_NAME, SITE_SHORT_NAME } from '../site';
-import { InstallHint, InstallButton, usePwaInstall } from './shell';
+import { ForumShell, InstallHint, InstallButton, usePwaInstall } from './shell';
 
 export function LoginPage() {
   usePageTitle('title.login');
@@ -31,7 +32,7 @@ export function LoginPage() {
   const oauthHref = `/auth/google?return=${encodeURIComponent(loginReturn)}`;
 
   return (
-    <div className="forum-shell">
+    <ForumShell>
       <header className="forum-nav">
         <a className="brand" href="/forum">
           {SITE_SHORT_NAME}
@@ -80,9 +81,7 @@ export function LoginPage() {
             window.location.assign('/forum');
           }}
         >
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backOnePage')}
         </button>
       </div>
@@ -91,6 +90,6 @@ export function LoginPage() {
         <a href="/forum">{t('common.backToForumHome')}</a>
       </footer>
       <InstallHint hint={install.hint} />
-    </div>
+    </ForumShell>
   );
 }

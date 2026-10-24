@@ -222,8 +222,28 @@ body {
   background: #f2f2f2;
 }
 
-.notification-bell .material-symbols-outlined {
-  font-size: 22px;
+/*
+ * 論壇圖示字形（src/icons.tsx 的 ForumGlyph）。
+ *
+ * 取代過去的 Material Symbols 字型：字型是一個 493 KiB 的第三方 woff2，
+ * 而論壇只用到六個字形，因此改成內聯 SVG 並把那個請求整個拿掉（見 icons.tsx
+ * 檔頭）。這裡負責尺寸 —— 舊版用 font-size，SVG 改用 width/height。
+ *
+ * flex: none：圖示是導覽列與按鈕裡的 flex item，放不下時不該被壓縮變形
+ * （文字可以換行或省略，圖示不行）。1em 是沒有任何外層規則時的後備尺寸，
+ * 實際大小由各處的具體規則決定。fill 由 SVG 的 fill="currentColor" 提供，
+ * 因此顏色仍跟隨所在位置的 color（未啟用的灰、啟用的深色、nav-add 的白）。
+ */
+.forum-glyph {
+  display: block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+}
+
+.notification-bell .forum-glyph {
+  width: 22px;
+  height: 22px;
 }
 
 /* 紅點：絕對定位貼在鈴鐺角落，文字置中。min-width 讓「1」與「99+」都得到一顆
@@ -314,8 +334,31 @@ body {
   white-space: nowrap;
 }
 
+/*
+ * 內容欄保留視窗高度：這是消除 feed 載入期 CLS 的關鍵。
+ *
+ * 動態頁是 CSR：載入時先畫一行 .loading，貼文回來後才把內容區撐高。而頁尾
+ * （<footer>）在流程裡跟著內容高度走 —— 於是「spinner + 一行字 + 頁尾」那
+ * 一版的頁尾是**在視窗內**的，等 25 篇貼文插進來才被推到 fold 以下。Lighthouse
+ * 把「可見元素移出視窗」算作位移，實測頁尾單項就貢獻了行動版 CLS 0.146
+ * （佔總分 79%）。
+ *
+ * min-height 讓內容區在資料還沒到時就已經佔滿導覽列以下的整個視窗，頁尾因此
+ * 一開始就落在 fold 之下 —— 不管之後進來幾篇貼文，它都待在 fold 之下，不會
+ * 「從可見移到不可見」，也就不再產生位移。資料比視窗矮時（很少見）頁尾停在
+ * min-height 的位置，同樣不會跳。
+ *
+ * 值取 calc(100vh - 64px)：64px 是頂部導覽列的 min-height（全站 box-sizing 是
+ * border-box，因此它已含上下 padding）。扣除它之後，「導覽列 + 內容區」剛好填滿
+ * 一個視窗，頁尾的頂緣正好落在 fold 上或其下（因此載入期完全不可見）。
+ * 扣得比導覽列實際高度「少」一點（這裡正是如此）只會讓內容區更高、頁尾更靠下，
+ * 方向是安全的；扣得「多」則會讓頁尾往上冒回視窗內 —— 那才是會產生位移的方向，
+ * 因此這裡取 64 而非實測的 72（導覽列 64 + .status 的 8px 折疊外距，後者是頁內
+ * 狀態列帶來的，不該被算進導覽列的扣除量）。
+ */
 .forum-main {
   width: min(640px, 100%);
+  min-height: calc(100vh - 64px);
   margin: 0 auto;
 }
 
@@ -491,8 +534,9 @@ body {
   text-decoration: none;
 }
 
-.back-link .material-symbols-outlined {
-  font-size: 20px;
+.back-link .forum-glyph {
+  width: 20px;
+  height: 20px;
 }
 
 .avatar {
@@ -616,9 +660,14 @@ body {
   cursor: pointer;
 }
 
-.bottom-nav-item .material-symbols-outlined {
-  font-size: 25px;
-  font-variation-settings: "FILL" 0, "wght" 450, "GRAD" 0, "opsz" 24;
+/*
+ * 圖示尺寸。啟用狀態的實心切換不再靠 font-variation-settings：SVG 沒有可變
+ * 字重，而是由 ForumGlyph 的 filled prop 換一條實心路徑（見 icons.tsx）。
+ * 啟用的顏色由下一條 .bottom-nav-item.active 的 color 提供。
+ */
+.bottom-nav-item .forum-glyph {
+  width: 25px;
+  height: 25px;
 }
 
 /* 標籤單行、放不下就省略號。四個項目共用一條導覽列之後，通知的譯名在部分
@@ -664,23 +713,30 @@ body {
   color: var(--text);
 }
 
-.bottom-nav-item.active .material-symbols-outlined {
-  font-variation-settings: "FILL" 1, "wght" 500, "GRAD" 0, "opsz" 24;
-}
+/* 啟用的實心字形由 ForumGlyph 的 filled prop 換路徑（見 icons.tsx），這裡只需
+   把顏色加深；圖示是 fill="currentColor"，因此 color 一改就跟著變。 */
 
 /* .nav-add 只負責讓「+」變成深色圓形鈕，顏色由下一條規則掛在 icon 上。
    這一條原本是 color: #fff，會讓同一個 <a> 裡的「新增」文字也變成白字，
    疊在白色底導覽上等於看不見。icon 自己已有 color: #fff，不需要它。 */
-.bottom-nav-item.nav-add .material-symbols-outlined {
+/* 深色圓形鈕套在**外層** .bottom-nav-icon 上，而不是圖示本身：舊版這條規則
+   打在 .material-symbols-outlined 上（那顆 span 既是圓形又是字級容器）。改成
+   SVG 之後若把圓形套在 <svg> 上並放大到 34px，中間的加號會跟著撐大；讓圓形
+   留在外層、圖示維持 25px，加號的視覺大小才與舊版一致（約圓形的六成）。 */
+.bottom-nav-item.nav-add .bottom-nav-icon {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  color: #fff;
   background: var(--accent);
-  font-size: 25px;
+}
+
+.bottom-nav-item.nav-add .forum-glyph {
+  width: 25px;
+  height: 25px;
+  color: #fff;
 }
 
 .install-app-hint {
@@ -1015,14 +1071,31 @@ body {
   overflow-wrap: anywhere;
 }
 
-.post-image {
-  display: block;
-  max-width: calc(100% - 50px);
-  max-height: 520px;
+.post-images {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
   margin-block: 0 12px;
   margin-inline: 50px 0;
+  max-width: calc(100% - 50px);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.post-image {
+  flex: 0 0 auto;
+  width: 80%;
+  max-height: 420px;
   border-radius: 10px;
   object-fit: contain;
+  scroll-snap-align: start;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: auto;
 }
 
 /* --- 附圖編輯列（就地編輯表單裡的一列）----------------------------------
@@ -2893,7 +2966,7 @@ body {
  * 方向性圖示鏡像。只挑「鏡像之後語意才正確」的：返回箭頭與登出箭頭。底部導覽的
  * home / add / person 是對稱的圖形，翻了反而奇怪，因此明確排除。
  */
-[dir="rtl"] .back-link .material-symbols-outlined,
+[dir="rtl"] .back-link .forum-glyph,
 [dir="rtl"] .rail__exit .rail__icon {
   transform: scaleX(-1);
 }

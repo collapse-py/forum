@@ -282,3 +282,83 @@ export function SearchGlyph({ className }: SearchGlyphProps) {
     </svg>
   );
 }
+
+/* ==========================================================================
+   論壇公開頁的圖示字形
+   ==========================================================================
+
+ * 這六個字形取代過去的 Material Symbols 字型。
+ *
+ * 為什麼要用 SVG 取代字型：Material Symbols 以一個 493 KiB 的 woff2 下載，
+ * 而論壇頁實際只用到六個字形（arrow_back / chevron_right / home / add /
+ * notifications / person）。等於為了六個箭頭與人形下載一整套圖示字型，
+ * 而且它是第三方 fonts.gstatic.com 的請求 —— Lighthouse 實測把它列為
+ * 「第三方字型總量 809 KiB」的最大宗。改成內聯 SVG 之後這個請求完全消失。
+ *
+ * 路徑資料取自 Google Material Symbols（Apache-2.0）的官方 SVG，viewBox
+ * 維持原本的 `0 -960 960 960`（Material 的座標系以 y 軸向上、中心在原點），
+ * 因此字形在任何尺寸下都與原本的字型渲染逐像素一致，不必重新對位。
+ *
+ * 實心／外框（Material 的 FILL 1 / 0）：底部導覽的「目前頁」在舊版靠
+ * `font-variation-settings: "FILL" 1` 從外框切成實心，這是四個項目裡唯一
+ * 的啟用提示。SVG 沒有可變字重，因此這裡為需要實心的三個字形（home、
+ * notifications、person）各準備一份實心路徑，由 `filled` prop 選擇。
+ * `add` 不需要：它恆常是深色圓形鈕上的白加號，外框與實心看不出差別。
+ *
+ * 兩條硬性約束（與本檔其他圖示相同）：
+ *   1. style-src 沒有 'unsafe-inline'：不得產生 style="..." 屬性，一律用
+ *      class 取得尺寸與顏色。
+ *   2. fill="currentColor" 讓字形跟隨所在位置的 color（未啟用的灰、啟用的
+ *      深色、nav-add 的白），寫死色碼會讓它在深色圓鈕上變成黑點。
+ */
+
+export type ForumGlyphName = 'arrow_back' | 'chevron_right' | 'home' | 'add' | 'notifications' | 'person';
+
+/** 外框（FILL 0）字形。全部字形都至少有這一份。 */
+const FORUM_GLYPH_PATHS: Record<ForumGlyphName, string> = {
+  arrow_back: 'm313-440 224 224-57 56-320-320 320-320 57 56-224 224h487v80H313Z',
+  chevron_right: 'M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z',
+  home: 'M240-200h120v-240h240v240h120v-360L480-740 240-560v360Zm-80 80v-480l320-240 320 240v480H520v-240h-80v240H160Zm320-350Z',
+  add: 'M440-440H200v-80h240v-240h80v240h240v80H520v240h-80v-240Z',
+  notifications:
+    'M160-200v-80h80v-280q0-83 50-147.5T420-792v-28q0-25 17.5-42.5T480-880q25 0 42.5 17.5T540-820v28q80 20 130 84.5T720-560v280h80v80H160Zm320-300Zm0 420q-33 0-56.5-23.5T400-160h160q0 33-23.5 56.5T480-80ZM320-280h320v-280q0-66-47-113t-113-47q-66 0-113 47t-47 113v280Z',
+  person:
+    'M367-527q-47-47-47-113t47-113q47-47 113-47t113 47q47 47 47 113t-47 113q-47 47-113 47t-113-47ZM160-160v-112q0-34 17.5-62.5T224-378q62-31 126-46.5T480-440q66 0 130 15.5T736-378q29 15 46.5 43.5T800-272v112H160Zm80-80h480v-32q0-11-5.5-20T700-306q-54-27-109-40.5T480-360q-56 0-111 13.5T260-306q-9 5-14.5 14t-5.5 20v32Zm296.5-343.5Q560-607 560-640t-23.5-56.5Q513-720 480-720t-56.5 23.5Q400-673 400-640t23.5 56.5Q447-560 480-560t56.5-23.5ZM480-640Zm0 400Z',
+};
+
+/** 實心（FILL 1）字形。只有底部導覽會用到實心版本的三個。 */
+const FORUM_GLYPH_FILLED_PATHS: Partial<Record<ForumGlyphName, string>> = {
+  home: 'M160-120v-480l320-240 320 240v480H560v-280H400v280H160Z',
+  notifications:
+    'M160-200v-80h80v-280q0-83 50-147.5T420-792v-28q0-25 17.5-42.5T480-880q25 0 42.5 17.5T540-820v28q80 20 130 84.5T720-560v280h80v80H160ZM480-80q-33 0-56.5-23.5T400-160h160q0 33-23.5 56.5T480-80Z',
+  person:
+    'M367-527q-47-47-47-113t47-113q47-47 113-47t113 47q47 47 47 113t-47 113q-47 47-113 47t-113-47ZM160-160v-112q0-34 17.5-62.5T224-378q62-31 126-46.5T480-440q66 0 130 15.5T736-378q29 15 46.5 43.5T800-272v112H160Z',
+};
+
+export interface ForumGlyphProps {
+  name: ForumGlyphName;
+  /**
+   * 畫實心版本（Material 的 FILL 1）。只有底部導覽的「目前頁」會用到。
+   *
+   * 沒有實心路徑的字形（arrow_back、chevron_right、add）會忽略這個 prop
+   * 並退回外框 —— 與它們在舊版字型下沒有 FILL 變體的行為一致。
+   */
+  filled?: boolean | undefined;
+  /** 附加的 class；尺寸與顏色由呼叫處的 CSS 決定（見 style.css 的 .forum-glyph）。 */
+  className?: string | undefined;
+}
+
+export function ForumGlyph({ name, filled = false, className }: ForumGlyphProps) {
+  const d = (filled ? FORUM_GLYPH_FILLED_PATHS[name] : undefined) ?? FORUM_GLYPH_PATHS[name];
+  return (
+    <svg
+      className={className ? `forum-glyph ${className}` : 'forum-glyph'}
+      viewBox="0 -960 960 960"
+      fill="currentColor"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d={d} />
+    </svg>
+  );
+}

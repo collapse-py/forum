@@ -294,7 +294,7 @@ var softDeleteExceptions = []struct {
 	{
 		// forumFileAttachable（forum_media_handlers.go）。舊制圖片的所有權
 		// 退路：以「已經是自己貼文的圖片」證明所有權。
-		marker: "FROM forum_posts WHERE author_email = ? AND (image_url = ? OR image_url LIKE ?)",
+		marker: "FROM forum_posts WHERE author_email = ? AND image_url IS NOT NULL",
 		reason: "舊制（forum_media 之前）圖片的所有權退路與貼文是否被軟刪除無關",
 	},
 }

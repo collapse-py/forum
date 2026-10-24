@@ -47,6 +47,7 @@ import { useEffect, useRef } from 'react';
  */
 type MediaBearing = {
   imageUrl?: string | undefined;
+  imageUrls?: string[] | undefined;
   authorAvatar?: string | undefined;
 };
 
@@ -78,6 +79,7 @@ function urlsFrom(source: MediaTokenSource): string[] {
     }
     // 貼文：附圖與作者頭像兩者都要（見檔頭的第 4 點）。
     if (item?.imageUrl) urls.push(item.imageUrl);
+    if (Array.isArray(item?.imageUrls)) urls.push(...item.imageUrls.filter(Boolean));
     // 留言：只有作者頭像，而它屬於另一把 token（見檔頭的第 6 點）。
     if (item?.authorAvatar) urls.push(item.authorAvatar);
   }

@@ -18,6 +18,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { logout, readJSONObject } from '../core';
+import { scheduleWebFonts } from '../fonts';
+import { ForumGlyph, type ForumGlyphName } from '../icons';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher';
 import { t } from '../i18n';
 import { SITE_SHORT_NAME } from '../site';
@@ -257,9 +259,7 @@ export function ForumNav({ auth, labels = NO_LABELS, loginReturn, install, showA
               unread > 0 ? t('notification.badgeLabel', { count: unread }) : t('notification.bellLabel')
             }
           >
-            <span className="material-symbols-outlined" aria-hidden="true">
-              notifications
-            </span>
+            <ForumGlyph name="notifications" />
             {/* 數字本身不打給讀屏看：可及名稱已經由上面的 aria-label 說明。
                 超過 99 顯示 99+，避免三位數把紅點撐成一個長方形。 */}
             {unread > 0 ? (
@@ -302,7 +302,7 @@ export type ForumTab = 'home' | 'new' | 'notifications' | 'profile';
  * 既有的首頁與「新增」維持原位（既有使用者的肌肉記憶），而個人頁仍然收在
  * 最右緣（手機上最遠、最少誤觸，也符合「帳號放最後」的慣例）。
  */
-function bottomTabs(): { key: ForumTab; label: string; icon: string; href: string }[] {
+function bottomTabs(): { key: ForumTab; label: string; icon: ForumGlyphName; href: string }[] {
   return [
     { key: 'home', label: t('bottomNav.home'), icon: 'home', href: '/forum' },
     { key: 'new', label: t('bottomNav.new'), icon: 'add', href: '/forum/new' },
@@ -336,11 +336,13 @@ export function BottomNav({ active, onHome, loggedIn }: BottomNavProps) {
 
   /* 圖示外多一層 .bottom-nav-icon 是紅點的定位基準：點要貼在圖示的右上角，
      而不是格子（比圖示寬得多）的角落。 */
-  const icon = (tab: { key: ForumTab; icon: string }) => (
+  const icon = (tab: { key: ForumTab; icon: ForumGlyphName }) => (
     <span className="bottom-nav-icon">
-      <span className="material-symbols-outlined" aria-hidden="true">
-        {tab.icon}
-      </span>
+      {/*
+        filled 由「是不是目前頁」決定：這是四個項目裡唯一的啟用提示，
+        舊版靠 Material 的 font-variation-settings: "FILL" 1 達成同一件事。
+      */}
+      <ForumGlyph name={tab.icon} filled={tab.key === active} />
       {tab.key === 'notifications' && hasUnread ? <span className="bottom-nav-dot" aria-hidden="true" /> : null}
     </span>
   );
@@ -389,7 +391,17 @@ export interface ForumShellProps {
   children: ReactNode;
 }
 
-/** 公開頁的外框。CSS 依賴 .forum-shell 撐出底部導覽的留白。 */
+/**
+ * 公開頁的外框。CSS 依賴 .forum-shell 撐出底部導覽的留白。
+ *
+ * 也是「首次繪製之後才載入網路字型」的觸發點（見 src/fonts.ts）：這一層是九個
+ * 論壇頁唯一的共用容器，把副作用放在這裡等於九頁都會拿到非阻斷的字型載入，
+ * 而不必在每一個入口檔案各寫一次。放在 effect（而非模組求值）是為了確保它排在
+ * 首次算繪之後 —— 那正是把 Google Fonts 從關鍵路徑上拿掉的關鍵。
+ */
 export function ForumShell({ className, children }: ForumShellProps) {
+  useEffect(() => {
+    scheduleWebFonts();
+  }, []);
   return <div className={className ? `forum-shell ${className}` : 'forum-shell'}>{children}</div>;
 }

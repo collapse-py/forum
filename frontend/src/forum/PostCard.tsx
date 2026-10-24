@@ -96,6 +96,8 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const imageScrollRef = useRef<HTMLDivElement>(null);
+  const dragState = useRef<{startX: number; scrollLeft: number; active: boolean}>({startX: 0, scrollLeft: 0, active: false});
   const [deleting, setDeleting] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -521,8 +523,40 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
         「哪一份是我等一下要改的」變成要看兩處才能回答。條件與編輯列
         互補，因此任何時候畫面上剛好有一份。
       */}
-      {!editing && post.imageUrl ? (
-        <img className="post-image" src={post.imageUrl} alt={t('post.imageAlt')} loading="lazy" />
+      {!editing && (post.imageUrls && post.imageUrls.length ? post.imageUrls : (post.imageUrl ? [post.imageUrl] : [])).length ? (
+        <div
+          className={`post-images post-images--${Math.min((post.imageUrls && post.imageUrls.length ? post.imageUrls : (post.imageUrl ? [post.imageUrl] : [])).length, 4)}`}
+          ref={imageScrollRef}
+          onMouseDown={(e) => {
+            const el = imageScrollRef.current;
+            if (!el) return;
+            dragState.current = { startX: e.pageX - el.offsetLeft, scrollLeft: el.scrollLeft, active: true };
+            el.style.cursor = 'grabbing';
+          }}
+          onMouseMove={(e) => {
+            const el = imageScrollRef.current;
+            if (!el || !dragState.current.active) return;
+            e.preventDefault();
+            const x = e.pageX - el.offsetLeft;
+            const walk = (x - dragState.current.startX) * 1.5;
+            el.scrollLeft = dragState.current.scrollLeft - walk;
+          }}
+          onMouseUp={() => {
+            const el = imageScrollRef.current;
+            if (el) el.style.cursor = 'grab';
+            dragState.current.active = false;
+          }}
+          onMouseLeave={() => {
+            const el = imageScrollRef.current;
+            if (el) el.style.cursor = 'grab';
+            dragState.current.active = false;
+          }}
+          style={{ cursor: 'grab' }}
+        >
+          {(post.imageUrls && post.imageUrls.length ? post.imageUrls : (post.imageUrl ? [post.imageUrl] : [])).map((url, idx) => (
+            <img key={idx} className="post-image" src={url} alt={t('post.imageAlt')} loading="lazy" draggable={false} />
+          ))}
+        </div>
       ) : null}
 
       <div className="post-actions">

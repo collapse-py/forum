@@ -80,6 +80,7 @@ package purge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -238,8 +239,8 @@ func (p *Pruner) Prune(ctx context.Context) (int, error) {
 // 附圖」能夠對齊。若拆成兩個平行 slice，只要交易內跳過任何一列（例如管理員
 // 剛好還原），索引就會錯位，回收端可能刪掉仍然被引用的檔案。
 type expiredPost struct {
-	id    int64
-	image string
+	id     int64
+	images []string
 }
 
 // fetchExpiredPosts 取回一批超過保留期的軟刪除貼文（id 與附圖檔名）。
@@ -260,9 +261,11 @@ func (p *Pruner) fetchExpiredPosts(ctx context.Context, cutoff time.Time, limit 
 	posts := make([]expiredPost, 0, limit)
 	for rows.Next() {
 		var post expiredPost
-		if err := rows.Scan(&post.id, &post.image); err != nil {
+		var raw string
+		if err := rows.Scan(&post.id, &raw); err != nil {
 			return nil, err
 		}
+		post.images = parsePostImages(raw)
 		posts = append(posts, post)
 	}
 	return posts, rows.Err()
@@ -420,11 +423,11 @@ func deletedPostImages(posts []expiredPost, deletedIDs []int64) []string {
 
 	images := make([]string, 0, len(deletedIDs))
 	for _, post := range posts {
-		if post.image == "" {
+		if len(post.images) == 0 {
 			continue
 		}
 		if _, ok := deleted[post.id]; ok {
-			images = append(images, post.image)
+			images = append(images, post.images...)
 		}
 	}
 	return images
@@ -454,6 +457,29 @@ func enqueueDeletedImages(ctx context.Context, tx *sql.Tx, posts []expiredPost, 
 }
 
 // normalizedImageNames 把貼文附圖收斂成不重複的純檔名。
+// parsePostImages 把 image_url 欄位（新制 JSON 陣列或舊制單一值）解析成檔名切片。
+func parsePostImages(raw string) []string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+	if strings.HasPrefix(value, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(value), &arr); err == nil {
+			out := make([]string, 0, len(arr))
+			for _, v := range arr {
+				if name := imageFileName(v); name != "" {
+					out = append(out, name)
+				}
+			}
+			return out
+		}
+	}
+	if name := imageFileName(value); name != "" {
+		return []string{name}
+	}
+	return nil
+}
 func normalizedImageNames(images []string) []string {
 	seen := make(map[string]struct{}, len(images))
 	names := make([]string, 0, len(images))

@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { ApiError, LoginRequiredError, errorMessage, goToLogin, requestJSON } from '../core';
+import { ForumGlyph } from '../icons';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import type { ForumPost, PostDetailResponse } from '../types';
 import { PostCard } from './PostCard';
@@ -247,9 +248,7 @@ export function PostPage() {
 
       <main className="forum-main post-page-main">
         <a className="back-link" href="/forum">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}
         </a>
 

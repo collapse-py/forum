@@ -124,6 +124,7 @@ export interface AdminPost {
   id: number;
   content: string;
   imageUrl?: string;
+  imageUrls?: string[];
   likeCount?: number;
   commentCount?: number;
   authorEmail?: string;
@@ -701,6 +702,7 @@ export interface ForumPost {
    * 會讓那條 patch 無法套用到列表上（而它正是移除附圖的唯一表達方式）。
    */
   imageUrl?: string | undefined;
+  imageUrls?: string[];
   liked?: boolean;
   /**
    * 目前登入者是否收藏了這一篇。

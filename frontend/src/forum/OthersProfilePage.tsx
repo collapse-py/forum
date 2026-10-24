@@ -27,6 +27,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { LoginRequiredError, errorMessage, errorText, goToLogin, requestJSON } from '../core';
 import type { ForumPost, ForumProfile } from '../types';
+import { ForumGlyph } from '../icons';
 import { msg, t, tr, usePageTitle, type Message } from '../i18n';
 import { FollowButton } from './FollowButton';
 import { ForumAvatar } from './ForumAvatar';
@@ -309,9 +310,7 @@ export function OthersProfilePage() {
 
       <main className="forum-main profile-main">
         <a className="back-link" href="/forum">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}
         </a>
 

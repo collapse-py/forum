@@ -400,7 +400,7 @@ func TestCovForumPostsCreateImage(t *testing.T) {
 	t.Run("舊制檔案以引用計數通過", func(t *testing.T) {
 		h := newCovHarness(t)
 		// forum_media 沒有這一列（舊制檔案），退路查詢回答「自己的內容引用過它」。
-		h.rows("FROM forum_posts WHERE author_email = ? AND (image_url", []string{"count"}, []driverValue{int64(1)})
+		h.rows("FROM forum_posts WHERE author_email = ? AND image_url", []string{"count"}, []driverValue{int64(1)})
 		recorder := h.do(h.srv.handleForumPosts, http.MethodPost, "/api/forum/posts", validBody, "me@example.com", false)
 		covWantStatus(t, recorder, http.StatusCreated)
 	})

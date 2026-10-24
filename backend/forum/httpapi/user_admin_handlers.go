@@ -929,23 +929,34 @@ func (s *Server) handleAdminUserContent(w http.ResponseWriter, r *http.Request, 
 	// 整份清單共用一個 token（理由同 handleAdminForumPosts：每張圖各簽一支
 	// 會讓 Redis key 數量等同文章數），且整份都沒有圖時完全不碰 Redis。
 	// 逐筆組網址放在迴圈外統一處理：token 要等掃描結束、Rows 關閉後才能取得。
-	if s.firstForumImageName(result.Posts) != "" {
-		mediaToken, err := s.createMediaToken(r.Context())
-		if err != nil {
-			// 與列表端一致：以 502 表達「上游（Redis）故障」，而非文章讀取失敗。
-			logger.ErrorfContext(r.Context(), "[FORUM] 建立圖片 token 失敗: %v", err)
-			writeError(w, http.StatusBadGateway, "unable to create media token")
-			return
+		if s.firstForumImageName(result.Posts) != "" {
+			mediaToken, err := s.createMediaToken(r.Context())
+			if err != nil {
+				// 與列表端一致：以 502 表達「上游（Redis）故障」，而非文章讀取失敗。
+				logger.ErrorfContext(r.Context(), "[FORUM] 建立圖片 token 失敗: %v", err)
+				writeError(w, http.StatusBadGateway, "unable to create media token")
+				return
+			}
+			for i := range result.Posts {
+				names := s.forumImageFileNames(result.Posts[i].ImageURL)
+				urls := make([]string, 0, len(names))
+				for _, n := range names {
+					urls = append(urls, s.forumImageURL(n, mediaToken))
+				}
+				result.Posts[i].ImageURLs = urls
+				if len(urls) > 0 {
+					result.Posts[i].ImageURL = urls[0]
+				} else {
+					result.Posts[i].ImageURL = ""
+				}
+			}
+		} else {
+			// 沒有任何一張可用的圖：把庫值清空，避免把檔名或內部位址直接送給瀏覽器。
+			for i := range result.Posts {
+				result.Posts[i].ImageURL = ""
+				result.Posts[i].ImageURLs = nil
+			}
 		}
-		for i := range result.Posts {
-			result.Posts[i].ImageURL = s.forumImageURL(result.Posts[i].ImageURL, mediaToken)
-		}
-	} else {
-		// 沒有任何一張可用的圖：把庫值清空，避免把檔名或內部位址直接送給瀏覽器。
-		for i := range result.Posts {
-			result.Posts[i].ImageURL = ""
-		}
-	}
 
 	// ---- 查二：此使用者的留言 ----
 	// parent_id 與 depth 一起取回（MigrateMySQL 第 31 步）：有了層級之後，一則留言

@@ -41,6 +41,7 @@
 import { useCallback, useEffect, useMemo, useRef, type MouseEvent } from 'react';
 
 import { formatDateTime, text } from '../core';
+import { ForumGlyph } from '../icons';
 import { t, tr, usePageTitle } from '../i18n';
 import type { ForumNotificationItem } from '../types';
 import { ForumAvatar } from './ForumAvatar';
@@ -155,9 +156,7 @@ export function NotificationsPage() {
 
       <main className="forum-main notification-main">
         <a className="back-link" href="/forum">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}
         </a>
 

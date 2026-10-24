@@ -101,6 +101,7 @@ type adminForumPost struct {
 	Content      string              `json:"content"`
 	CreatedAt    time.Time           `json:"createdAt"`
 	ImageURL     string              `json:"imageUrl,omitempty"`
+	ImageURLs    []string            `json:"imageUrls,omitempty"`
 	LikeCount    int                 `json:"likeCount"`
 	CommentCount int                 `json:"commentCount"`
 	Comments     []adminForumComment `json:"comments"`
@@ -1119,8 +1120,9 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 		item.Deleted = showDeleted
 		// 先取出庫值（純檔名）：以它的正規化結果判斷要不要簽發 token，
 		// 舊資料若存的是無法辨識的值，就不會為了它白白打一次 Redis。
-		imageName := s.forumImageFileName(item.ImageURL)
-		if imageName != "" && mediaToken == "" {
+		imageNames := s.forumImageFileNames(item.ImageURL)
+		hasImage := len(imageNames) > 0
+		if hasImage && mediaToken == "" {
 			// 第一次遇到附圖才申請，後續文章沿用同一個 token。
 			mediaToken, err = s.createMediaToken(r.Context())
 			if err != nil {
@@ -1128,9 +1130,16 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// 庫值只是檔名，給瀏覽器的網址由 forumImageURL 以 FILES_SERVER_PUBLIC_URL
-		// 現組成「公開網域 + /files/ + 檔名 + token」；無法辨識的舊值會變成空字串。
-		item.ImageURL = s.forumImageURL(imageName, mediaToken)
+		imageURLs := make([]string, 0, len(imageNames))
+		for _, name := range imageNames {
+			imageURLs = append(imageURLs, s.forumImageURL(name, mediaToken))
+		}
+		item.ImageURLs = imageURLs
+		if len(imageURLs) > 0 {
+			item.ImageURL = imageURLs[0]
+		} else {
+			item.ImageURL = ""
+		}
 		// 這裡是刻意的 N+1：每篇文章額外查一次留言，換取後台列表頁能直接就地編輯／刪除留言，
 		// 不必另外開一個「留言管理」頁。成本由 pageSize = 25 封頂（每次請求最多 25 次），
 		// 且走 idx_forum_post_comments_post_id 索引。

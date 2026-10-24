@@ -280,6 +280,15 @@ func MigrateMySQL(db *sql.DB) error {
 	if err := addColumnIfNotExists(db, "forum_posts", "image_url", "TEXT NOT NULL"); err != nil {
 		return err
 	}
+	// 2b) 多圖改版：把舊的單一檔名/網址轉成 JSON 陣列字串，讓 image_url 欄位
+	//    統一以 JSON 陣列表示（空值為 []）。冪等：已為 JSON 陣列的列不會再被轉。
+	if _, err := db.Exec(`UPDATE forum_posts SET image_url = '[]' WHERE TRIM(image_url) = ''`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE forum_posts SET image_url = CONCAT('["', image_url, '"]')
+		WHERE TRIM(image_url) <> '' AND LEFT(TRIM(image_url), 1) <> '['`); err != nil {
+		return err
+	}
 
 	// 3) 按讚表。複合主鍵 (post_id, author_email) 同時扮演「一人對同一篇文章只能按一次讚」
 	//    的業務規則與「查詢某人的按讚清單」所需的索引，因此不需要額外建立 (post_id, author_email) 索引。

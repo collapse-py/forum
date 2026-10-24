@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { LoginRequiredError, errorText, goToLogin, requestJSON } from '../core';
 import type { ForumProfile } from '../types';
+import { ForumGlyph } from '../icons';
 import { msg, tr, t, usePageTitle, type Message } from '../i18n';
 import { BottomNav, ForumNav, ForumShell, useAuth, usePwaInstall } from './shell';
 import { ForumAvatar } from './ForumAvatar';
@@ -80,7 +81,7 @@ export function NewPostPage() {
   const install = usePwaInstall();
 
   const [content, setContent] = useState(loadDraft);
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   // 存 key+參數或後端回的字串，render 時才翻譯；存字串的話切換語言後這一行不會跟著
   // 換（見 runtime.ts 的「延後翻譯的訊息」）。
   const [status, setStatus] = useState<{ message: Message | string | null; isError: boolean }>({
@@ -150,6 +151,7 @@ export function NewPostPage() {
    */
   const [previewURL, setPreviewURL] = useState('');
   useEffect(() => {
+    const file = files[0];
     if (!file) {
       setPreviewURL('');
       return undefined;
@@ -157,7 +159,7 @@ export function NewPostPage() {
     const url = URL.createObjectURL(file);
     setPreviewURL(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [files]);
 
   /* --- 「我」的公開資料 ---------------------------------------------------- */
 
@@ -246,28 +248,25 @@ export function NewPostPage() {
     setStatus({ message: t('newPost.publishing'), isError: false });
 
     try {
-      let imageURL = '';
-      if (file) {
+      const uploadedURLs: string[] = [];
+      if (files.length > 0) {
         setStatus({ message: t('newPost.uploading'), isError: false });
-        imageURL = await uploadForumImage(file);
-        uploadedURLRef.current = imageURL;
+        for (const f of files) {
+          const url = await uploadForumImage(f);
+          uploadedURLs.push(url);
+        }
+        uploadedURLRef.current = uploadedURLs[0] ?? '';
       }
 
       setStatus({ message: t('newPost.publishing'), isError: false });
       try {
         await requestJSON('/api/forum/posts', {
           method: 'POST',
-          json: { content: content.trim(), imageUrl: imageURL },
+          json: { content: content.trim(), imageUrls: uploadedURLs, imageUrl: uploadedURLs[0] ?? '' },
           fallback: t('error.fallbackPublish'),
         });
       } catch (error) {
-        /*
-         * 上傳成功但發佈失敗時，那張圖不會被任何貼文引用 —— 不主動清掉就是
-         * 一個孤兒檔，而一般使用者沒有任何手段清掉它（刪圖端點要求「我上傳
-         * 的、且未被引用」兩個條件都成立）。清理是 best-effort，且不掩蓋
-         * 原本的錯誤：使用者要看到的是「發佈失敗」。
-         */
-        if (imageURL) void deleteForumImage(imageURL).catch(() => undefined);
+        if (uploadedURLs.length) void Promise.all(uploadedURLs.map((u) => deleteForumImage(u).catch(() => undefined)));
         throw error;
       }
       // 發佈成功才清草稿：清太早的話，一旦這一步之後發生任何問題（例如導向
@@ -292,9 +291,7 @@ export function NewPostPage() {
 
       <main className="forum-main new-post-main">
         <a className="back-link" href="/forum">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            arrow_back
-          </span>
+          <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}
         </a>
 
@@ -361,12 +358,13 @@ export function NewPostPage() {
                 id="forum-image"
                 className="image-upload-input"
                 type="file"
-                accept="image/jpeg,image/png,image/gif,image/webp"
-                hidden
-                ref={fileInputRef}
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              />
-              {file && previewURL ? (
+                 accept="image/jpeg,image/png,image/gif,image/webp"
+                 multiple
+                 hidden
+                 ref={fileInputRef}
+                 onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+               />
+               {files.length > 0 && previewURL ? (
                 /*
                   預覽圖的來源是 URL.createObjectURL（見上面的 effect），不是
                   /api/forum/images 的回傳網址：那是檔案伺服器，而圖片此刻還在
@@ -377,13 +375,13 @@ export function NewPostPage() {
                   （瀏覽器認為值沒變），使用者會覺得按了沒反應。
                 */
                 <div className="image-preview" id="forum-image-preview">
-                  <img src={previewURL} alt={t('newPost.imagePreviewAlt')} />
-                  <span className="image-preview__name">{file.name}</span>
+                  <img src={previewURL} alt={t('newPost.imagePreviewAlt')} draggable={false} />
+                  <span className="image-preview__name">{files.map((f) => f.name).join(', ')}</span>
                   <button
                     className="ghost-button"
                     type="button"
                     onClick={() => {
-                      setFile(null);
+                      setFiles([]);
                       if (fileInputRef.current) fileInputRef.current.value = '';
                     }}
                   >

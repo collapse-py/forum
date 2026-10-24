@@ -469,19 +469,26 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 		if err != nil {
 			return nil, err
 		}
-		imageName := s.forumImageFileName(post.ImageURL)
-		// 頭像與附圖共用同一把 token，理由與 loadForumPosts 相同：一頁一把、
-		// 離開時一次釋放。少了 avatarName 這個判斷，搜尋結果裡的作者頭像會
-		// 全部載不出來，而那不會出現在任何錯誤訊息裡。
+		imageNames := s.forumImageFileNames(post.ImageURL)
 		avatarName := s.forumImageFileName(post.AuthorAvatar)
-		if (imageName != "" || avatarName != "") && mediaToken == "" {
+		hasImage := len(imageNames) > 0
+		if (hasImage || avatarName != "") && mediaToken == "" {
 			token, err := s.createMediaToken(r.Context())
 			if err != nil {
 				return nil, err
 			}
 			mediaToken = token
 		}
-		post.ImageURL = s.forumImageURL(imageName, mediaToken)
+		imageURLs := make([]string, 0, len(imageNames))
+		for _, name := range imageNames {
+			imageURLs = append(imageURLs, s.forumImageURL(name, mediaToken))
+		}
+		post.ImageURLs = imageURLs
+		if len(imageURLs) > 0 {
+			post.ImageURL = imageURLs[0]
+		} else {
+			post.ImageURL = ""
+		}
 		post.AuthorAvatar = s.forumImageURL(avatarName, mediaToken)
 		indexOf[post.ID] = len(ordered)
 		ordered = append(ordered, post)
@@ -562,15 +569,23 @@ func (s *Server) loadAdminForumPostsByIDs(ctx context.Context, ids []int64) ([]a
 	// 附圖需要短期 token 才能讀取；整頁共用一把，理由見 listAdminForumPosts。
 	mediaToken := ""
 	for index := range ordered {
-		imageName := s.forumImageFileName(ordered[index].ImageURL)
-		if imageName != "" && mediaToken == "" {
+		imageNames := s.forumImageFileNames(ordered[index].ImageURL)
+		if len(imageNames) > 0 && mediaToken == "" {
 			token, err := s.createMediaToken(ctx)
 			if err != nil {
 				return nil, err
 			}
 			mediaToken = token
 		}
-		ordered[index].ImageURL = s.forumImageURL(imageName, mediaToken)
+		imageURLs := make([]string, 0, len(imageNames))
+		for _, name := range imageNames {
+			imageURLs = append(imageURLs, s.forumImageURL(name, mediaToken))
+		}
+		if len(imageURLs) > 0 {
+			ordered[index].ImageURL = imageURLs[0]
+		} else {
+			ordered[index].ImageURL = ""
+		}
 		// 留言一併帶出，讓後臺在搜尋結果裡仍能就地編輯／刪除（與文章列表一致）。
 		comments, err := s.loadAdminForumComments(ctx, ordered[index].ID, ordered[index].CommentCount)
 		if err != nil {
