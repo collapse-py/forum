@@ -291,26 +291,35 @@ export function FeedPage() {
    * 成本很低，但每個關鍵字都重建會讓舊的 observer 在 disconnect 前觸發一次，
    * 導致送出兩個請求。
    *
+   * **不能把 search 放進依賴**：它每次 render 都是新的物件字面量（見 useSearch
+   * 的 return），因此依賴陣列每 render 都變，observer 每 render 都重建。
+   * observer.observe() 會立刻回報一次「目前是否 intersecting」，所以只要
+   * sentinel 還在 800px 預載區內（重新整理後瀏覽器把捲動位置回到短清單底部，
+   * 正是這種情形），每一次重建就多送一頁 —— 載入讓清單變長、觸發 render、
+   * 再重建、再送一頁，一路請求到最底。真正穩定的只有 loadMore（它是
+   * useCallback），所以先取出來再放進依賴。
+   *
    * **兩個分支都必須掛 sentinelRef**（見下方兩處 ref）。React 只會把 ref
    * 交給「當下掛著的那一個」節點，因此少了任何一邊，那一邊的期間就拿不到
    * 節點、effect 會直接 return、觀察器從未被建立 —— 症狀是那一種結果
    * 永遠停在第一頁。
    */
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const loadMoreSearch = search.loadMore;
   useEffect(() => {
     const node = sentinelRef.current;
     if (!node) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries[0]?.isIntersecting) return;
-        if (searching) search.loadMore();
+        if (searching) loadMoreSearch();
         else loadFeed(false);
       },
       { rootMargin: PRELOAD_DISTANCE },
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [loadFeed, search, searching]);
+  }, [loadFeed, loadMoreSearch, searching]);
 
   const handleHome = useCallback(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });

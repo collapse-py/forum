@@ -556,6 +556,7 @@ export const es: Record<MessageKey, string> = {
   'monitor.limitContent': 'Escrituras de contenido',
   'monitor.limitUpload': 'Subidas de imágenes',
   'monitor.limitAuth': 'Inicio de sesión OAuth',
+  'monitor.limitRead': 'Lecturas paginadas',
   'monitor.limitBudget': '{limit} por {window} s',
   'monitor.limitUnknown': '(desconocido)',
   'monitor.noLimits': 'No hay limitadores disponibles.',

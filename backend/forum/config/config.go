@@ -82,8 +82,9 @@ import (
 // 比對來源的 Origin 標頭，缺少 Origin 時改比對 Referer。它是防止跨站請求偽造
 // （CSRF）的主要防線，因此只應填真正會發出變更請求的來源。
 // RateLimitRequests 是單一用戶端 IP 在 RateLimitWindow 內，被允許的「內容寫入」
-// 請求次數（發文、留言、按讚、檢舉）。讀取端點刻意不受限流：貼文列表與留言
-// 是匿名訪客也要能讀的公開內容，若一併限流，使用者按「載入更多」就會被擋。
+// 請求次數（發文、留言、按讚、檢舉）。讀取端點不受這一組額度管：貼文列表與留言
+// 是匿名訪客也要能讀的公開內容，把它們塞進寫入額度，使用者按「載入更多」就會燒掉
+// 自己發文與留言的配額。分頁讀取另有自己的一組額度（見下方 RateLimitReadRequests）。
 // 套用位置見 httpapi.Server 的 writeRateLimiter。
 // RateLimitWindow 是 RateLimitRequests 的滑動視窗長度。實作是記憶體內的時間戳
 // 切片，不落地也不跨執行緒共享，因此重啟後計數會歸零。
@@ -103,6 +104,12 @@ import (
 // RateLimitAuthRequests 是 OAuth 端點（/auth/google、/auth/callback）的額度。
 // 作用是擋掉對授權流程的轟炸與重導向洗版，不是防爆破密碼（本站沒有密碼）。
 // RateLimitAuthWindow 是其滑動視窗長度。
+// RateLimitReadRequests 是「分頁讀取」的額度（動態、留言分頁、搜尋、追蹤清單…）。
+// 為什麼讀取也要額度：沒有額度時，一個會自動翻頁的前端 bug 或一個爬蟲就能把
+// 整份動態一頁一頁地拉完 —— 每一頁都是一次 MySQL 的 OFFSET 掃描加上逐筆的暱稱
+// 與標籤查詢，而且完全不會被 429 擋住（舊版對 GET 一律放行）。這組額度給得比
+// 寫入寬（預設 60 次／分鐘），正常捲動不會撞到它，撞到的人幾乎必然是自動化請求。
+// RateLimitReadWindow 是其滑動視窗長度。
 // DbDSN 是 MySQL 連線字串，常見形式為
 // user:password@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True&loc=Local。
 // parseTime=True 是必要的：程式以 time.Time 掃描 DATETIME 欄位，缺少這個參數時
@@ -201,6 +208,13 @@ type Config struct {
 	RateLimitUploadWindow    time.Duration // RATE_LIMIT_UPLOAD_WINDOW_SECONDS（設定檔單位：秒）
 	RateLimitAuthRequests    int           // RATE_LIMIT_AUTH_REQUESTS
 	RateLimitAuthWindow      time.Duration // RATE_LIMIT_AUTH_WINDOW_SECONDS（設定檔單位：秒）
+	// RateLimitReadRequests 是單一用戶端 IP 在 RateLimitReadWindow 內可以發出的
+	// 「分頁讀取」請求數（貼文動態、留言分頁、搜尋、各種清單分頁）。它刻意比
+	// 內容寫入的額度寬得多：無限捲動本來就會在幾秒內發出十幾頁，那是正常瀏覽
+	// 而不是攻擊。它的用途是擋掉失控的分頁轟炸（前端 bug、爬蟲、腳本），
+	// 而不是約束使用者的瀏覽速度。套用位置見 httpapi.Server 的 readRateLimiter。
+	RateLimitReadRequests int           // RATE_LIMIT_READ_REQUESTS
+	RateLimitReadWindow   time.Duration // RATE_LIMIT_READ_WINDOW_SECONDS（設定檔單位：秒）
 	DbDSN                    string        // DB_DSN
 	DbMaxOpenConns           int           // DB_MAX_OPEN_CONNS
 	DbMaxIdleConns           int           // DB_MAX_IDLE_CONNS
@@ -218,7 +232,7 @@ type Config struct {
 	MediaTokenTTLSecs    int    // MEDIA_TOKEN_TTL_SECONDS（設定檔單位：秒）
 	// MediaTokenTTLExplicit 記錄 MEDIA_TOKEN_TTL_SECONDS 是否在設定檔中以正整數
 	// 明確出現過。存在的原因是「兜底值」與「刻意設成同一個數字」在 Config 上
-	// 長得一模一樣，而這個專案對 30 天的兜底值有明確的安全立场（見 Validate）：
+	// 長得一模一樣，而這個專案對 30 天的兜底值有明確的安全立場（見 Validate）：
 	// 正式環境採用兜底值必須是部署者知情同意的結果，不能是忘記設定的副產品。
 	// 因此 Validate 需要這個旗標才能分辨那兩種情況。
 	MediaTokenTTLExplicit bool
@@ -271,12 +285,13 @@ const maxLogFiles = 1000
 // 副作用：讀取檔案並在返回時關閉其句柄。不寫檔案、不發 HTTP 請求、不碰資料庫。
 // 非併行安全：設計上只應在啟動階段呼叫一次，回傳的 Config 之後視為唯讀。
 func Load(path string) (Config, error) {
-	// 預先寫入即使設定檔完全不存在也能運作的預設值。三組限流設定在
+	// 預先寫入即使設定檔完全不存在也能運作的預設值。四組限流設定在
 	// applyDefaults 中都沒有對應的兜底，所以特別在這裡就先給值；
 	// 即使設定檔把它們寫成 0，httpapi.NewRateLimiter 仍會再兜一次底。
 	//
-	// 三組的預設值刻意不同，反映各端點的真實成本：上傳最貴因此額度最緊，
-	// 登入居中，內容寫入最便宜因此給得較寬。
+	// 四組的預設值刻意不同，反映各端點的真實成本：上傳最貴因此額度最緊，
+	// 登入居中，內容寫入最便宜因此給得較寬。讀取那一組最寬，因為無限捲動
+	// 本來就會在幾秒內發出十幾頁 —— 它的目標是失控的轟炸，不是使用者的手指。
 	var cfg Config
 	cfg.RateLimitRequests = 10
 	cfg.RateLimitWindow = time.Minute
@@ -284,6 +299,8 @@ func Load(path string) (Config, error) {
 	cfg.RateLimitUploadWindow = time.Minute
 	cfg.RateLimitAuthRequests = 10
 	cfg.RateLimitAuthWindow = time.Minute
+	cfg.RateLimitReadRequests = 60
+	cfg.RateLimitReadWindow = time.Minute
 	// 日誌輪替的預設值也在這裡預先寫入，而不是在 applyDefaults 兜底：
 	// LOG_MAX_SIZE_MB 的 0 是合法的「不輪替」，而 applyDefaults 的兜底
 	// 無法分辨「明確設成 0」與「沒有設定」—— 預先寫入讓明確的 0 能保留。
@@ -386,6 +403,16 @@ func Load(path string) (Config, error) {
 		case "RATE_LIMIT_AUTH_WINDOW_SECONDS":
 			if window, ok := parsePositiveSeconds(val); ok {
 				cfg.RateLimitAuthWindow = window
+			}
+		case "RATE_LIMIT_READ_REQUESTS":
+			// 與其他三組同一個規則：只接受正數，打錯字就沿用 Load 開頭預先寫入的
+			// 預設值，而不是讓它變成 0（0 會讓每個讀取請求都被擋）。
+			if limit, ok := parsePositiveInt(val); ok {
+				cfg.RateLimitReadRequests = limit
+			}
+		case "RATE_LIMIT_READ_WINDOW_SECONDS":
+			if window, ok := parsePositiveSeconds(val); ok {
+				cfg.RateLimitReadWindow = window
 			}
 		case "DB_DSN":
 			// 內含帳密；由 SplitN 保證後面的 "=" 與參數串都完整保留下來。
@@ -556,7 +583,7 @@ func (c *Config) applyDefaults() {
 		c.ReadHeaderTimeout = 10 * time.Second
 	}
 	if c.ShutdownTimeout <= 0 {
-		// 15 秒。在途請求通常只有數十毫秒，這個上限是給「卡住的請求」准备的；
+		// 15 秒。在途請求通常只有數十毫秒，這個上限是給「卡住的請求」準備的；
 		// 超過它就強制中斷，讓部署流程（systemd / docker / k8s）能在自己的
 		// 停止上限內拿到行程結束。
 		c.ShutdownTimeout = 15 * time.Second
@@ -849,7 +876,7 @@ func parsePositiveInt(val string) (int, bool) {
 // parseNonNegativeInt 解析「可以為 0」的整數設定，只拒絕負數與非數字。
 //
 // 存在的理由：LOG_MAX_SIZE_MB 的 0 有明確語意（不輪替），而 parsePositiveInt
-// 會把 0 当成「沒設定」，讓「刻意關掉輪替」與「忘記設定」在 Config 上無法
+// 會把 0 當成「沒設定」，讓「刻意關掉輪替」與「忘記設定」在 Config 上無法
 // 區分 —— 與 MediaTokenTTLExplicit 處理的是同一類問題，只是這裡的 0 本身
 // 就是合法值，不需要另外旗標。
 func parseNonNegativeInt(val string) (int, bool) {

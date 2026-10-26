@@ -556,6 +556,7 @@ export const th: Record<MessageKey, string> = {
   'monitor.limitContent': 'การเขียนเนื้อหา',
   'monitor.limitUpload': 'การอัปโหลดรูปภาพ',
   'monitor.limitAuth': 'เข้าสู่ระบบ OAuth',
+  'monitor.limitRead': 'อ่านแบบแบ่งหน้า',
   'monitor.limitBudget': '{limit} ครั้งต่อ {window} วินาที',
   'monitor.limitUnknown': '(ไม่ทราบ)',
   'monitor.noLimits': 'ไม่มีตัวจำกัดอัตรา',

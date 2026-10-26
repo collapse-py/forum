@@ -556,6 +556,7 @@ export const ko: Record<MessageKey, string> = {
   'monitor.limitContent': '콘텐츠 쓰기',
   'monitor.limitUpload': '이미지 업로드',
   'monitor.limitAuth': 'OAuth 로그인',
+  'monitor.limitRead': '목록 페이지',
   'monitor.limitBudget': '{window}초당 {limit}회',
   'monitor.limitUnknown': '(알 수 없음)',
   'monitor.noLimits': '사용할 수 있는 속도 제한기가 없습니다.',

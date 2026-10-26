@@ -432,6 +432,7 @@ export const zhCN: Record<MessageKey, string> = {
   'monitor.limitContent': '内容写入',
   'monitor.limitUpload': '图片上传',
   'monitor.limitAuth': 'OAuth 登录',
+  'monitor.limitRead': '分页读取',
   'monitor.limitBudget': '{window} 秒内 {limit} 次',
   'monitor.limitUnknown': '（未知）',
   'monitor.noLimits': '没有可用的限流器。',

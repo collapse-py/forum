@@ -556,6 +556,7 @@ export const ptBR: Record<MessageKey, string> = {
   'monitor.limitContent': 'Escritas de conteúdo',
   'monitor.limitUpload': 'Envio de imagens',
   'monitor.limitAuth': 'Login via OAuth',
+  'monitor.limitRead': 'Leituras paginadas',
   'monitor.limitBudget': '{limit} a cada {window} s',
   'monitor.limitUnknown': '(desconhecido)',
   'monitor.noLimits': 'Nenhum limitador disponível.',

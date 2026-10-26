@@ -556,6 +556,7 @@ export const vi: Record<MessageKey, string> = {
   'monitor.limitContent': 'Ghi nội dung',
   'monitor.limitUpload': 'Tải ảnh lên',
   'monitor.limitAuth': 'Đăng nhập OAuth',
+  'monitor.limitRead': 'Đọc phân trang',
   'monitor.limitBudget': '{limit} lần mỗi {window} giây',
   'monitor.limitUnknown': '(không rõ)',
   'monitor.noLimits': 'Không có bộ giới hạn nào.',

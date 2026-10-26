@@ -70,8 +70,8 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
   超過 `POST_RETENTION_DAYS`（預設 90 天）之後會被**硬刪**，連同留言、按讚、收藏與檢舉
   工單 —— 保留期是硬期限，到期後就不可逆了
 - **Redis 版可撤銷 Session**：滑動續期，Redis 掛掉等於全部登入失效
-- **三段式 IP 限流**：內容寫入（10/60s）、圖片上傳（5/60s）、OAuth 跳轉（10/60s）各自
-  獨立額度，依端點成本區分
+- **四段式 IP 限流**：內容寫入（10/60s）、圖片上傳（5/60s）、OAuth 跳轉（10/60s）、
+  分頁讀取 GET（60/60s）各自獨立額度，依端點成本區分
 - **files_server 自己的每 IP 限流**：媒體讀取與寫入（上傳／刪除）各自一套 token bucket
   （預設 50/s 與 2/s，burst 分別 200 與 20）。它與後端的限流器互不隸屬 —— 後端的
   額度保護不到另一個程序，而 `/files/` 的每一次讀取都伴隨一次 Redis 探查
@@ -162,7 +162,7 @@ cd backend && go build .
 
 `-check` **不連線任何外部服務**，回答的是「這個行程會以什麼組態啟動」而不是「相依
 服務能不能連上」。報告刻意不印任何憑證，點名的都是**啟動之後完全沒有症狀**的那一類
-問題（正式環境的 `COOKIE_SECURE`、三組限流的實際額度、媒體 token 的 TTL、管理員
+問題（正式環境的 `COOKIE_SECURE`、四組限流的實際額度、媒體 token 的 TTL、管理員
 白名單的實際儲存值）。後端執行檔另有 `-healthz` 旗標：探測 MySQL 與 Redis 後結束
 （0 健康／1 不健康）。
 
@@ -213,7 +213,7 @@ docker compose --env-file deploy/settings.conf up -d       # 3. 起服務
 - **Redis 就是信任根**：cookie 只是查詢鍵，能讀 Redis 等於能登入任何人、能寫 Redis
   等於能自己開管理員 session —— 密碼必須獨立、Redis 必須綁內網
 - CSP（`script-src 'self'`，無 `unsafe-inline` / `unsafe-eval`）、CSRF 來源檢查、
-  三段式限流
+  四段式限流（含分頁型 GET）
 - 匿名性：email 不出現在 URL，公開身分是 `SHA256(email)`
 - 媒體：UUID v4 檔名、副檔名白名單（不含 svg）、短 TTL 存取權杖
 - **寫入端點的 body 有大小上限**：`MaxBytesReader` 在解碼時就生效，而不是等業務長度

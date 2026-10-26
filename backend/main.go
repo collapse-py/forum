@@ -794,11 +794,14 @@ func checkConfig(path string) error {
 	}
 	fmt.Fprintln(out)
 
-	// 3. 限流。刻意逐組印出：它們是三個獨立的額度，站方常常只知道其中一個。
+	// 3. 限流。刻意逐組印出：它們是四個獨立的額度，站方常常只知道其中一個。
 	fmt.Fprintf(out, "限流（每組為獨立額度；超出的部分直接丟棄，不排隊）\n")
 	fmt.Fprintf(out, "  內容寫入           : %d 次 / %s\n", cfg.RateLimitRequests, cfg.RateLimitWindow)
 	fmt.Fprintf(out, "  圖片上傳           : %d 次 / %s\n", cfg.RateLimitUploadRequests, cfg.RateLimitUploadWindow)
 	fmt.Fprintf(out, "  OAuth              : %d 次 / %s\n", cfg.RateLimitAuthRequests, cfg.RateLimitAuthWindow)
+	// 讀取額度在這裡也印得出來：它是唯一一組「正常瀏覽也會用到」的額度，
+	// 而站方收到「載入更多失敗」的回報時，第一個要看的就是這組有沒有被打滿。
+	fmt.Fprintf(out, "  分頁讀取           : %d 次 / %s\n", cfg.RateLimitReadRequests, cfg.RateLimitReadWindow)
 	fmt.Fprintln(out)
 
 	// 4. 相依端點。憑證只報「有無」，不報內容。

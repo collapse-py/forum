@@ -431,6 +431,7 @@ export const ja: Record<MessageKey, string> = {
   'monitor.limitContent': 'コンテンツ書き込み',
   'monitor.limitUpload': '画像アップロード',
   'monitor.limitAuth': 'OAuth ログイン',
+  'monitor.limitRead': 'ページ取得',
   'monitor.limitBudget': '{window} 秒あたり {limit} 回',
   'monitor.limitUnknown': '（不明）',
   'monitor.noLimits': '利用できるリミッタがありません。',

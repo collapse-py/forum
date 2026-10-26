@@ -82,6 +82,31 @@ export interface FeedOptions {
 
 const DEFAULT_ENDPOINT = '/api/forum/posts';
 
+/**
+ * 這一頁要從第一頁重新載入時，把捲動位置放回頂端，並關掉瀏覽器的「重新整理後
+ * 還原捲動位置」。
+ *
+ * 為什麼必須關掉還原（而不是只在載入之後回頂端）：重新整理後瀏覽器會把上一次
+ * 讀到的捲動位置還原回去，而那個還原是在內容一頁一頁變長的過程中反覆套用的 ——
+ * 內容還沒長到那個位置時它被夾到列表底部，於是列表底部的 sentinel 一直待在
+ * 觀察帶裡，IntersectionObserver 每被重新建立一次就載入一頁，一路把整份動態
+ * 拉完才停。那正是「往下捲之後重新整理會一直請求到最底」的成因：使用者看到
+ * 的是頁面停在一個沒有內容的位置，而背後送出的是幾十次分頁請求。
+ *
+ * 為什麼選擇「回到頂端」而不是「把那些頁補齊」：這一頁是倒序動態，要還原一個
+ * 深捲動位置就必須先把前面所有頁載回來，而那正是我們要省掉的成本。代價是重新整理
+ * 後會回到頂端 —— 對一個「一直往下讀」的動態來說，這比十幾次請求更便宜。
+ */
+function resetScrollForFreshFeed(): void {
+  // 舊版瀏覽器（舊 Safari）沒有這個屬性，因此只能先確認它存在再寫。
+  if (typeof history.scrollRestoration === 'string' && history.scrollRestoration !== 'manual') {
+    history.scrollRestoration = 'manual';
+  }
+  // 還原可能已經發生在 React 掛載之前（那時它被夾到舊的列表底部），這一項
+  // 把那份夾出來的位置放回頂端。
+  window.scrollTo(0, 0);
+}
+
 export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = true }: FeedOptions = {}): FeedController {
   const [state, setState] = useState<FeedState>(initialState);
 
@@ -205,9 +230,16 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
   /*
    * 依賴 load（它隨 endpoint / pageSize 改變身分）與 enabled。
    * enabled 從 false 翻成 true 時這個 effect 會重跑並補上第一次載入。
+   *
+   * 載入之前先 resetScrollForFreshFeed()：重新整理後瀏覽器還原的捲動位置會讓
+   * 列表底部的 sentinel 直接落在觀察帶裡，那會把「第一次載入」變成「載入到最底」
+   * （理由見該函式的說明）。放在這個 effect 而不是 load() 裡，因為它屬於
+   * 「這一頁剛出現」而不是「要取一頁」—— load(true) 也會被「首頁鈕」與
+   * 「取消追蹤後重整」呼叫，而那兩種情況不該搶走使用者正在看的捲動位置。
    */
   useEffect(() => {
     if (!enabled) return undefined;
+    resetScrollForFreshFeed();
     load(true);
     return () => abortRef.current?.abort();
   }, [enabled, load]);

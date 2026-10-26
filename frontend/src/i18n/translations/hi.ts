@@ -556,6 +556,7 @@ export const hi: Record<MessageKey, string> = {
   'monitor.limitContent': 'कॉन्टेंट लेखन',
   'monitor.limitUpload': 'छवि अपलोड',
   'monitor.limitAuth': 'OAuth लॉगिन',
+  'monitor.limitRead': 'पेज पाठन',
   'monitor.limitBudget': '{window} सेकंड में {limit}',
   'monitor.limitUnknown': '(अज्ञात)',
   'monitor.noLimits': 'कोई रेट लिमिटर उपलब्ध नहीं।',

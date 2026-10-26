@@ -91,10 +91,12 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
    限流器計數
    ========================================================================== */
 
-// limitStats 收集三個限流器目前的計數，餵給 metrics。
+// limitStats 收集四個限流器目前的計數，餵給 metrics。
 //
 // 沒有被建立的限流器（測試以 struct literal 構造 Server）會被跳過而不是回
 // 傳零值 —— 儀表板上出現「額度 0」的列會被誤讀成「整站被封鎖」。
+// read 那一列的「阻擋」次數是站方要看到的那個數字：動態分頁被轟炸時，
+// 沒有這一行就沒有人知道 429 其實有在觸發。
 func (s *Server) limitStats() []metrics.LimitStat {
 	limiters := []struct {
 		name    string
@@ -103,6 +105,7 @@ func (s *Server) limitStats() []metrics.LimitStat {
 		{"content", s.writeRateLimiter},
 		{"upload", s.uploadRateLimiter},
 		{"auth", s.authRateLimiter},
+		{"read", s.readRateLimiter},
 	}
 
 	stats := make([]metrics.LimitStat, 0, len(limiters))

@@ -512,6 +512,7 @@ export const zhTW = {
   'monitor.limitContent': '內容寫入',
   'monitor.limitUpload': '圖片上傳',
   'monitor.limitAuth': 'OAuth 登入',
+  'monitor.limitRead': '分頁讀取',
   'monitor.limitBudget': '{limit} 次／{window} 秒',
   'monitor.limitUnknown': '（未知）',
   'monitor.noLimits': '沒有可用的限流器。',

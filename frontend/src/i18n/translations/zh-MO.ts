@@ -556,6 +556,7 @@ export const zhMO: Record<MessageKey, string> = {
   'monitor.limitContent': '內容寫入',
   'monitor.limitUpload': '圖片上載',
   'monitor.limitAuth': 'OAuth 登入',
+  'monitor.limitRead': '分頁讀取',
   'monitor.limitBudget': '{window} 秒內 {limit} 次',
   'monitor.limitUnknown': '（未知）',
   'monitor.noLimits': '沒有可用的限流器。',

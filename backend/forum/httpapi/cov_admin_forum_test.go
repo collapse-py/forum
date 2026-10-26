@@ -1974,8 +1974,27 @@ func TestCovAdminForumMonitorLimitStatsNilLimiter(t *testing.T) {
 	h := newCovHarness(t)
 	h.srv.writeRateLimiter = nil
 	stats := h.srv.limitStats()
-	if len(stats) != 2 {
-		t.Fatalf("limitStats 筆數 = %d, want 2", len(stats))
+	// 四組額度裡寫入那一組被改成 nil（模擬「沒有被建立的限流器」），因此只剩
+	// 三列：nil 的組被跳過，而不是回傳一個「額度 0」的列。
+	if len(stats) != 3 {
+		t.Fatalf("limitStats 筆數 = %d, want 3", len(stats))
+	}
+	// 名稱要包含 read：儀表板少了那一列就看不到「分頁被轟炸時 429 到底有沒有觸發」。
+	names := make([]string, 0, len(stats))
+	for _, stat := range stats {
+		names = append(names, stat.Name)
+	}
+	for _, want := range []string{"upload", "auth", "read"} {
+		found := false
+		for _, name := range names {
+			if name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("limitStats 名稱 = %v，缺少 %q", names, want)
+		}
 	}
 }
 

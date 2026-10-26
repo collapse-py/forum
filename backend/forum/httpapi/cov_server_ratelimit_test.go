@@ -2,8 +2,8 @@
 中介層與限流器的覆蓋測試（httpapi/cov_server_ratelimit_test.go）。
 
 既有的測試多半直接呼叫 handler，因此 server.go 的中介層（requireLogin、
-requireLoginForWrite、applyRateLimit）與 ratelimit.go 的到期清理、429 回應
-一直沒有被執行到。這一檔補的正是那一層。
+requireLoginForWrite、applyRateLimit、rateLimitRead）與 ratelimit.go 的到期清理、
+429 回應一直沒有被執行到。這一檔補的正是那一層。
 */
 
 package httpapi
@@ -161,6 +161,60 @@ func TestCovServerRateLimitAllMethodsLimitsGet(t *testing.T) {
 	covWantStatus(t, h.do(handler, http.MethodGet, "/auth/google", "", "", false), http.StatusTooManyRequests)
 }
 
+func TestCovServerRateLimitReadLimitsGet(t *testing.T) {
+	h := newCovHarness(t)
+	limiter := NewRateLimiter(1, 2*time.Second)
+	called := 0
+	handler := h.srv.rateLimitRead(limiter, func(http.ResponseWriter, *http.Request) { called++ })
+
+	// 分頁讀取正是這一層要擋的：GET 會消耗額度，第二次就收到 429。
+	first := h.do(handler, http.MethodGet, "/api/forum/posts?limit=25&offset=25", "", "", false)
+	covWantStatus(t, first, http.StatusOK)
+	second := h.do(handler, http.MethodGet, "/api/forum/posts?limit=25&offset=50", "", "", false)
+	covWantStatus(t, second, http.StatusTooManyRequests)
+	if second.Header().Get("Retry-After") == "" {
+		t.Error("429 應帶 Retry-After")
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want 1（被拒的請求不該進入 handler）", called)
+	}
+	stats := limiter.Stats()
+	if stats.Allowed != 1 || stats.Blocked != 1 {
+		t.Fatalf("stats = %+v, want Allowed=1 Blocked=1", stats)
+	}
+}
+
+func TestCovServerRateLimitReadSkipsNonGet(t *testing.T) {
+	h := newCovHarness(t)
+	limiter := NewRateLimiter(1, time.Minute)
+	called := 0
+	handler := h.srv.rateLimitRead(limiter, func(http.ResponseWriter, *http.Request) { called++ })
+
+	// 寫入方法走 next：它們的額度由外層那組（write／upload）負責，
+	// 讀取額度不該被發文吃掉，否則發文會先撞到「分頁」的預算。
+	for i := 0; i < 3; i++ {
+		recorder := h.do(handler, http.MethodPost, "/api/forum/posts", `{}`, "user@example.com", false)
+		covWantStatus(t, recorder, http.StatusOK)
+	}
+	if called != 3 {
+		t.Fatalf("called = %d, want 3（非 GET 不受讀取限流）", called)
+	}
+	if limiter.Stats().Allowed != 0 {
+		t.Fatalf("非 GET 不該消耗讀取額度：%+v", limiter.Stats())
+	}
+}
+
+func TestCovServerRateLimitReadNilLimiter(t *testing.T) {
+	h := newCovHarness(t)
+	called := false
+	handler := h.srv.rateLimitRead(nil, func(http.ResponseWriter, *http.Request) { called = true })
+	recorder := h.do(handler, http.MethodGet, "/api/forum/posts", "", "", false)
+	covWantStatus(t, recorder, http.StatusOK)
+	if !called {
+		t.Fatal("nil limiter 應直接放行（struct literal 構造的測試）")
+	}
+}
+
 func TestCovServerRateLimiterSlidingWindow(t *testing.T) {
 	rl := NewRateLimiter(2, time.Minute)
 	if rl.Limit() != 2 || rl.Window() != time.Minute {
@@ -266,7 +320,7 @@ func TestCovServerStartRateLimitCleanupNilSafe(t *testing.T) {
 	cancel()
 
 	empty := &Server{}
-	empty.StartRateLimitCleanup(ctx, time.Minute) // 三個 limiter 都是 nil
+	empty.StartRateLimitCleanup(ctx, time.Minute) // 四個 limiter 都是 nil
 
 	h := newCovHarness(t)
 	h.srv.StartRateLimitCleanup(ctx, time.Minute)

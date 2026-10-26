@@ -36,7 +36,7 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `SHUTDOWN_TIMEOUT_SECONDS` | `15` | 停止時等待在途請求的秒數。之後還有最多 3 秒的收尾，部署環境的停止上限必須大於這個總和 |
 | `PUBLIC_BASE_URL` | `http://localhost` + `SERVER_PORT` | 尾斜線會被自動去掉 |
 | `TRUSTED_ORIGINS` | `[PUBLIC_BASE_URL]` | CSRF 來源白名單。**留空等於關閉 CSRF 防護** |
-| `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。**容器部署必須填 `172.28.0.0/16`** |
+| `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。**容器部署必須填 `172.28.0.0/16`**；前面有 CDN ＋ 反向代理兩層時，兩道的位址都要列入（解析器從 XFF 最右往左掃，只填外層會把分桶鍵變成內層代理的位址） |
 | `DB_DSN` | — | 內含帳密 |
 | `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` / `DB_CONN_MAX_LIFETIME_MINUTES` | `20` / `5` / `5` | 連線池 |
 | `SNOWFLAKE_NODE_ID` | `0` | 主鍵用的雪花 ID 節點編號（0–63）。**多實例部署時每個實例必須不同**，否則同一毫秒可能發出相同 id；超出範圍會讓啟動失敗 |
@@ -50,9 +50,10 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `FILES_SERVER_TOKEN` | 讀環境變數 `FILES_SERVER_TOKEN` | **唯一支援環境變數的設定** |
 | `MEDIA_TOKEN_KEY_PREFIX` | `forum:token:` | 必須與 files_server 的 `token_key_prefix` 相同 |
 | `MEDIA_TOKEN_TTL_SECONDS` | `2592000`（30 天） | 這個兜底值對正式環境明顯過長，因此**正式環境採用兜底值會讓啟動被拒絕** |
-| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `10` / `60` | 內容寫入 |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `10` / `60` | 內容寫入（非 GET） |
 | `RATE_LIMIT_UPLOAD_REQUESTS` / `RATE_LIMIT_UPLOAD_WINDOW_SECONDS` | `5` / `60` | 圖片上傳（最貴，額度最緊） |
 | `RATE_LIMIT_AUTH_REQUESTS` / `RATE_LIMIT_AUTH_WINDOW_SECONDS` | `10` / `60` | OAuth 端點，含所有 method |
+| `RATE_LIMIT_READ_REQUESTS` / `RATE_LIMIT_READ_WINDOW_SECONDS` | `60` / `60` | 分頁型 GET（動態、搜尋、留言、各種清單）。擋掉「一頁一頁拉到底」的轟炸 |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | |
 | `GOOGLE_REDIRECT_URL` | — | 必須與 Google Cloud Console 逐字相符 |
 | `ALLOWED_ADMIN_EMAIL` | 空 | 逗號分隔。載入與比對**雙邊**都做 TrimSpace + ToLower |

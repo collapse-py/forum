@@ -26,36 +26,40 @@
 
 ## 論壇
 
-讀取匿名可達；寫入需要登入並受限流。
+讀取匿名可達；寫入需要登入並受限流。分頁型 GET 另受**讀取額度**（預設 60 次／分鐘，
+`RATE_LIMIT_READ_*`）約束 —— 它專門擋掉爬蟲、自動翻頁腳本與失控的連鎖載入，被拒時回
+429 帶 `Retry-After`。刻意不吃那份額度的端點：`/api/forum/public-profile`（設計給匿名
+訪客）、`/api/forum/notifications/unread-count`（每個頁面載入都打一次）、
+`/api/forum/notifications/ws`（長連線）、`/feed.xml`，以及全部後台路由。
 
 | Method | Path | 說明 |
 | --- | --- | --- |
-| GET | `/api/forum/posts?offset=&limit=` | 貼文列表 |
+| GET | `/api/forum/posts?offset=&limit=` | 貼文列表（吃讀取額度） |
 | POST | `/api/forum/posts` | 建立貼文 |
 | GET | `/api/forum/posts/{id}` | 單篇貼文（永久連結頁；匿名可讀，找不到回 404） |
 | PUT | `/api/forum/posts/{id}` | 編輯自己的貼文：`content` 必填，`imageUrl` 選填（省略／`null`＝不動、`""`＝移除、有值＝換圖，見 [附圖的替換](#貼文附圖與頭像的替換)） |
 | DELETE | `/api/forum/posts/{id}` | 軟刪除自己的貼文（`deleted_at` 寫入時間，資料保留） |
-| GET | `/api/forum/posts/{id}/comments` | 留言列表（公開；含回覆，最多三層） |
+| GET | `/api/forum/posts/{id}/comments` | 留言列表（公開；含回覆，最多三層；吃讀取額度） |
 | POST | `/api/forum/posts/{id}/comments` | 建立留言；body 可帶 `parentId` 回覆某一則留言 |
 | PUT / DELETE | `/api/forum/posts/{id}/comments/{cid}` | 編輯／刪除自己的留言（刪除連同它的回覆子樹；回應帶 `removed`） |
 | POST | `/api/forum/posts/{id}/like` | 按讚 |
 | POST | `/api/forum/posts/{id}/bookmark` | 切換收藏（見 [收藏](#收藏)） |
-| GET | `/api/forum/bookmarks` | 我收藏的貼文（需登入，不限流；單頁 25 筆，與動態相同） |
+| GET | `/api/forum/bookmarks` | 我收藏的貼文（需登入；吃讀取額度；單頁 25 筆，與動態相同） |
 | POST | `/api/forum/posts/{id}/report` | 檢舉貼文 |
 | POST | `/api/forum/posts/{id}/comments/{cid}/report` | 檢舉留言 |
 | POST | `/api/forum/images` | 上傳圖片，轉送 files_server |
 | POST | `/api/forum/images/delete` | 刪除自己上傳且未被引用的圖片（body `{url}`，見 [附圖的替換](#貼文附圖與頭像的替換)） |
 | POST | `/api/forum/image-tokens/release` | 釋放媒體存取權杖 |
 | GET / PUT | `/api/forum/profile` | 自己的資料（暱稱、簡介、頭像；PUT 為整份覆寫） |
-| GET / POST | `/api/forum/follows` | 追蹤名單 / 切換追蹤 |
-| GET | `/api/forum/following/posts` | 私密動態牆（需登入，不限流） |
-| GET | `/api/forum/my-posts` | 自己的貼文（需登入；未發過文回空清單而非 404） |
-| GET / POST | `/api/forum/notifications` | 我的通知 / 標記已讀（POST 帶 `{id}` 標一則，`id` 為 0 或缺省標全部） |
-| GET | `/api/forum/notifications/unread-count` | 未讀通知數（導覽列鈴鐺用；需登入） |
-| GET | `/api/forum/notifications/ws` | 即時通知的 WebSocket（需登入；訊息格式見下） |
-| GET | `/api/forum/public-profile?key=` | 以 `public_key` 查公開資料（無需登入） |
-| GET | `/api/forum/public-posts?user=` | 以 `public_key` 查貼文（無需登入） |
-| GET | `/api/forum/search?q=&offset=&limit=` | 全文搜尋；ES 不可用時退回 `LIKE` |
+| GET / POST | `/api/forum/follows` | 追蹤名單 / 切換追蹤（名單是分頁的，GET 吃讀取額度） |
+| GET | `/api/forum/following/posts` | 私密動態牆（需登入；吃讀取額度） |
+| GET | `/api/forum/my-posts` | 自己的貼文（需登入；吃讀取額度；未發過文回空清單而非 404） |
+| GET / POST | `/api/forum/notifications` | 我的通知 / 標記已讀（GET 吃讀取額度；POST 只是一次索引更新，不限流。POST 帶 `{id}` 標一則，`id` 為 0 或缺省標全部） |
+| GET | `/api/forum/notifications/unread-count` | 未讀通知數（導覽列鈴鐺用；需登入；**刻意不限流** —— 每個頁面載入都打一次，而它只取一個整數） |
+| GET | `/api/forum/notifications/ws` | 即時通知的 WebSocket（需登入；**刻意不限流** —— 它是升級成長連線，連線數上限在 handler 內；訊息格式見下） |
+| GET | `/api/forum/public-profile?key=` | 以 `public_key` 查公開資料（無需登入；**刻意不限流** —— 設計給匿名訪客，且不是分頁端點） |
+| GET | `/api/forum/public-posts?user=` | 以 `public_key` 查貼文（無需登入；吃讀取額度） |
+| GET | `/api/forum/search?q=&offset=&limit=` | 全文搜尋；ES 不可用時退回 `LIKE`（吃讀取額度） |
 
 > 兩個 `public-*` 端點的參數名**不一致**（`key` vs `user`），這是現況不是筆誤。
 
@@ -111,7 +115,7 @@
 | Method | Path | 說明 |
 | --- | --- | --- |
 | POST | `/api/forum/posts/{id}/bookmark` | 切換收藏（已收藏→取消、未收藏→新增）；回 `{"bookmarked":…}` |
-| GET | `/api/forum/bookmarks?offset=` | 我收藏過的貼文（需登入、不限流；單頁 25 筆） |
+| GET | `/api/forum/bookmarks?offset=` | 我收藏過的貼文（需登入、吃讀取額度；單頁 25 筆） |
 
 - 回應只有 `bookmarked`（切換**後**的狀態）：連點兩下的合併結果只有後端的交易知道，前端不猜。
 - 清單只列**還活著**的貼文 —— 一則被作者刪除的貼文不再出現，即使有人收藏過它（與所有公開列表同一條規則）。還原之後它會回到清單裡。

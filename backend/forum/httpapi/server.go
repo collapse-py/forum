@@ -58,14 +58,17 @@ type Server struct {
 	// sessions 包裝 Redis session：token 產生、cookie 寫入、sliding expiration
 	// 與身分解析都經由它，handler 不直接操作 session key。
 	sessions *session.Manager
-	// 限流器依「端點成本」分成三組，各自獨立的額度。分成三組的理由見
+	// 限流器依「端點成本」分成四組，各自獨立的額度。分成四組的理由見
 	// config.RateLimitRequests 的說明：圖片上傳會呼叫外部服務並在 Redis
 	// 建立 token，OAuth 會產生站外導向，而留言只是寫一行 MySQL，混用同一份
 	// 額度的結果必然是「要嘛放行上傳轟炸、要嘛把留言一起擋掉」。
-	// 三者都是 nil-safe 的：未建立時對應的 Middleware 不會被掛上（見 Handler）。
+	// 讀取那一組是後來加的：讀取端點原本完全不限流，因此一個會自動翻頁的
+	// 前端 bug 能把整份動態一頁一頁拉完而不會收到任何 429（見 rateLimitRead）。
+	// 四者都是 nil-safe 的：未建立時對應的 Middleware 不會被掛上（見 Handler）。
 	writeRateLimiter  *RateLimiter
 	uploadRateLimiter *RateLimiter
 	authRateLimiter   *RateLimiter
+	readRateLimiter   *RateLimiter
 	// mediaRedis 與 sessions 共用同一個 Redis client，但用途不同：這裡只用於
 	// 媒體存取 token 的簽發與釋放（handleForumImageTokensRelease），
 	// 另外也供 /healthz 做存活探測，因此允許為 nil（探測時會略過 Redis）。
@@ -129,6 +132,7 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 		writeRateLimiter:  NewRateLimiter(cfg.RateLimitRequests, cfg.RateLimitWindow),
 		uploadRateLimiter: NewRateLimiter(cfg.RateLimitUploadRequests, cfg.RateLimitUploadWindow),
 		authRateLimiter:   NewRateLimiter(cfg.RateLimitAuthRequests, cfg.RateLimitAuthWindow),
+		readRateLimiter:   NewRateLimiter(cfg.RateLimitReadRequests, cfg.RateLimitReadWindow),
 		mediaRedis:        redisClient,
 		// 封鎖名單與 session 與媒體 token 共用同一個 Redis 實例（同一條連線
 		// 池），因此這裡不另外建構連線。
@@ -152,7 +156,7 @@ func NewServer(cfg config.Config, db *sql.DB, sessions *session.Manager, redisCl
 	}
 	// 限流器的分攤鍵來源接到 Server 的信任模型上。刻意在這裡接而不是讓
 	// RateLimiter 自己去讀設定：限流器不該知道設定檔的存在。
-	for _, limiter := range []*RateLimiter{srv.writeRateLimiter, srv.uploadRateLimiter, srv.authRateLimiter} {
+	for _, limiter := range []*RateLimiter{srv.writeRateLimiter, srv.uploadRateLimiter, srv.authRateLimiter, srv.readRateLimiter} {
 		if limiter != nil {
 			limiter.SetIPResolver(srv.clientIP)
 		}
@@ -229,7 +233,7 @@ func (s *Server) Blocks() *ipban.Store {
 	return s.blocks
 }
 
-// StartRateLimitCleanup 為三個限流器啟動定期清理的背景 goroutine。
+// StartRateLimitCleanup 為四個限流器啟動定期清理的背景 goroutine。
 //
 // 存在的理由：限流器的 hits map 只會在 Allow 時把某個 key 的 slice 縮短，
 // 卻不會刪掉 key 本身。對一個長期運作、公開入口會被爬蟲掃過的論壇，
@@ -237,14 +241,14 @@ func (s *Server) Blocks() *ipban.Store {
 //
 // interval 傳 0 代表讓每個限流器採用自己的預設（見 StartCleanup）；
 // 呼叫端若想讓清理頻率跟視窗長度一致，應傳入與 RateLimitWindow 同一個量級的
-// 時間值 —— 太频繁只是徒增鎖競爭，太稀疏則舊 key 存活較久。
+// 時間值 —— 太頻繁只是徒增鎖競爭，太稀疏則舊 key 存活較久。
 //
-// 這個函式必須在 NewServer 之後、開始服務之前呼叫。ctx 取消時三個 goroutine
+// 這個函式必須在 NewServer 之後、開始服務之前呼叫。ctx 取消時四個 goroutine
 // 都會停止，main 的優雅停止流程正是靠取消那個 context 來收掉它們。
 //
 // 這裡刻意只回傳、不等待：StartCleanup 本身會立刻返回。
 func (s *Server) StartRateLimitCleanup(ctx context.Context, interval time.Duration) {
-	limiters := []*RateLimiter{s.writeRateLimiter, s.uploadRateLimiter, s.authRateLimiter}
+	limiters := []*RateLimiter{s.writeRateLimiter, s.uploadRateLimiter, s.authRateLimiter, s.readRateLimiter}
 	for _, limiter := range limiters {
 		if limiter != nil {
 			limiter.StartCleanup(ctx, interval)
@@ -255,7 +259,7 @@ func (s *Server) StartRateLimitCleanup(ctx context.Context, interval time.Durati
 // rateLimit 把限流中介層掛到 handler 上，但放行 GET 請求。
 //
 // 為什麼要這個薄包裝而不是在 Handler 裡直接呼叫 limiter.Middleware：
-//  1. nil-safe。測試常以 struct literal 構造 Server 而不填這三個欄位
+//  1. nil-safe。測試常以 struct literal 構造 Server 而不填這些限流器欄位
 //     （見 post_edit_test.go、announcement_test.go、csrf_guard_test.go 等），
 //     若直接呼叫 nil 指標的 Middleware 會在建構路由時就 panic，讓那些測試
 //     完全跑不起來。
@@ -308,6 +312,42 @@ func (s *Server) applyRateLimit(limiter *RateLimiter, next http.HandlerFunc, ski
 	limited := s.withBlocklistHandler(limiter, s.blocks, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
+			next(w, r)
+			return
+		}
+		limited(w, r)
+	})
+}
+
+// rateLimitRead 把「讀取額度」掛在 GET 上，並讓非 GET 原樣通過。
+//
+// 它與 rateLimit 互為鏡像：rateLimit 放行 GET、限流非 GET；這個放行非 GET、
+// 限流 GET。兩層疊在同一條路由上時（s.rateLimitRead(read, s.rateLimit(write, next))），
+// 讀取吃讀取額度、寫入吃內容額度，誰都不會侵占對方的額度 —— 那正是舊版把讀取
+// 塞進寫入額度會造成的問題（使用者捲動十頁就把自己留言的配額燒掉了）。
+//
+// 為什麼讀取端點需要額度（而不是像舊版一樣完全放行）：每一頁動態都是一次
+// MySQL 的 OFFSET 掃描加上逐筆的暱稱與標籤查詢。原本 GET 一律放行，因此
+// 「往下捲之後重新整理會一頁一頁請求到底」那類前端 bug、爬蟲、或任何自動翻頁
+// 的腳本，都不會收到 429 —— 額度沒觸發，而 DB 承擔了整份動態的重量。
+// 這組額度刻意給得比寫入寬（預設 60 次／分鐘，見 config.RateLimitReadRequests），
+// 正常捲動不會撞到它；撞到的人幾乎必然是自動化請求。
+//
+// 這一層刻意不經過 withBlocklistHandler：封鎖是**寫入層**的概念（被封鎖的 IP
+// 仍可讀公開內容，見 blocklist.go 檔頭），而 blocklistmount 那條不變條件要求
+// 那個中介層只能在 applyRateLimit 內組裝。讀取直接走 limiter.Middleware，
+// 因此仍有 Retry-After 與 429，但不會多一次 Redis 往返 —— 讀取端點是匿名訪客
+// 每頁都要打的請求，那裡不該有封鎖開銷。
+//
+// nil-safe：測試以 struct literal 構造 Server 時 readRateLimiter 是 nil，
+// 這種情況等同沒掛限流（與 applyRateLimit 的處理一致）。
+func (s *Server) rateLimitRead(limiter *RateLimiter, next http.HandlerFunc) http.HandlerFunc {
+	if limiter == nil {
+		return next
+	}
+	limited := limiter.Middleware(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
 			next(w, r)
 			return
 		}
@@ -520,27 +560,28 @@ func (s *Server) Handler() http.Handler {
 		  /api/logout                     requireTrustedOrigin → handleLogout（僅接受 POST）
 		  /api/check                      handleCheck
 
-		論壇（讀取可匿名，寫入需登入並限流）
-		  /api/forum/posts                requireLoginForWrite → rateLimit(write) → handleForumPosts
+		論壇（讀取可匿名，寫入需登入並限流；分頁讀取吃自己的讀取額度）
+		  /api/forum/posts                requireLoginForWrite → rateLimitRead(read) → rateLimit(write) → handleForumPosts
 		  /api/forum/images               requireLogin → rateLimit(upload) → handleForumImageUpload
 		  /api/forum/images/delete        requireLogin → rateLimit(write) → handleForumImageDelete
 		                                 （刪除自己上傳、且未被引用的圖片）
 		  /api/forum/image-tokens/release requireLogin → rateLimit(upload) → handleForumImageTokensRelease
-		  /api/forum/posts/{id}...        requireLoginForWrite → rateLimit(write) → handleForumPostAction
+		  /api/forum/posts/{id}...        requireLoginForWrite → rateLimitRead(read) → rateLimit(write) → handleForumPostAction
 		                                 （單篇／編輯／刪除本人貼文，以及尾綴分派：
 		                                  /comments、/comments/{cid}、/like、/bookmark、/report）
 		  /api/forum/profile              requireLogin → rateLimit(write) → handleForumProfile
-		  /api/forum/follows              requireLogin → rateLimit(write) → handleForumFollows
-		                                 （GET 回追蹤清單、POST 切換追蹤）
-		  /api/forum/following/posts      requireLogin → handleForumFollowingPosts（私有唯讀）
-		  /api/forum/bookmarks            requireLogin → handleForumBookmarks（自己收藏的貼文，私有唯讀）
-		  /api/forum/my-posts              requireLogin → handleForumMyPosts（自己的貼文，私有唯讀）
-		  /api/forum/notifications        requireLogin → handleForumNotifications（列表／標記已讀）
-		  /api/forum/notifications/unread-count requireLogin → handleForumNotificationUnreadCount（私有唯讀）
-		  /api/forum/notifications/ws     requireLogin → handleForumNotificationStream（即時推播）
-		  /api/forum/public-profile       handleForumPublicProfile（刻意公開且不限流）
-		  /api/forum/public-posts         handleForumPublicPosts（依金鑰讀取某人貼文，公開且不限流）
-		  /api/forum/search               handleForumSearch（公開唯讀；ES 不可用時降級 MySQL LIKE）
+		  /api/forum/follows              requireLogin → rateLimitRead(read) → rateLimit(write) → handleForumFollows
+		                                 （GET 回追蹤清單、POST 切換追蹤。GET 走 read 額度：
+		                                  它是分頁清單，捲動它不該燒掉寫入配額）
+		  /api/forum/following/posts      requireLogin → rateLimitRead(read) → handleForumFollowingPosts（私有唯讀）
+		  /api/forum/bookmarks            requireLogin → rateLimitRead(read) → handleForumBookmarks（自己收藏的貼文，私有唯讀）
+		  /api/forum/my-posts              requireLogin → rateLimitRead(read) → handleForumMyPosts（自己的貼文，私有唯讀）
+		  /api/forum/notifications        requireLogin → rateLimitRead(read) → handleForumNotifications（列表／標記已讀）
+		  /api/forum/notifications/unread-count requireLogin → handleForumNotificationUnreadCount（私有唯讀，每頁一次，不吃額度）
+		  /api/forum/notifications/ws     requireLogin → handleForumNotificationStream（即時推播；連線數由各 handler 自己的額度控管）
+		  /api/forum/public-profile       handleForumPublicProfile（刻意公開；非分頁，不吃讀取額度）
+		  /api/forum/public-posts         rateLimitRead(read) → handleForumPublicPosts（依金鑰讀取某人貼文，公開分頁）
+		  /api/forum/search               rateLimitRead(read) → handleForumSearch（公開唯讀；ES 不可用時降級 MySQL LIKE）
 
 		後台（路由層不掛 requireLogin 也不掛限流；權限由各 handler 內的
 		requireAdminForum 把關，理由見該處註解）
@@ -569,7 +610,7 @@ func (s *Server) Handler() http.Handler {
 		  /forum-manifest.json、/service-worker.js、/admin*、/assets/、
 		  /forum*、/asset/、其餘落入 safeStaticFileServer
 
-		限流的四個要點：
+		限流的五個要點：
 		  1. 內容端點用 rateLimit：只擋非 GET，因為讀取端點對匿名訪客開放，
 		     限流它們會直接壞掉首頁與「載入更多」。判斷標準與
 		     requireLoginForWrite 相同。
@@ -577,7 +618,10 @@ func (s *Server) Handler() http.Handler {
 		     若用會放行 GET 的版本，限流就是沒有作用的裝飾品。
 		  3. 限流在 requireLogin 之「內」：先確認身分再吃額度，未登入的
 		     垃圾流量不會消耗已登入使用者的份額。
-		  4. 超額時回 429 並附 Retry-After，見 ratelimit.go 的 Middleware。
+		  4. 分頁讀取用 rateLimitRead：它是 rateLimit 的鏡像（只擋 GET）。舊版
+		     對讀取完全放行，因此「一頁一頁把整份動態拉完」的自動化請求不會
+		     收到任何 429。額度比寫入寬，正常捲動不會撞到它。
+		  5. 超額時回 429 並附 Retry-After，見 ratelimit.go 的 Middleware。
 	*/
 
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -593,14 +637,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/logout", s.requireTrustedOrigin(s.handleLogout))
 	mux.HandleFunc("/api/check", s.handleCheck)
 
-	// 依金鑰讀取某人的公開貼文列表。刻意公開且不限流，理由與 public-profile 相同：
-	// 貼文本來就是公開內容，而這支端點的條件「author_email 等值 + created_at 排序」
-	// 走的是索引（見 MigrateMySQL 第 21 步），不像搜尋那樣要掃全文。
-	mux.HandleFunc("/api/forum/public-posts", s.handleForumPublicPosts)
+	// 依金鑰讀取某人的公開貼文列表。刻意保持公開（不需要登入），但掛 read 額度：
+	// 它是分頁端點，「一頁一頁把某人全部貼文拉完」的成本與把整份全站動態拉完
+	// 相同，而舊版對這類 GET 完全放行。額度寬到匿名訪客正常瀏覽不會撞到它。
+	// 這支端點的條件「author_email 等值 + created_at 排序」走的是索引
+	// （見 MigrateMySQL 第 21 步），不像搜尋那樣要掃全文。
+	mux.HandleFunc("/api/forum/public-posts", s.rateLimitRead(s.readRateLimiter, s.handleForumPublicPosts))
 	// 貼文列表（GET）開放匿名，發文（POST）需登入才能決定作者。
 	// 發文另外掛上 write 額度：它是論壇最核心的寫入端點，也是灌水的主要目標。
+	// GET 掛 read 額度（見 rateLimitRead）：動態分頁是全站請求量最大的端點，
+	// 沒有額度時一個自動翻頁的 bug 就能把整份動態拉完而不會被 429 擋住。
+	// 兩層疊加的順序是「先讀取額度、再寫入額度」，因為 rateLimit 會放行 GET、
+	// rateLimitRead 會放行非 GET —— 反過來疊不會改變結果，但讀起來像兩層都在挡。
 	mux.HandleFunc("/api/forum/posts", s.requireLoginForWrite(
-		s.rateLimit(s.writeRateLimiter, s.handleForumPosts)))
+		s.rateLimitRead(s.readRateLimiter, s.rateLimit(s.writeRateLimiter, s.handleForumPosts))))
 	// 圖片上傳與 token 釋放一律需登入：兩者都會動到 mediaRedis 的資源配額。
 	// 掛 upload 額度（最緊的一組）：每次上傳都會讓外部檔案伺服器建立真實的
 	// 儲存與一筆 Redis token，是全站單次成本最高的操作。
@@ -614,57 +664,68 @@ func (s *Server) Handler() http.Handler {
 	// 只認自己的檔案，刪別人的檔案會被 404 擋掉。
 	mux.HandleFunc("/api/forum/images/delete", s.requireLogin(
 		s.rateLimit(s.writeRateLimiter, s.handleForumImageDelete)))
-	// 留言、按讚、檢舉都掛在 /api/forum/posts/ 之下。GET 取留言為公開讀取，
+	// 留言、按讚、檢舉都掛在 /api/forum/posts/ 之下。GET 取留言為公開讀取
+	// （吃 read 額度：留言分頁與動態分頁是同一種「一頁一頁拉」的成本），
 	// 其餘寫入方法需要登入 —— 這正是 requireLoginForWrite 存在的理由。
 	// 這一條同時承載四種尾綴（/comments、/like、/report），因此一組限流同時
 	// 管到留言、按讚與檢舉。它們都是便宜的 MySQL 寫入，共用一份額度是合理的。
 	mux.HandleFunc("/api/forum/posts/", s.requireLoginForWrite(
-		s.rateLimit(s.writeRateLimiter, s.handleForumPostAction)))
+		s.rateLimitRead(s.readRateLimiter, s.rateLimit(s.writeRateLimiter, s.handleForumPostAction))))
 	// 個人資料的 PUT 也是寫入，因此掛上 write 額度。
 	// 它的呼叫頻率遠低於發文（正常使用只在調整簡介時動一次），但惡意或
 	// 失控的腳本可以藉此反覆寫入 MySQL，不該沒有上限。
 	mux.HandleFunc("/api/forum/profile", s.requireLogin(
 		s.rateLimit(s.writeRateLimiter, s.handleForumProfile)))
 	// 追蹤：GET 回自己的追蹤清單，POST 切換追蹤／取消追蹤。
-	// 掛 write 額度的理由與按讚相同（它就是一次資料庫開關）—— 但 s.rateLimit
-	// 會放行 GET，因此讀取清單不吃額度，惡意輪詢 GET 不會把使用者的發文配額吃掉。
+	// 掛 write 額度的理由與按讚相同（它就是一次資料庫開關）。GET 改吃 read
+	// 額度（舊版放行 GET，因此讀取清單完全不限）：清單是分頁的，惡意輪詢它
+	// 不該消耗使用者的發文配額，但也不該完全沒有上限 —— 它每一頁都要查
+	// 「我追蹤的人」並逐人補暱稱與頭像。
 	mux.HandleFunc("/api/forum/follows", s.requireLogin(
-		s.rateLimit(s.writeRateLimiter, s.handleForumFollows)))
+		s.rateLimitRead(s.readRateLimiter, s.rateLimit(s.writeRateLimiter, s.handleForumFollows))))
 	// 追蹤者的貼文動態。純私有讀取（沒有登入就沒有追蹤清單），因此只掛
-	// requireLogin，不掛限流 —— 限流 GET 的前提是匿名訪客也要能讀，而這裡本來就擋掉了匿名。
-	mux.HandleFunc("/api/forum/following/posts", s.requireLogin(s.handleForumFollowingPosts))
+	// requireLogin。讀取額度在這裡比在公開端點上更有意義：它已經先確認了身分，
+	// 額度就是「這一位使用者」的預算，而不是整個 NAT 出口的預算。
+	mux.HandleFunc("/api/forum/following/posts", s.requireLogin(
+		s.rateLimitRead(s.readRateLimiter, s.handleForumFollowingPosts)))
 	// 自己收藏的貼文。與上一條完全同一組判斷：純私有唯讀、只有 GET，
-	// 因此只掛 requireLogin，不掛限流（限流 GET 的前提是匿名訪客也要能讀，
-	// 而這裡本來就擋掉了匿名）。切換收藏是 POST /api/forum/posts/{id}/bookmark，
-	// 由上面那條 requireLoginForWrite 的子樹路由承載。
-	mux.HandleFunc("/api/forum/bookmarks", s.requireLogin(s.handleForumBookmarks))
+	// 因此只掛 requireLogin 加上 read 額度。切換收藏是 POST
+	// /api/forum/posts/{id}/bookmark，由上面那條 requireLoginForWrite 的子樹路由承載。
+	mux.HandleFunc("/api/forum/bookmarks", s.requireLogin(
+		s.rateLimitRead(s.readRateLimiter, s.handleForumBookmarks)))
 	// 自己的貼文（個人頁的「我的貼文」區塊）。與上一條同一組判斷：純私有唯讀，
-	// 因此只掛 requireLogin。刻意不讓前端改走 public-posts?user=<自己的金鑰> ——
+	// 因此只掛 requireLogin 加上 read 額度。刻意不讓前端改走 public-posts?user=<自己的金鑰> ——
 	// 那條路徑對「還沒發過文的帳號」會回 404，而個人頁必須把「還沒發過文」顯示成
 	// 空狀態而不是錯誤（理由見 handleForumMyPosts）。
-	mux.HandleFunc("/api/forum/my-posts", s.requireLogin(s.handleForumMyPosts))
-	// 通知：GET 讀取列表、POST 標記已讀（一則或全部）。全部掛 requireLogin ——
+	mux.HandleFunc("/api/forum/my-posts", s.requireLogin(
+		s.rateLimitRead(s.readRateLimiter, s.handleForumMyPosts)))
+	// 通知：GET 讀取列表（吃 read 額度，它是分頁清單）、POST 標記已讀（一則或全部，
+	// 不限流：它只是一次索引更新，頻率遠低於留言與發文）。全部掛 requireLogin ——
 	// 通知是純私有資料，每一條查詢都以 recipient_email = ? 收斂在「自己」。
-	// 未讀數是獨立的一條路由：導覽列的鈴鐺在每個頁面載入時只取一個整數，
-	// 不該為此拉回整份清單。兩條都不掛限流，理由與 my-posts 相同（GET 不吃
-	// write 額度，而 POST 只是一次索引更新，頻率遠低於留言與發文）。
+	// 未讀數是獨立的一條路由：**不掛讀取額度** —— 導覽列的鈴鐺在每個頁面載入時
+	// 都會打一次，把它塞進分頁額度會讓「逛幾個頁面」就開始吃額度，而那一條查詢
+	// 只取一個整數，成本與分頁清單完全不同。
 	// 先註冊較具體的 unread-count，讓路由的意圖一眼可辨。
 	mux.HandleFunc("/api/forum/notifications/unread-count", s.requireLogin(s.handleForumNotificationUnreadCount))
 	// 即時推播（WebSocket）。同樣只掛 requireLogin：
-	//  - 它是 GET，掛 rateLimit 等於不掛（見該函式為什麼放行 GET），而
-	//    requireLogin 已經把匿名者擋在升級之前。
-	//  - 不在路由層限流的理由與其他私有 GET 相同（見 following/posts 的註解），
-	//    連線數的上限改由 handler 自己的同一使用者／全域額度控管，那個額度
-	//    才是長連線真正需要的資源邊界（見 forum_notification_stream.go）。
+	//  - 它是 GET，掛 rateLimit 等於不掛（見該函式為什麼放行 GET）。
+	//  - 刻意不掛 read 額度：那條 GET 是「升級成長連線」，一個頁面載入只打一次，
+	//    把它塞進分頁額度會讓每個頁面都消耗使用者的分頁預算。長連線真正需要的
+	//    資源邊界（同一使用者／全域的連線數上限）在 handler 內（見
+	//    forum_notification_stream.go），而不是每請求一次的滑動視窗。
 	// 掛在 requireLogin 之後也讓「停權帳號」在升級前就被擋下。
 	mux.HandleFunc("/api/forum/notifications/ws", s.requireLogin(s.handleForumNotificationStream))
-	mux.HandleFunc("/api/forum/notifications", s.requireLogin(s.handleForumNotifications))
-	// 公開個人頁刻意不掛任何認證中介層，因為它就是設計給未登入訪客看的。
+	mux.HandleFunc("/api/forum/notifications", s.requireLogin(
+		s.rateLimitRead(s.readRateLimiter, s.handleForumNotifications)))
+	// 公開個人頁刻意不掛任何中介層，因為它就是設計給未登入訪客看的，而它不是
+	// 分頁端點（一次等值查詢回一份資料）—— 沒有「一頁一頁拉完」的形態，因此
+	// 也不需要讀取額度。
 	mux.HandleFunc("/api/forum/public-profile", s.handleForumPublicProfile)
-	// 貼文搜尋。唯讀且刻意不限流：與貼文列表同一個道理，匿名訪客也要能搜尋。
+	// 貼文搜尋：掛 read 額度。它仍是匿名可讀的（沒有 requireLoginForWrite），
+	// 但每一頁都要走 ES 或 MySQL 的全文比對，是讀取端點裡單次最貴的。
 	// 沒有掛 requireLoginForWrite 是因為它只有 GET 一種方法需要；把唯讀端點
 	// 綁到「依方法決定是否驗證」的中介層只會多一層間接。
-	mux.HandleFunc("/api/forum/search", s.handleForumSearch)
+	mux.HandleFunc("/api/forum/search", s.rateLimitRead(s.readRateLimiter, s.handleForumSearch))
 
 	// 後台路由一律不掛 requireLogin：管理員與停權檢查的順序在不同 handler
 	// 間並不一致，交由 requireAdminForum 單點把關較不易漏掉。

@@ -191,23 +191,31 @@ func (s *Server) handleAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 
 ## 限流
 
-### 三段式額度
+### 四段式額度
 
-分成三組是因為各端點的單次成本差異極大，混用同一份額度的結果必然是「要嘛放行上傳轟炸、
+分成四組是因為各端點的單次成本差異極大，混用同一份額度的結果必然是「要嘛放行上傳轟炸、
 要嘛把留言一起擋掉」：
 
 | 組 | 預設 | 涵蓋 |
 | --- | --- | --- |
-| `write` | 10 / 60s | 發文、留言、按讚、檢舉、個人資料 |
+| `write` | 10 / 60s | 發文、留言、按讚、檢舉、個人資料（非 GET） |
 | `upload` | 5 / 60s | `/api/forum/images`（會呼叫外部檔案伺服器並在 Redis 建立 token，全站最貴） |
 | `auth` | 10 / 60s | `/auth/google`、`/auth/callback`（含所有 method） |
+| `read` | 60 / 60s | 分頁型 GET：動態、公開貼文清單、搜尋、留言、追蹤／收藏／通知／自己的貼文清單 |
 
 ### 演算法：行程內滑動視窗
 
 純記憶體的滑動視窗日誌，per-client key。`applyDefaults` 對「空值或非正數」補值，
 因此**無法用設定檔把某個視窗設成 0 秒**。
 
-**GET 例外**（`rateLimit` 不擋 GET）—— 讀取端點匿名可讀，限流會壞掉首頁。
+**GET 例外**（`rateLimit` 不擋 GET）—— 讀取端點匿名可讀，限流它會壞掉首頁。
+
+**但那不是「讀取完全不限」** —— `rateLimitRead` 專門掛在分頁型 GET 上，走
+`limiter.Middleware`（含 Retry-After 與 429）。舊版對 GET 一律放行，結果是設定檔裡的
+額度對「一頁一頁拉到底」的腳本、爬蟲、以及前端重新整理的連鎖載入**完全沒有作用**，
+而每一次翻頁都是一次 MySQL `OFFSET` 掃描。刻意不經過 `withBlocklistHandler`：封鎖是
+**寫入層**的概念（被封鎖的 IP 仍可讀公開內容），而且讀取端點是匿名訪客每頁都要打的
+請求，不該在那裡多一次 Redis 往返。
 
 **限流器掛在 `requireLoginForWrite` 內側** —— 未登入的垃圾請求不會燒掉已登入使用者的
 額度。
@@ -623,7 +631,7 @@ hub 在行程內，因此多實例（水平擴充）時同一個使用者連到�
 | `stats.requests.routes` | 依正規化路由分組的同樣統計（數字與 email 段換成 `:id`，上限 200 條） |
 | `stats.timeline` | 近 120 分鐘的分鐘級彙總，每格標示 `live`（本次啟動）或 `history`（資料庫讀回） |
 | `stats.clients` | 依請求量排序的來源位址：位址、`source`、4xx／5xx、429 次數、被封鎖擋下的次數、最近打到哪條路由 |
-| `stats.rateLimits` | 三組限流器的額度、放行／阻擋累計、目前追蹤中的來源數 |
+| `stats.rateLimits` | 四組限流器的額度、放行／阻擋累計、目前追蹤中的來源數 |
 | `dependencies` | MySQL 連線池水位與 ping 延遲、Redis 鍵數／記憶體／連線池、搜尋引擎狀態 |
 | `clientIpTrust` | 目前生效的來源 IP 信任模型：`mode`、`trusted`、`declared` |
 
@@ -815,7 +823,7 @@ bug 而要求把完整 token 顯示出來。
 | 指令本身 | `ZSCORE` 是 O(log N)，N 是封鎖筆數（這個站上通常是 0 到數十）；單一 key、單一 member，回應約 8 bytes |
 | 往返 | 與既有 Redis 呼叫同一條連線。`session` 套件在**每個**請求上都已經做了一次 `HGET`（`ResolveUser`），而它只為了「知道有沒有登入」；`IsBanned` 多出來的那次與那一次性質相同。因此在本架構下它是「又多一次已經在做的事」 |
 | 相對該請求的工作量 | 建立一則貼文要做一次 INSERT、可能一次 ES 索引（又一次 HTTP 往返）。`ZSCORE` 相對之下是雜音 |
-| 讀取端點 | **完全不受影響**。限流器只掛在寫入型路由上，所以匿名訪客的瀏覽不會多付這一次 |
+| 讀取端點 | **完全不受影響**。封鎖檢查只由 `applyRateLimit`（寫入型路由）組裝；`rateLimitRead` 走 `limiter.Middleware` 而不經過封鎖，所以匿名訪客的瀏覽不會多付這一次 |
 
 結論：這個成本可以接受，而它買到的是「封鎖在部署之後仍然有效」。
 

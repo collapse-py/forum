@@ -556,6 +556,7 @@ export const ar: Record<MessageKey, string> = {
   'monitor.limitContent': 'كتابة المحتوى',
   'monitor.limitUpload': 'رفع الصور',
   'monitor.limitAuth': 'تسجيل الدخول عبر OAuth',
+  'monitor.limitRead': 'قراءات مقسّمة',
   'monitor.limitBudget': '{limit} لكل {window} ثانية',
   'monitor.limitUnknown': '(غير معروف)',
   'monitor.noLimits': 'لا تتوفر محددات معدل.',

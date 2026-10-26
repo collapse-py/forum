@@ -556,6 +556,7 @@ export const id: Record<MessageKey, string> = {
   'monitor.limitContent': 'Penulisan konten',
   'monitor.limitUpload': 'Unggah gambar',
   'monitor.limitAuth': 'Masuk OAuth',
+  'monitor.limitRead': 'Baca halaman',
   'monitor.limitBudget': '{limit} per {window} detik',
   'monitor.limitUnknown': '(tidak diketahui)',
   'monitor.noLimits': 'Tidak ada pembatas laju.',

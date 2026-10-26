@@ -64,7 +64,7 @@ const MAX_CLIENT_ROWS = 40;
  * 從監控頁直接封鎖一個位址時使用的預設時長（分鐘）。
  *
  * 24 小時而不是「永久」或「一小時」：這個動作是在管理員**看見正在發生的濫用**
- * 時做的，一小時很可能在攻擊還沒停时就到期；一年則是一個在兩個星期後就已經
+ * 時做的，一小時很可能在攻擊還沒停時就到期；一年則是一個在兩個星期後就已經
  * 沒有人記得為什麼而做的承諾。封鎖頁（/admin/blocks）仍然提供完整的時長選項，
  * 那裡才是能認真思考長度的地方。
  */
@@ -115,7 +115,7 @@ function formatDuration(seconds: number): string {
  * 時間軸刻度用的「時:分」。
  *
  * 刻意不用 Intl.DateTimeFormat 的完整日期時間：那會在 144 個刻度上佔掉大量
- * 寬度，而時間軸的橫軸只需要分鐘 —— 分鐘索引連續，因此刻度只標整點與半点。
+ * 寬度，而時間軸的橫軸只需要分鐘 —— 分鐘索引連續，因此刻度只標整點與半點。
  */
 function formatClock(value: string): string {
   const date = new Date(value);
@@ -1037,11 +1037,12 @@ function sourceName(source: string): string {
    限流器列
    ========================================================================== */
 
-/** 限流器名稱 → 顯示用標籤。未知名稱原樣輸出（後端只會回這三個）。 */
+/** 限流器名稱 → 顯示用標籤。未知名稱原樣輸出（後端只會回這四個）。 */
 function limitName(name: string): string {
   if (name === 'content') return t('monitor.limitContent');
   if (name === 'upload') return t('monitor.limitUpload');
   if (name === 'auth') return t('monitor.limitAuth');
+  if (name === 'read') return t('monitor.limitRead');
   return name;
 }
 

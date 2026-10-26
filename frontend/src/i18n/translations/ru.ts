@@ -556,6 +556,7 @@ export const ru: Record<MessageKey, string> = {
   'monitor.limitContent': 'Записи контента',
   'monitor.limitUpload': 'Загрузка изображений',
   'monitor.limitAuth': 'Вход через OAuth',
+  'monitor.limitRead': 'Постраничные чтения',
   'monitor.limitBudget': '{limit} за {window} с',
   'monitor.limitUnknown': '(неизвестно)',
   'monitor.noLimits': 'Нет доступных ограничителей.',
