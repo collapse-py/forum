@@ -20,6 +20,10 @@ vite.config.ts.timestamp-*.mjs
 # 版本控只留原始碼。（node_modules 裡的 esbuild.exe 也一併被這條蓋掉。）
 *.exe
 
+# 編譯前留下的舊二進位副本（例如替換正在執行的 forum.exe 時先複製一份 `forum.exe~`）。
+# 它是本機暫存，不是產物，也不該進版控。
+*.exe~
+
 # 前端建置輸出。npm run build 產生，改用 npm run dev + HMR 即可重建。
 # 注意：frontend/asset/ 不是建置產物（後端直接用 http.Dir 提供 PWA 圖示），要進版控。
 frontend/dist/
@@ -58,3 +62,9 @@ deploy/settings.conf
 
 # docker compose 產生的備份檔（部署者自己做的匯出）。
 *.sql.gz
+
+# 資安稽核的工作區。`reports/` 是可交付報告，`script-output/` 是掃描與探測
+# 記錄、`evidence/` 是逐項證據 —— 都是本機產物，內容含設定檔行號與來源位址等
+# 部署細節，不應進版本庫（與 config.conf 同一個道理）。要交付時手動複製
+# reports/audit-report.md。
+audit-workspace/
