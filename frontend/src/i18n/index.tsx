@@ -5,9 +5,10 @@
  * 分成兩半的理由是 core.ts 的數字／日期格式化也需要知道目前語言，而 core.ts
  * 刻意不含 React —— 把「目前語言」放在純模組裡，兩邊就不會互相依賴。
  *
- * 一個 document 只有一種語言，因此這裡不需要多語言並存、不需要載入非同步的
- * 語言檔，也沒有「先用預設語言畫一帧再換掉」的問題：所有目錄都是同步 import，
- * t() 在第一次 render 就已經是正確的語言。
+ * 一個 document 只有一種語言，因此這裡不需要多語言並存。語言檔也不再全部
+ * 同步 import：只有目前語言會在第一次 render 之前載入（top-level await），
+ * 其餘語言在切換時才以 dynamic import 取得。這樣「先用預設語言畫一帧再換掉」
+ * 的問題仍然不存在，而訪客不必為十七種語言付出下載成本。
  */
 
 import {
@@ -17,43 +18,58 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 
 import { SITE_NAME, SITE_SHORT_NAME } from '../site';
-import { localeMeta, LOCALES, type LocaleCode, type LocaleMeta } from './locales';
+import { DEFAULT_LOCALE, localeMeta, LOCALES, type LocaleCode, type LocaleMeta } from './locales';
 import type { MessageKey, MessageParams } from './messages';
-import { applyLocale, resolveInitialLocale, setActiveLocale, t } from './runtime';
+import { applyLocale, loadLocale, resolveInitialLocale, setActiveLocale, t } from './runtime';
 
-export { t, msg, tr } from './runtime';
+export { t, msg, tr, loadLocale } from './runtime';
 export type { Message, TranslateParams } from './runtime';
 export { LOCALES, localeMeta, DEFAULT_LOCALE, matchLocale, matchFirstLocale } from './locales';
 export type { LocaleCode, LocaleMeta } from './locales';
 export type { MessageKey, MessageParams } from './messages';
 
 /**
- * 模組求值時就跑一次偵測。
+ * 決定並載入第一種語言。
  *
  * 位置是刻意的：這是唯一能保證「早於任何 render」的地方。若改在 Provider 的
  * useState 初始化函式裡設定模組狀態，React 仍可能在第一次 render 的某個更早
  * 位置呼叫 t()（例如 render 一個 sibling 時），那時 activeLocale 還是預設值。
  * 模組層的 const 在任何元件開始 render 之前就已經算好。
  *
- * 副作用只有「設定一個模組變數」，不碰 DOM、不寫 cookie。
+ * 這裡是整個 i18n 唯一需要 async 的地方：目錄不再全部靜態 import，必須先把
+ * 目前語言抓下來，t() 才能在第一次 render 就回傳正確的字。top-level await
+ * 讓所有 import 這個模組的 entry 一起等 —— 這正是我們要的：寧可晚一個 frame
+ * 才畫，也不要先畫 zh-TW 再閃換。
+ *
+ * 載入失敗時退回預設語言：一個抓不到的語言檔不該讓整頁空白。cookie 會被
+ * Provider 的 effect 改寫成 zh-TW，使用者下一次仍可手動切回。
  */
-const INITIAL_LOCALE: LocaleCode = (() => {
+async function resolveAndLoadInitialLocale(): Promise<LocaleCode> {
   const resolved = resolveInitialLocale();
-  setActiveLocale(resolved);
-  return resolved;
-})();
+  try {
+    await loadLocale(resolved);
+    return resolved;
+  } catch (error) {
+    console.warn(`[FORUM] 語言檔載入失敗，改用 ${DEFAULT_LOCALE}：`, error);
+    return DEFAULT_LOCALE;
+  }
+}
+
+const INITIAL_LOCALE: LocaleCode = await resolveAndLoadInitialLocale();
+setActiveLocale(INITIAL_LOCALE);
 
 export interface I18nContextValue {
   locale: LocaleCode;
   meta: LocaleMeta;
   /** 可選的語言清單。給切換器 render 選項用。 */
   locales: readonly LocaleMeta[];
-  setLocale: (locale: LocaleCode) => void;
+  setLocale: (locale: LocaleCode) => Promise<void>;
   t: (key: MessageKey, params?: MessageParams) => string;
 }
 
@@ -62,7 +78,27 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<LocaleCode>(INITIAL_LOCALE);
 
-  const setLocale = useCallback((next: LocaleCode) => {
+  /**
+   * 目前這一輪語言切換的序號。
+   *
+   * 使用者可能在目錄載完之前又選了另一個語言；沒有這個序號時，先送出但
+   * 後完成的載入會把較新的選擇蓋掉（畫面停在不是最後點的那個語言）。
+   * 只有最後一次請求可以套用。
+   */
+  const localeRequest = useRef(0);
+
+  const setLocale = useCallback(async (next: LocaleCode) => {
+    const request = ++localeRequest.current;
+    try {
+      await loadLocale(next);
+    } catch (error) {
+      console.warn(`[FORUM] 語言檔載入失敗（${next}）：`, error);
+      return;
+    }
+
+    // 載入期間使用者又選了別的語言：這次的結果已經過期。
+    if (request !== localeRequest.current) return;
+
     // 先改模組狀態再 setState：t() 在 setState 觸發的重繪之前就會被下一個
     // 畫面讀到，順序反過來會有一個中間狀態是「state 已換、翻譯還是舊的」。
     applyLocale(next);

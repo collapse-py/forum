@@ -13,50 +13,76 @@
 
 import { DEFAULT_LOCALE, localeMeta, matchFirstLocale, type LocaleCode } from './locales';
 import { zhTW, type MessageKey } from './messages';
-import { ar } from './translations/ar';
-import { de } from './translations/de';
-import { en } from './translations/en';
-import { es } from './translations/es';
-import { fr } from './translations/fr';
-import { hi } from './translations/hi';
-import { id } from './translations/id';
-import { ja } from './translations/ja';
-import { ko } from './translations/ko';
-import { ptBR } from './translations/pt-BR';
-import { ru } from './translations/ru';
-import { th } from './translations/th';
-import { vi } from './translations/vi';
-import { zhCN } from './translations/zh-CN';
-import { zhHK } from './translations/zh-HK';
-import { zhMO } from './translations/zh-MO';
 
 /**
- * 每個語言一份目錄。型別讓「漏翻一個 key」變成編譯期錯誤。
+ * 已載入的語言目錄。型別讓「漏翻一個 key」變成編譯期錯誤。
  *
- * 這裡刻意不用 import.meta.glob 之類的動態匯入：全部目錄都是靜態 import，
- * 因此第一次 render 就有完整的翻譯，切換語言時不會有任何非同步等待或「先用
- * 預設語言畫一帧再換掉」。代價是十七種語言的目錄一起進 bundle（約 90KB gzip
- * 前的原始碼），對這個規模的站台來說是划算的。
+ * 只有 zh-TW 是靜態 import：它是原文，也是 t() 找不到 key 時的 fallback，
+ * 因此任何時候都必須在。其餘十六種語言由 loadLocale() 以 dynamic import
+ * 取得，訪客只會下載目前這一種 —— 十七種全部靜態 import 會讓每個頁面背著
+ * 約 1 MB 的目錄（見 index.tsx 的說明）。
  */
-const CATALOGS: Readonly<Record<LocaleCode, Record<MessageKey, string>>> = {
+const CATALOGS: Partial<Record<LocaleCode, Record<MessageKey, string>>> = {
   'zh-TW': zhTW,
-  'zh-HK': zhHK,
-  'zh-MO': zhMO,
-  'zh-CN': zhCN,
-  en,
-  ja,
-  ko,
-  vi,
-  th,
-  id,
-  fr,
-  de,
-  es,
-  'pt-BR': ptBR,
-  ru,
-  ar,
-  hi,
 };
+
+/**
+ * 語言代碼 → 載入函式。
+ *
+ * 用明確的 map 而不是 `import(\`./translations/${locale}\`)`：後者讓 bundler
+ * 只能把整個目錄都包進來，且型別上無法保證每個 LocaleCode 都有對應的檔案。
+ * 這裡的 Record<LocaleCode, …> 讓新增語言時漏掉 loader 變成編譯期錯誤。
+ */
+const CATALOG_LOADERS: Readonly<Record<LocaleCode, () => Promise<Record<MessageKey, string>>>> = {
+  'zh-TW': async () => zhTW,
+  'zh-HK': () => import('./translations/zh-HK').then((module) => module.zhHK),
+  'zh-MO': () => import('./translations/zh-MO').then((module) => module.zhMO),
+  'zh-CN': () => import('./translations/zh-CN').then((module) => module.zhCN),
+  en: () => import('./translations/en').then((module) => module.en),
+  ja: () => import('./translations/ja').then((module) => module.ja),
+  ko: () => import('./translations/ko').then((module) => module.ko),
+  vi: () => import('./translations/vi').then((module) => module.vi),
+  th: () => import('./translations/th').then((module) => module.th),
+  id: () => import('./translations/id').then((module) => module.id),
+  fr: () => import('./translations/fr').then((module) => module.fr),
+  de: () => import('./translations/de').then((module) => module.de),
+  es: () => import('./translations/es').then((module) => module.es),
+  'pt-BR': () => import('./translations/pt-BR').then((module) => module.ptBR),
+  ru: () => import('./translations/ru').then((module) => module.ru),
+  ar: () => import('./translations/ar').then((module) => module.ar),
+  hi: () => import('./translations/hi').then((module) => module.hi),
+};
+
+/** 進行中的載入。同一個語言被連續要求時共用同一個 Promise。 */
+const loading = new Map<LocaleCode, Promise<void>>();
+
+/**
+ * 載入某個語言的目錄。
+ *
+ * 只負責把目錄放進 CATALOGS，不改變目前語言 —— 改變語言是 setActiveLocale()
+ * 的事。分開的理由是 index.tsx 必須先 await 目錄，才能把 activeLocale 指
+ * 過去；否則 t() 會在新目錄還沒到之前先回退到 zh-TW。
+ *
+ * 失敗時 Promise 會 reject，且不會留下半載入的狀態：呼叫端可以重試。
+ */
+export function loadLocale(locale: LocaleCode): Promise<void> {
+  if (CATALOGS[locale]) return Promise.resolve();
+
+  const inFlight = loading.get(locale);
+  if (inFlight) return inFlight;
+
+  const promise = Promise.resolve()
+    .then(() => CATALOG_LOADERS[locale]())
+    .then((catalog) => {
+      CATALOGS[locale] = catalog;
+    })
+    .finally(() => {
+      loading.delete(locale);
+    });
+
+  loading.set(locale, promise);
+  return promise;
+}
 
 /**
  * 語言選擇的 cookie 名稱。
@@ -231,7 +257,7 @@ function interpolate(message: string, params: TranslateParams | undefined): stri
  * 按鈕不該讓整頁白畫面。
  */
 export function t(key: MessageKey, params?: TranslateParams): string {
-  const active = CATALOGS[activeLocale] as Record<MessageKey, string>;
+  const active = CATALOGS[activeLocale] ?? zhTW;
   const message = active[key] ?? zhTW[key] ?? key;
   return interpolate(message, params);
 }

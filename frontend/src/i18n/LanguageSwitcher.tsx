@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
-import { useI18n } from './index';
+import { loadLocale, useI18n } from './index';
 import type { LocaleCode } from './locales';
 
 export interface LanguageSwitcherProps {
@@ -131,8 +131,19 @@ export function LanguageSwitcher({ variant }: LanguageSwitcherProps) {
     if (restoreFocus) triggerRef.current?.focus();
   };
 
+  /**
+   * 預載某個語言。選單項目被 hover 或聚焦時就先抓，真正點下去時多半已經
+   * 在記憶體裡。失敗不影響目前畫面：choose() 會再試一次，真的失敗就留在
+   * 原語言（setLocale 會 console.warn）。
+   */
+  const preload = (code: LocaleCode) => {
+    void loadLocale(code).catch(() => {
+      // 這裡的失敗只是預載沒成功；真正選取時會再試一次。
+    });
+  };
+
   const choose = (code: LocaleCode) => {
-    setLocale(code);
+    void setLocale(code);
     // 關閉後焦點還給觸發鈕：選完就消失的焦點會讓鍵盤使用者失去位置，必須再按
     // 一次 Tab 才回得去。
     closeMenu(true);
@@ -236,6 +247,8 @@ export function LanguageSwitcher({ variant }: LanguageSwitcherProps) {
             ref={(element) => {
               itemRefs.current[index] = element;
             }}
+            onFocus={() => preload(item.code)}
+            onPointerEnter={() => preload(item.code)}
             onClick={() => choose(item.code)}
           >
             <span className="lang-switch__item-badge">{item.badge}</span>

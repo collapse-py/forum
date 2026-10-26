@@ -207,6 +207,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    /*
+     * top-level await 需要 ES2022。i18n/index.tsx 用它把目前語言的目錄載完
+     * 才讓 entry 開始執行（見該檔說明）；Vite 預設的 'modules' 只到 ES2020，
+     * esbuild 遇到 top-level await 會直接報錯，而不是降級轉譯。
+     */
+    target: 'es2022',
     rollupOptions: {
       input: {
         forum: 'forum.html',
