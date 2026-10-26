@@ -32,6 +32,8 @@ import (
 	"testing"
 	"time"
 
+	"forum/forum/idgen"
+
 	// 空白匯入：TestPruneMySQL 以 sql.Open("mysql", …) 開連線，沒有這個
 	// 匯入時 sql.Open 會在 FORUM_TEST_MYSQL_DSN 設定的環境下直接回
 	//「unknown driver」——而未設定 DSN 的環境永遠不會碰到它。
@@ -186,7 +188,7 @@ func purgeTestDB(t *testing.T) *sql.DB {
 func migrateForPurge(db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS forum_posts (
-			id BIGINT NOT NULL AUTO_INCREMENT,
+			id BIGINT NOT NULL,
 			author_email VARCHAR(255) NOT NULL,
 			content TEXT NOT NULL,
 			image_url VARCHAR(255) NULL,
@@ -198,7 +200,7 @@ func migrateForPurge(db *sql.DB) error {
 			KEY idx_forum_posts_deleted_at_id (deleted_at, id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS forum_post_comments (
-			id BIGINT NOT NULL AUTO_INCREMENT,
+			id BIGINT NOT NULL,
 			post_id BIGINT NOT NULL,
 			parent_id BIGINT NULL,
 			depth TINYINT NOT NULL DEFAULT 1,
@@ -221,7 +223,7 @@ func migrateForPurge(db *sql.DB) error {
 			PRIMARY KEY (post_id, author_email)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS forum_reports (
-			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			id BIGINT NOT NULL PRIMARY KEY,
 			target_type VARCHAR(20) NOT NULL,
 			target_id BIGINT NOT NULL,
 			reporter_email VARCHAR(255) NOT NULL,
@@ -262,13 +264,12 @@ func migrateForPurge(db *sql.DB) error {
 }
 
 func insertPost(db *sql.DB, author, content, image string, deletedAt *time.Time) int64 {
-	res, err := db.Exec(
-		`INSERT INTO forum_posts (author_email, content, image_url, created_at, deleted_at) VALUES (?, ?, ?, ?, ?)`,
-		author, content, image, time.Now(), deletedAt)
-	if err != nil {
+	id := idgen.Next()
+	if _, err := db.Exec(
+		`INSERT INTO forum_posts (id, author_email, content, image_url, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, author, content, image, time.Now(), deletedAt); err != nil {
 		return 0
 	}
-	id, _ := res.LastInsertId()
 	return id
 }
 
@@ -289,13 +290,9 @@ func TestPruneMySQL(t *testing.T) {
 	if expired == 0 {
 		t.Fatal("無法插入過期貼文")
 	}
-	commentRes, err := db.Exec(`INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, 'b@example.com', '留言', ?)`, expired, old)
-	if err != nil {
+	commentID := idgen.Next()
+	if _, err := db.Exec(`INSERT INTO forum_post_comments (id, post_id, author_email, content, created_at) VALUES (?, ?, 'b@example.com', '留言', ?)`, commentID, expired, old); err != nil {
 		t.Fatalf("插入留言失敗: %v", err)
-	}
-	commentID, err := commentRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("讀取留言 id 失敗: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (?, 'c@example.com', ?)`, expired, old); err != nil {
 		t.Fatalf("插入按讚失敗: %v", err)
@@ -303,13 +300,13 @@ func TestPruneMySQL(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO forum_post_bookmarks (post_id, author_email, created_at) VALUES (?, 'd@example.com', ?)`, expired, old); err != nil {
 		t.Fatalf("插入收藏失敗: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, created_at) VALUES ('post', ?, 'e@example.com', '檢舉', ?)`, expired, old); err != nil {
+	if _, err := db.Exec(`INSERT INTO forum_reports (id, target_type, target_id, reporter_email, reason, created_at) VALUES (?, 'post', ?, 'e@example.com', '檢舉', ?)`, idgen.Next(), expired, old); err != nil {
 		t.Fatalf("插入檢舉失敗: %v", err)
 	}
 	// 留言檢舉走的是 deletePosts 的 JOIN 路徑；沒有這筆的話，那條 SQL 只會
 	// 在單元測試的替身上被驗到，真實 MySQL 的語意（別名、JOIN、target_type）
 	// 不會被執行。
-	if _, err := db.Exec(`INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, created_at) VALUES ('comment', ?, 'h@example.com', '檢舉留言', ?)`, commentID, old); err != nil {
+	if _, err := db.Exec(`INSERT INTO forum_reports (id, target_type, target_id, reporter_email, reason, created_at) VALUES (?, 'comment', ?, 'h@example.com', '檢舉留言', ?)`, idgen.Next(), commentID, old); err != nil {
 		t.Fatalf("插入留言檢舉失敗: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO forum_media (filename, owner_email, created_at) VALUES ('old_a.png', 'a@example.com', ?)`, old); err != nil {

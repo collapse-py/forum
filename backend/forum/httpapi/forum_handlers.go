@@ -120,6 +120,7 @@ import (
 	"strings"
 	"time"
 
+	"forum/forum/idgen"
 	"forum/forum/logger"
 
 	"github.com/go-sql-driver/mysql"
@@ -133,7 +134,7 @@ import (
 //
 // 欄位說明（註解刻意置於型別之外，避免打斷欄位原本的欄位對齊排版）：
 //
-//	ID           對應 forum_posts.id，由 MySQL AUTO_INCREMENT 產生。
+//	ID           對應 forum_posts.id，由應用層的雪花演算法產生。
 //	Author       顯示名稱：優先取 forum_profiles.nickname，取不到則為隨機匿名代號。
 //	AuthorKey    publicForumKey(email) 的結果，長度固定 64 個十六進位字元。
 //	AuthorTags   管理員指派的標籤；未指派時為空切片，因 omitempty 而省略欄位。
@@ -1395,20 +1396,18 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	// 時間只取一次，插入與回應共用同一值，確保前端拿到的 createdAt
 	// 與資料庫中的值完全一致（否則兩次 time.Now() 可能跨越一秒而對不上）。
 	createdAt := time.Now()
+	// id 由應用層在寫入前產生（資料庫的 id 不是 AUTO_INCREMENT）。
+	// 這也讓「先組好物件、再落庫」成為可能：通知與回應都需要 id，
+	// 而它不再依賴 INSERT 之後的回讀。
+	id := idgen.Next()
 	// 單一 INSERT 本身即具原子性，不需要交易：包起來只會多出 BEGIN/COMMIT 兩次往返。
-	result, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO forum_post_comments (post_id, parent_id, depth, author_email, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+	if _, err := s.db.ExecContext(r.Context(),
+		`INSERT INTO forum_post_comments (id, post_id, parent_id, depth, author_email, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		// 再取一次 session 中繼資料作為作者；POST 已通過中介層的登入與停權檢查，
 		// 因此不會是空字串。
-		postID, req.ParentID, depth, s.sessions.ResolveUser(r), req.Content, createdAt)
-	if err != nil {
+		id, postID, req.ParentID, depth, s.sessions.ResolveUser(r), req.Content, createdAt); err != nil {
 		logger.ErrorfContext(r.Context(), "[FORUM] 新增留言失敗 post_id=%d: %v", postID, err)
 		internalError(w, "unable to create comment")
-		return
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created comment")
 		return
 	}
 	// 這裡再呼叫一次 ResolveUser 會多一次 Redis 往返；因為上一次的值不在作用域內，
@@ -2090,9 +2089,11 @@ func (s *Server) handleForumReport(w http.ResponseWriter, r *http.Request, targe
 	}
 	// status 明確寫成 'PENDING' 而非依賴欄位預設值，讓審查佇列的查詢條件
 	// 與實際寫入值在同一處可見。
+	// 檢舉 id 由應用層產生。公開端刻意不回傳它，但它仍然是主鍵，
+	// 因此必須在 INSERT 之前就有值。
 	_, err = s.db.ExecContext(r.Context(), `
-		INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, status, created_at)
-		VALUES (?, ?, ?, ?, 'PENDING', ?)`, targetType, targetID, s.sessions.ResolveUser(r), req.Reason, time.Now())
+		INSERT INTO forum_reports (id, target_type, target_id, reporter_email, reason, status, created_at)
+		VALUES (?, ?, ?, ?, ?, 'PENDING', ?)`, idgen.Next(), targetType, targetID, s.sessions.ResolveUser(r), req.Reason, time.Now())
 	if err != nil {
 		// 1062 = ER_DUP_ENTRY。forum_reports 上的
 		// UNIQUE KEY uq_forum_reports_reporter_target (reporter_email, target_type, target_id)
@@ -2127,7 +2128,7 @@ func forumReportTargetID(path, targetType string) (int64, error) {
 		}
 		value := strings.TrimSuffix(strings.TrimPrefix(path[start+len(marker):], "/"), "/report")
 		id, err := strconv.ParseInt(value, 10, 64)
-		// <= 0 一併拒絕：資料庫的 id 皆為正數 AUTO_INCREMENT，0 與負值只可能
+		// <= 0 一併拒絕：資料庫的 id 皆為正數（雪花演算法產生的值），0 與負值只可能
 		// 來自惡意或異常輸入，放行等於讓無意义的查詢打到 DB。
 		if err != nil || id <= 0 {
 			return 0, fmt.Errorf("invalid comment id")
@@ -2714,17 +2715,13 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 
 	// 單一 INSERT 具原子性，不需要交易。寫入的是檔名，不是網址。
 	createdAt := time.Now()
-	result, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, ?, ?)`,
-		author, req.Content, imageJSON, createdAt)
-	if err != nil {
+	// id 由應用層在寫入前產生：搜尋索引與回應都需要它，而資料庫的 id
+	// 已經不是 AUTO_INCREMENT，回讀 LastInsertId 也沒有意義。
+	id := idgen.Next()
+	if _, err := s.db.ExecContext(r.Context(),
+		`INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, ?, ?)`,
+		id, author, req.Content, imageJSON, createdAt); err != nil {
 		internalError(w, "unable to create forum post")
-		return
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created post")
 		return
 	}
 	// 寫入 ES 索引（best-effort，失敗只記日誌；理由見 indexForumPost）。

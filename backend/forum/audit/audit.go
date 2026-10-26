@@ -133,6 +133,9 @@ type Change struct {
 // 寫入時以 JSON 序列化 changes；讀出時反序列化回 []Change。欄位一律用
 // string（時間例外）以對應 MySQL 的 DATETIME 掃描。
 type Entry struct {
+	// ID 由呼叫端提供（forum/idgen 的雪花 id）。資料庫的 id 欄位不再是
+	// AUTO_INCREMENT，因此「不給 id」不是「讓資料庫決定」，而是寫入 0 ——
+	// 那會讓第二筆沒有 id 的紀錄撞主鍵。Record 對 ID <= 0 直接回錯誤。
 	ID          int64    `json:"id"`
 	ActorEmail  string   `json:"actorEmail"`
 	Action      string   `json:"action"`
@@ -183,6 +186,11 @@ func Record(ctx context.Context, db Execer, entry Entry) error {
 	if db == nil {
 		return ErrNoDatabase
 	}
+	if entry.ID <= 0 {
+		// 呼叫端忘了產生 id。寫入 0 不會立刻失敗（第一筆可以），
+		// 但第二筆會撞主鍵，而那個錯誤會出現在完全不相關的操作上。
+		return fmt.Errorf("audit entry id is required")
+	}
 	changes, err := encodeChanges(entry.Changes)
 	if err != nil {
 		// 序列化失敗只可能是 programmer error（Change 欄位不是字串）。
@@ -193,9 +201,10 @@ func Record(ctx context.Context, db Execer, entry Entry) error {
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO forum_admin_actions
-			(actor_email, action, target_type, target_id, target_label, changes, ip, request_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(id, actor_email, action, target_type, target_id, target_label, changes, ip, request_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
+		entry.ID,
 		entry.ActorEmail,
 		entry.Action,
 		entry.TargetType,

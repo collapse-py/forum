@@ -335,7 +335,8 @@ DELETE」，不包含「那筆檢舉被裁定為成立」還是「被刪掉的�
 
 ```go
 // 單一 INSERT 具原子性，不需要交易。寫入的是檔名，不是網址。
-INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, ?, ?)
+// id 由應用層的雪花演算法在寫入前產生（見 DATABASE.md）。
+INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, ?, ?)
 ```
 
 完整網址在**讀取時**才用 `FILES_SERVER_PUBLIC_URL` 現組。這是「資料庫不存環境相關

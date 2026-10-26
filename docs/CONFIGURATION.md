@@ -39,6 +39,7 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `TRUSTED_PROXY_CIDRS` | 空 | 可信任反向代理的位址段。**容器部署必須填 `172.28.0.0/16`** |
 | `DB_DSN` | — | 內含帳密 |
 | `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` / `DB_CONN_MAX_LIFETIME_MINUTES` | `20` / `5` / `5` | 連線池 |
+| `SNOWFLAKE_NODE_ID` | `0` | 主鍵用的雪花 ID 節點編號（0–63）。**多實例部署時每個實例必須不同**，否則同一毫秒可能發出相同 id；超出範圍會讓啟動失敗 |
 | `REDIS_ADDR` / `REDIS_PASSWORD` / `REDIS_DB` | `127.0.0.1:6379` / 空 / `0` | |
 | `ES_URL` | 空（停用） | 設定了就啟用 ES 搜尋 |
 | `ES_INDEX` | `forum_posts` | |

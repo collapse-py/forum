@@ -481,7 +481,10 @@ func TestCovForumPostsCreateDBErrors(t *testing.T) {
 	})
 }
 
-func TestCovForumPostsCreateLastInsertIDError(t *testing.T) {
+// TestCovForumPostsCreateIgnoresLastInsertID 頂住「id 不再從 INSERT 回讀」這個
+// 改變。舊版在 Exec 之後呼叫 LastInsertId，失敗就回 500；新版 id 在寫入前
+// 就由應用層產生，因此同樣的失敗 Result 不該影響任何東西。
+func TestCovForumPostsCreateIgnoresLastInsertID(t *testing.T) {
 	h := newCovHarness(t)
 	mock, sqlMock, err := sqlmock.New()
 	if err != nil {
@@ -492,12 +495,14 @@ func TestCovForumPostsCreateLastInsertIDError(t *testing.T) {
 
 	sqlMock.ExpectExec("INSERT INTO forum_posts").
 		WillReturnResult(sqlmock.NewErrorResult(errors.New("no last insert id")))
+	sqlMock.ExpectQuery("FROM forum_user_tag_assignments").
+		WillReturnRows(sqlmock.NewRows([]string{"name"}))
+	sqlMock.ExpectQuery("SELECT avatar_url FROM forum_profiles").
+		WillReturnRows(sqlmock.NewRows([]string{"avatar_url"}))
 
 	recorder := h.do(h.srv.handleForumPosts, http.MethodPost, "/api/forum/posts", `{"content":"x"}`, "me@example.com", false)
-	covWantStatus(t, recorder, http.StatusInternalServerError)
-	if !strings.Contains(recorder.Body.String(), "unable to read created post") {
-		t.Errorf("body = %s", recorder.Body.String())
-	}
+	covWantStatus(t, recorder, http.StatusCreated)
+	covWantCreatedID(t, recorder.Body.String())
 	if err := sqlMock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("未滿足的 SQL 預期: %v", err)
 	}

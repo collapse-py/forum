@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"forum/forum/audit"
+	"forum/forum/idgen"
 	"forum/forum/logger"
 
 	"github.com/go-sql-driver/mysql"
@@ -81,7 +82,7 @@ type adminUserContent struct {
 //   - 單一使用者已綁定的標籤（GET /api/admin/users/{email}/tags）
 //   - PUT 標籤綁定成功後回傳的最新結果
 type adminUserTag struct {
-	// ID 為 forum_user_tags 的自增主鍵。
+	// ID 為 forum_user_tags 的主鍵（雪花 id）。
 	ID int64 `json:"id"`
 	// Name 為標籤名稱，最長 50 字（VARCHAR(50)），於資料庫有 UNIQUE 唯一索引。
 	Name string `json:"name"`
@@ -172,8 +173,8 @@ func (s *Server) handleAdminTags(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(r.Context(), `INSERT INTO forum_user_tags (name, created_at, updated_at) VALUES (?, ?, ?)`, req.Name, now, now)
-	if err != nil {
+	id := idgen.Next()
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO forum_user_tags (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`, id, req.Name, now, now); err != nil {
 		// MySQL 錯誤碼 1062 = ER_DUP_ENTRY（唯一索引 uq_forum_user_tags_name 衝突）。
 		// 這是使用者可預期的營運錯誤，改回 409 Conflict 而非 500。
 		var mysqlErr *mysql.MySQLError
@@ -184,12 +185,7 @@ func (s *Server) handleAdminTags(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "unable to create user tag")
 		return
 	}
-	// 取出剛才 INSERT 產生的自增主鍵，直接回給前端，省去一次查詢。
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created user tag")
-		return
-	}
+	// id 在 INSERT 前就由應用層產生，直接回給前端，省去一次查詢。
 	if err := s.recordAdminAction(r, tx, adminActionTagCreate, audit.TargetTag, strconv.FormatInt(id, 10), req.Name,
 		audit.Change{Field: "name", Before: "", After: req.Name}); err != nil {
 		internalError(w, "unable to create user tag")
@@ -1030,16 +1026,11 @@ func (s *Server) createAdminUserPost(w http.ResponseWriter, r *http.Request, raw
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(r.Context(), `
-		INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)`,
-		email, req.Content, createdAt)
-	if err != nil {
+	id := idgen.Next()
+	if _, err := tx.ExecContext(r.Context(), `
+		INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, '', ?)`,
+		id, email, req.Content, createdAt); err != nil {
 		internalError(w, "unable to create user post")
-		return
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created user post")
 		return
 	}
 	if err := s.recordAdminAction(r, tx, adminActionUserPost, audit.TargetUser, email, email,
@@ -1118,16 +1109,11 @@ func (s *Server) createAdminUserComment(w http.ResponseWriter, r *http.Request, 
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(r.Context(), `
-		INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, ?, ?, ?)`,
-		req.PostID, email, req.Content, time.Now())
-	if err != nil {
+	id := idgen.Next()
+	if _, err := tx.ExecContext(r.Context(), `
+		INSERT INTO forum_post_comments (id, post_id, author_email, content, created_at) VALUES (?, ?, ?, ?, ?)`,
+		id, req.PostID, email, req.Content, time.Now()); err != nil {
 		internalError(w, "unable to create user comment")
-		return
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created user comment")
 		return
 	}
 	if err := s.recordAdminAction(r, tx, adminActionUserComment, audit.TargetUser, email, email,

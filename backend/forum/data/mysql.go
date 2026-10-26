@@ -54,10 +54,14 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 package data
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"forum/forum/idgen"
 
 	// 這裡不再用底線匯入：除了註冊驅動，還要用 mysql.MySQLError 判斷
 	// 「索引已存在」（Error 1061）—— 見 indexAlreadyExists。
@@ -248,7 +252,7 @@ func MigrateMySQL(db *sql.DB) error {
 
 	// 1) 文章主檔。IF NOT EXISTS 讓全新環境與既有環境走同一條程式路徑。
 	//    欄位語意：
-	//      id            – AUTO_INCREMENT 主鍵，前端使用的文章識別碼
+	//      id            – 主鍵，由應用層的雪花演算法產生（見 forum/idgen）
 	//      author_email  – 發文者 email，作為與 forum_users / forum_profiles 的關聯鍵；
 	//                      長度 255 是為了容納較長的 email 字串
 	//      content       – 純文字內容，TEXT 而非 VARCHAR，因內文無固定長度上限
@@ -258,7 +262,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//    注意排序實際為 created_at DESC, id DESC，InnoDB 隱含的主鍵順序可協助 id 的穩定排序。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_posts (
-			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			id BIGINT NOT NULL PRIMARY KEY,
 			author_email VARCHAR(255) NOT NULL,
 			content TEXT NOT NULL,
 			created_at DATETIME NOT NULL,
@@ -318,7 +322,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//    而那個預設值正是它們在沒有回覆功能之前的樣子。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_post_comments (
-			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			id BIGINT NOT NULL PRIMARY KEY,
 			post_id BIGINT NOT NULL,
 			author_email VARCHAR(255) NOT NULL,
 			content TEXT NOT NULL,
@@ -342,7 +346,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//    「依狀態過濾並依 created_at DESC 排序」的檢舉列表查詢。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_reports (
-			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			id BIGINT NOT NULL PRIMARY KEY,
 			target_type VARCHAR(20) NOT NULL,
 			target_id BIGINT NOT NULL,
 			reporter_email VARCHAR(255) NOT NULL,
@@ -460,7 +464,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//     管理端新增標籤時重複名稱會直接得到 1062 而不必先做SELECT 檢查。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_user_tags (
-			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			id BIGINT NOT NULL PRIMARY KEY,
 			name VARCHAR(50) NOT NULL,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
@@ -691,7 +695,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//     除自己紀錄的稽核日誌等於沒有稽核日誌。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_admin_actions (
-			id BIGINT NOT NULL AUTO_INCREMENT,
+			id BIGINT NOT NULL,
 			actor_email VARCHAR(320) NOT NULL,
 			action VARCHAR(64) NOT NULL,
 			target_type VARCHAR(32) NOT NULL,
@@ -762,7 +766,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//     管理員帳號發布，而那一列仍然要留下。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_announcements (
-			id BIGINT NOT NULL AUTO_INCREMENT,
+			id BIGINT NOT NULL,
 			body VARCHAR(300) NOT NULL,
 			active TINYINT NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
@@ -1030,7 +1034,7 @@ func MigrateMySQL(db *sql.DB) error {
 	//     而指向的貼文／留言被刪除時，通知仍然保留（它記錄的是「當時發生過」）。
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS forum_notifications (
-			id BIGINT NOT NULL AUTO_INCREMENT,
+			id BIGINT NOT NULL,
 			recipient_email VARCHAR(255) NOT NULL,
 			actor_email VARCHAR(255) NOT NULL,
 			kind VARCHAR(16) NOT NULL,
@@ -1207,5 +1211,307 @@ func MigrateMySQL(db *sql.DB) error {
 		return err
 	}
 
+	// 38) 主鍵改用雪花 ID。
+	//
+	//     為什麼要做成遷移而不是只改 CREATE TABLE：CREATE TABLE IF NOT EXISTS
+	//     對已存在的表什麼都不做，而既有的表仍然帶著 AUTO_INCREMENT。若只改
+	//     建表語句，新環境用雪花 id、舊環境用自增 id，兩種行為的差異會在下一次
+	//     「新舊資料混在一起」時浮現，而不是在部署時。
+	//
+	//     這一步做兩件事，順序不能顛倒：
+	//       a) 把既有資料重新編號成雪花 id，並同步所有指向它們的欄位。
+	//       b) 移除 id 欄位的 AUTO_INCREMENT。
+	//     先移除再改資料的話，應用層還沒改完的 INSERT（滾動部署的舊實例）
+	//     會因為缺少 id 而失敗；先改資料則那段時間的寫入仍然可用。
+	//
+	//     既有資料的重新編號是使用者明確要求的：新舊 id 混存會讓「id 排序等於
+	//     時間排序」在兩套 id 的邊界上失真（舊 id 很小、新 id 很大，順序雖然
+	//     正確，但兩者的間隔沒有任何意義）。重新編號讓整張表回到同一個序列。
+	//     代價是 id 會變，因此所有外部引用（ES 索引、書籤、分享連結）都必須
+	//     重建或失效 —— ES 在啟動時會全量重建，舊文件由定期對帳清除；外部
+	//     書籤則無法補救，這是這個選擇的已知成本。
+	//
+	//     冪等與並行：偵測「id 是否仍是 AUTO_INCREMENT」決定要不要做，並以
+	//     MySQL 的 named lock（GET_LOCK）把整個步驟序列化。沒有那把鎖時，
+	//     兩個實例同時啟動會各自讀到舊 id、各自產生新 id，後者覆蓋前者的
+	//     對應關係，子表的引用就會指向不存在的 id。
+	if err := migrateToSnowflakeIDs(db); err != nil {
+		return fmt.Errorf("snowflake id migration: %w", err)
+	}
+
 	return nil
+}
+
+// snowflakeMigrationLock 是重新編號時持有的 MySQL named lock。
+//
+// GET_LOCK 的鎖是**全伺服器共用**的，因此同一台 MySQL 上若有第二個資料庫
+// 也在跑這個專案，兩邊的啟動遷移會互相等待。這是刻意的取捨：等待的時間是
+// 一次啟動遷移（通常幾百毫秒），而把資料庫名稱接進鎖名會讓名字有機會超過
+// MySQL 的 64 字元上限（那會讓遷移直接失敗）。正確性優先於跨資料庫的平行。
+const snowflakeMigrationLock = "forum:snowflake_id_migration"
+
+// snowflakeRenameBatch 是重新編號時每批處理的列數。
+//
+// 不一次載入全部 id 是因為 forum_admin_actions 可能有數十萬列；分批讓記憶體
+// 用量有界，而 keyset 分頁（WHERE id > ? ORDER BY id）不需要 OFFSET 的線性掃描。
+const snowflakeRenameBatch = 1000
+
+// snowflakeIDTable 描述「一張有 id 主鍵、要改成雪花 id 的表」以及所有指向它的欄位。
+//
+// references 的順序不重要，但完整性很重要：漏掉一個引用欄位時，遷移會成功，
+// 而那個欄位會指向一個不存在的 id —— 症狀是「某則通知點進去 404」，只有在
+// 有人實際點到時才會發現。
+type snowflakeIDTable struct {
+	name       string
+	references []snowflakeIDReference
+}
+
+// snowflakeIDReference 是一個「存著某張表 id」的欄位。
+//
+// text 為 true 代表該欄位是 VARCHAR（forum_admin_actions.target_id 就是這種
+// 多型別字串），比對與寫入都必須經過 CAST；其餘為 BIGINT。
+type snowflakeIDReference struct {
+	table  string
+	column string
+	where  string
+	text   bool
+}
+
+// snowflakeIDTables 是這次遷移涵蓋的全部表。
+//
+// 順序有意義：被引用的表先編號。posts 先於 comments（comments.post_id），
+// tags 先於 assignments（assignments.tag_id）。自身引用（comments.parent_id）
+// 在同一個交易裡先改 id 再改 parent_id，因為 parent_id 仍然存著舊值。
+var snowflakeIDTables = []snowflakeIDTable{
+	{
+		name: "forum_user_tags",
+		references: []snowflakeIDReference{
+			{table: "forum_user_tag_assignments", column: "tag_id"},
+			{table: "forum_admin_actions", column: "target_id", where: "target_type = 'tag'", text: true},
+		},
+	},
+	{
+		name: "forum_posts",
+		references: []snowflakeIDReference{
+			{table: "forum_post_likes", column: "post_id"},
+			{table: "forum_post_comments", column: "post_id"},
+			{table: "forum_post_bookmarks", column: "post_id"},
+			{table: "forum_notifications", column: "post_id"},
+			{table: "forum_reports", column: "target_id", where: "target_type = 'post'"},
+			{table: "forum_admin_actions", column: "target_id", where: "target_type = 'post'", text: true},
+		},
+	},
+	{
+		name: "forum_post_comments",
+		references: []snowflakeIDReference{
+			// 自身引用：先更新 id，再讓 parent_id 走同一份對應表。
+			{table: "forum_post_comments", column: "parent_id"},
+			{table: "forum_notifications", column: "comment_id"},
+			{table: "forum_reports", column: "target_id", where: "target_type = 'comment'"},
+			{table: "forum_admin_actions", column: "target_id", where: "target_type = 'comment'", text: true},
+		},
+	},
+	{
+		name: "forum_reports",
+		references: []snowflakeIDReference{
+			{table: "forum_admin_actions", column: "target_id", where: "target_type = 'report'", text: true},
+		},
+	},
+	{
+		name: "forum_announcements",
+		references: []snowflakeIDReference{
+			{table: "forum_admin_actions", column: "target_id", where: "target_type = 'announcement'", text: true},
+		},
+	},
+	// 通知的 id 沒有任何欄位指向它，但稽核紀錄可能把通知當成 target
+	// （目前沒有這種動作）。保留在清單裡是因為「這張表有 id」本身就是
+	// 納入的理由；漏掉它會讓新舊 id 混存。
+	{name: "forum_notifications"},
+	// 稽核紀錄本身沒有任何欄位指向它（target_id 指的是被操作的對象，
+	// 不是另一筆稽核紀錄）。
+	{name: "forum_admin_actions"},
+}
+
+// migrateToSnowflakeIDs 把既有自增主鍵重新編號為雪花 id，並移除 AUTO_INCREMENT。
+//
+// 只在「id 欄位仍然是 AUTO_INCREMENT」時動作，因此：
+//   - 全新資料庫（建表時就沒有 AUTO_INCREMENT）什麼都不做。
+//   - 已經遷移過的資料庫什麼都不做。
+//   - 中途失敗的資料庫會從還沒完成的表繼續（每張表各自一個交易）。
+//
+// 並行：整個步驟在同一個 MySQL named lock 下執行。兩個實例同時啟動時，
+// 後者會等前者完成，然後看到「已經不是 AUTO_INCREMENT」而跳過。
+func migrateToSnowflakeIDs(db *sql.DB) error {
+	ctx := context.Background()
+
+	// 一定要用單一 *sql.Conn：GET_LOCK 是連線層級的，若走 db.Exec，鎖會留在
+	// 池裡的某條連線上，而後續的語句可能被分派到別條連線，等於沒有鎖。
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// 等待上限刻意給得比一般啟動遷移長：大站（例如數十萬筆稽核紀錄）的
+	// 重新編號可能超過一分鐘，而第二個實例若在 30 秒就放棄，症狀會是
+	// 「滾動部署期間新實例一直重啟」，直到第一個實例做完為止。
+	var acquired sql.NullInt64
+	if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, 300)`, snowflakeMigrationLock).Scan(&acquired); err != nil {
+		return fmt.Errorf("取得遷移鎖失敗: %w", err)
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		return fmt.Errorf("等待遷移鎖逾時（另一個實例正在重新編號？）")
+	}
+	// RELEASE_LOCK 用 DO 而不是 SELECT：DO 不產生結果集，不需要 Scan。
+	// 鎖也會在連線關閉時自動釋放，這裡只是提早交還。
+	defer conn.ExecContext(ctx, `DO RELEASE_LOCK(?)`, snowflakeMigrationLock)
+
+	for _, table := range snowflakeIDTables {
+		auto, err := tableUsesAutoIncrement(ctx, conn, table.name)
+		if err != nil {
+			return fmt.Errorf("%s: 探測 AUTO_INCREMENT 失敗: %w", table.name, err)
+		}
+		if !auto {
+			continue
+		}
+		if err := renumberTable(ctx, conn, table); err != nil {
+			return fmt.Errorf("%s: 重新編號失敗: %w", table.name, err)
+		}
+		if err := dropAutoIncrement(ctx, conn, table.name); err != nil {
+			return fmt.Errorf("%s: 移除 AUTO_INCREMENT 失敗: %w", table.name, err)
+		}
+	}
+	return nil
+}
+
+// tableUsesAutoIncrement 回報 id 欄位是否仍帶 AUTO_INCREMENT。
+func tableUsesAutoIncrement(ctx context.Context, conn *sql.Conn, table string) (bool, error) {
+	var extra string
+	err := conn.QueryRowContext(ctx, `
+		SELECT EXTRA FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'id'
+	`, table).Scan(&extra)
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(strings.ToLower(extra), "auto_increment"), nil
+}
+
+// renumberTable 在一個交易內把一張表的 id 換成新的雪花 id，並同步所有引用。
+//
+// 交易的範圍刻意是「一張表」而不是「全部表」：過程中會 UPDATE 使用者的資料，
+// 一次交易鎖住七張表會讓停機時間與日誌大小成正比；一張表一個交易則讓失敗時
+// 只留下「這張表已完成、下一張還沒」的狀態，而那樣的狀態是下一步可以接續的。
+func renumberTable(ctx context.Context, conn *sql.Conn, table snowflakeIDTable) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 暫存表是連線層級的；用 IF EXISTS 清掉上一次中斷留下的同名表。
+	// DROP TEMPORARY TABLE 與 CREATE TEMPORARY TABLE 都不會隱含提交，
+	// 因此它們可以安全地待在這個交易裡。
+	if _, err := tx.ExecContext(ctx, `DROP TEMPORARY TABLE IF EXISTS _snowflake_id_map`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TEMPORARY TABLE _snowflake_id_map (
+			old_id BIGINT NOT NULL PRIMARY KEY,
+			new_id BIGINT NOT NULL
+		) ENGINE=InnoDB
+	`); err != nil {
+		return err
+	}
+
+	// 依舊 id 遞增產生新 id。產生的順序就是新 id 的順序，因此原本的
+	// 「先建立的文章 id 較小」在遷移後仍然成立。
+	var lastID int64
+	for {
+		rows, err := tx.QueryContext(ctx,
+			"SELECT id FROM "+table.name+" WHERE id > ? ORDER BY id LIMIT ?", lastID, snowflakeRenameBatch)
+		if err != nil {
+			return err
+		}
+		ids := make([]int64, 0, snowflakeRenameBatch)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(ids) == 0 {
+			break
+		}
+
+		placeholders := make([]string, 0, len(ids))
+		args := make([]any, 0, len(ids)*2)
+		for _, oldID := range ids {
+			placeholders = append(placeholders, "(?, ?)")
+			args = append(args, oldID, idgen.Next())
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO _snowflake_id_map (old_id, new_id) VALUES "+strings.Join(placeholders, ", "),
+			args...); err != nil {
+			return err
+		}
+		lastID = ids[len(ids)-1]
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE "+table.name+" t JOIN _snowflake_id_map m ON t.id = m.old_id SET t.id = m.new_id"); err != nil {
+		return err
+	}
+
+	// 接著更新所有指向這張表的欄位。每一句都在同一個交易裡，因此
+	// 「id 換了但子表還在指舊值」的時間窗口不存在。
+	for _, ref := range table.references {
+		// 自身引用（comments.parent_id）必須在 id 更新之後才做：此時
+		// parent_id 還是舊值，而 id 已經是新的，兩者不會互相干擾。
+		query := "UPDATE " + ref.table + " t JOIN _snowflake_id_map m ON "
+		if ref.text {
+			query += "t." + ref.column + " = CAST(m.old_id AS CHAR) SET t." + ref.column + " = CAST(m.new_id AS CHAR)"
+		} else {
+			query += "t." + ref.column + " = m.old_id SET t." + ref.column + " = m.new_id"
+		}
+		if ref.where != "" {
+			query += " WHERE " + ref.where
+		}
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("更新 %s.%s 失敗: %w", ref.table, ref.column, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 暫存表是連線層級的：不主動清掉，它會跟著連線回到池裡佔用記憶體，
+	// 直到那條連線被關閉。DROP TEMPORARY TABLE 不會隱含提交，而這裡
+	// 已經在交易之外。
+	_, err = conn.ExecContext(ctx, `DROP TEMPORARY TABLE IF EXISTS _snowflake_id_map`)
+	return err
+}
+
+// dropAutoIncrement 移除 id 欄位的 AUTO_INCREMENT，保留原本的型別（含 unsigned）。
+//
+// 不用寫死 BIGINT：這個專案的建表語句是 BIGINT，但舊環境可能是 BIGINT UNSIGNED
+// （早期的測試 schema 就是）。MODIFY 時若把 unsigned 拿掉，MySQL 會重建整張表，
+// 而那次重建是不必要的。
+func dropAutoIncrement(ctx context.Context, conn *sql.Conn, table string) error {
+	var columnType string
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'id'
+	`, table).Scan(&columnType); err != nil {
+		return err
+	}
+	_, err := conn.ExecContext(ctx, "ALTER TABLE "+table+" MODIFY COLUMN id "+columnType+" NOT NULL")
+	return err
 }

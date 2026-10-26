@@ -183,7 +183,8 @@ func TestCovAdminUserTagsCollection(t *testing.T) {
 		recorder := h.do(h.srv.handleAdminTags, http.MethodPost, "/api/admin/tags", `{"name":"  vip  "}`, "admin@example.com", true)
 		covWantStatus(t, recorder, http.StatusCreated)
 		body := recorder.Body.String()
-		if !strings.Contains(body, `"id":1`) || !strings.Contains(body, `"name":"vip"`) {
+		covWantCreatedID(t, body)
+		if !strings.Contains(body, `"name":"vip"`) {
 			t.Errorf("body = %s", body)
 		}
 		if !h.sawQuery("INSERT INTO forum_user_tags") {
@@ -931,9 +932,7 @@ func TestCovAdminUserCreatePost(t *testing.T) {
 		h := newCovHarness(t)
 		recorder := h.do(h.srv.handleAdminUser, http.MethodPost, postsPath, `{"content":"hello"}`, "admin@example.com", true)
 		covWantStatus(t, recorder, http.StatusCreated)
-		if !strings.Contains(recorder.Body.String(), `"id":1`) {
-			t.Errorf("body = %s", recorder.Body.String())
-		}
+		covWantCreatedID(t, recorder.Body.String())
 		if !h.sawQuery("INSERT INTO forum_posts") {
 			t.Error("沒有寫入文章")
 		}
@@ -1005,9 +1004,7 @@ func TestCovAdminUserCreateComment(t *testing.T) {
 		h.rows("SELECT COUNT(*) FROM forum_posts WHERE id", []string{"count"}, []driverValue{int64(1)})
 		recorder := h.do(h.srv.handleAdminUser, http.MethodPost, commentsPath, `{"postId":5,"content":"hello"}`, "admin@example.com", true)
 		covWantStatus(t, recorder, http.StatusCreated)
-		if !strings.Contains(recorder.Body.String(), `"id":1`) {
-			t.Errorf("body = %s", recorder.Body.String())
-		}
+		covWantCreatedID(t, recorder.Body.String())
 		if !h.sawQuery("INSERT INTO forum_post_comments") {
 			t.Error("沒有寫入留言")
 		}

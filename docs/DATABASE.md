@@ -3,6 +3,7 @@
 MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.MigrateMySQL` 是一連串 idempotent 步驟（`CREATE TABLE IF NOT EXISTS`、`INSERT IGNORE`，以及補欄位／補索引的 `information_schema` 探測 —— MySQL 沒有 `ADD COLUMN IF NOT EXISTS`，那是 MariaDB 專屬語法），所以空資料庫直接啟動即可，不需手動匯入 SQL。沒有版本化的 migration，也沒有降級路徑。
 
 - [資料表](#資料表)
+- [主鍵是雪花 ID](#主鍵是雪花-id)
 - [沒有 session 表](#沒有-session-表)
 - [稽核的三個性質](#稽核的三個性質)
 
@@ -29,6 +30,27 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_request_metrics` | 分鐘級請求統計 | PK `(bucket_minute)`；純衍生資料，可整表刪除 |
 | `forum_admin_actions` | 管理員操作稽核 | `changes` 存欄位級 diff JSON；只能由時間清理 |
 | `forum_announcements` | 站內公告 | 同時只有一列 `active`；`expires_at` 可空＝永不自動過期 |
+
+---
+
+## 主鍵是雪花 ID
+
+有 `id` 主鍵的七張表（`forum_posts`、`forum_post_comments`、`forum_reports`、`forum_user_tags`、`forum_announcements`、`forum_notifications`、`forum_admin_actions`）由**應用層**產生 id，資料庫沒有 `AUTO_INCREMENT`。寫入時必須把 id 放進 INSERT 的第一個欄位；漏掉的症狀是 MySQL 以「Field 'id' doesn't have a default value」拒絕，而不是安靜地寫入 0。
+
+實作在 `forum/idgen`，位元配置刻意壓在 **53 位元**：
+
+```
+41 位元毫秒時間戳（自 2024-01-01T00:00:00Z）
+ 6 位元節點編號（0–63）
+ 6 位元同毫秒序號（0–63）
+```
+
+壓在 53 位元內是因為 id 以 JSON **數字**送給瀏覽器，而 JavaScript 的 `number` 只能精確表示到 `2^53-1`。標準 64 位元雪花在 2026 年就超過這個範圍，症狀會是「某些 id 點進去是 404」—— 只有部分資料壞掉，因此很難聯想到精度。代價是每毫秒最多 64 個 id、節點上限 64 台；這個站是論壇，遠低於那個量級。
+
+- 同一行程內 id 嚴格遞增，時鐘回退時沿用上一個毫秒，因此「依 id 排序」等於「依建立順序排序」。
+- 多實例部署時每個實例必須設定不同的 [`SNOWFLAKE_NODE_ID`](CONFIGURATION.md)，否則同一毫秒可能發出相同 id。單一實例維持 `0`。
+- **既有資料會被重新編號**：`MigrateMySQL` 的第 38 步在偵測到 `AUTO_INCREMENT` 時，把七張表的既有列依舊 id 遞增換成雪花 id，並同步所有引用欄位（留言的 `post_id`／`parent_id`、按讚／收藏、檢舉的 `target_id`、通知的 `post_id`／`comment_id`、標籤指派、以及稽核紀錄的 `target_id`）。每張表一個交易、整個步驟在 MySQL named lock 下序列化；可重複執行。
+- 重新編號的已知成本：舊的**分享連結與書籤**（`/forum/post/<id>`）會失效；ES 索引由啟動時的全量重建換成新 id（舊文件由定期對帳清除）；稽核 `changes` 裡歷史 diff 的文字值（例如 `postId`）不會改寫。
 
 ---
 

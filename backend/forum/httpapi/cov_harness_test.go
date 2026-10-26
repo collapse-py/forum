@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -193,6 +194,32 @@ func (r *covRows) Next(dest []driver.Value) error {
 	copy(dest, r.rows[r.next])
 	r.next++
 	return nil
+}
+
+// covWantCreatedID 解析回應中的 id，要求它存在且為正數。
+//
+// 建立類端點不再回傳替身的 LastInsertId（那個值永遠是 1），而是應用層
+// 產生的雪花 id，因此測試不能斷言固定值；能斷言的是「有回一個可用的 id」。
+func covWantCreatedID(t *testing.T, body string) int64 {
+	t.Helper()
+	var payload struct {
+		ID   int64 `json:"id"`
+		Item struct {
+			ID int64 `json:"id"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("解析回應失敗: %v（body = %s）", err, body)
+	}
+	// 公開頁的建立端點把物件包在 item 裡，後臺則直接回 id。
+	id := payload.ID
+	if id == 0 {
+		id = payload.Item.ID
+	}
+	if id <= 0 {
+		t.Fatalf("回應的 id = %d，want > 0（body = %s）", id, body)
+	}
+	return id
 }
 
 // covHarness 把 Server、資料庫替身與 Redis 綁在一起。

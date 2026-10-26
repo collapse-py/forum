@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"forum/forum/es"
+	"forum/forum/idgen"
 )
 
 // fakeES 是一份記憶體中的「索引」：支援 _search（match_all + search_after
@@ -103,16 +104,18 @@ func TestReconcileSearchIndexMySQL(t *testing.T) {
 	db := subtreeTempDatabase(t)
 
 	now := time.Now()
-	if _, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES ('a@example.com', '活的文章', '', ?)`, now); err != nil {
+	// id 由應用層給（schema 沒有 AUTO_INCREMENT），後面的斷言必須用同一個值。
+	liveID, deletedID, ghostID := idgen.Next(), idgen.Next(), idgen.Next()
+	if _, err := db.Exec(`INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, 'a@example.com', '活的文章', '', ?)`, liveID, now); err != nil {
 		t.Fatalf("插入活貼文失敗: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at, deleted_at) VALUES ('b@example.com', '已軟刪的文章', '', ?, ?)`, now.Add(-time.Hour), now); err != nil {
+	if _, err := db.Exec(`INSERT INTO forum_posts (id, author_email, content, image_url, created_at, deleted_at) VALUES (?, 'b@example.com', '已軟刪的文章', '', ?, ?)`, deletedID, now.Add(-time.Hour), now); err != nil {
 		t.Fatalf("插入軟刪貼文失敗: %v", err)
 	}
 
-	// 索引裡刻意多留兩筆：id 2（軟刪的貼文）與 id 3（根本不存在——
-	// 正是 unindexForumPost 失敗留下的幽靈形状）。
-	fake := &fakeES{docs: map[int64]bool{1: true, 2: true, 3: true}}
+	// 索引裡刻意多留兩筆：已軟刪的貼文與一筆根本不存在的 id（正是
+	// unindexForumPost 失敗留下的幽靈形狀）。
+	fake := &fakeES{docs: map[int64]bool{liveID: true, deletedID: true, ghostID: true}}
 	esServer := httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(esServer.Close)
 
@@ -125,8 +128,8 @@ func TestReconcileSearchIndexMySQL(t *testing.T) {
 	if removed != 2 {
 		t.Fatalf("應移除 2 筆幽靈，實際 %d", removed)
 	}
-	if len(fake.docs) != 1 || !fake.docs[1] {
-		t.Fatalf("索引應只剩活貼文 1，實際 %v", fake.docs)
+	if len(fake.docs) != 1 || !fake.docs[liveID] {
+		t.Fatalf("索引應只剩活貼文 %d，實際 %v", liveID, fake.docs)
 	}
 
 	// 冪等：再跑一次沒有東西可刪。

@@ -202,7 +202,8 @@ func TestCovAdminForumPostsCreateOK(t *testing.T) {
 	recorder := h.do(h.srv.handleAdminForumPosts, http.MethodPost, "/api/admin/forum/posts",
 		`{"content":"  後臺公告  "}`, "admin@example.com", true)
 	covWantStatus(t, recorder, http.StatusCreated)
-	covAdminForumWantBody(t, recorder, `"ok":true`, `"id":1`)
+	covAdminForumWantBody(t, recorder, `"ok":true`)
+	covWantCreatedID(t, recorder.Body.String())
 	if !h.sawQuery("INSERT INTO forum_posts") {
 		t.Error("沒有執行新增文章")
 	}
@@ -650,7 +651,8 @@ func TestCovAdminForumCommentsCreateOK(t *testing.T) {
 	recorder := h.do(h.srv.handleAdminForumComments, http.MethodPost, "/api/admin/forum/comments",
 		`{"postId":1,"content":"  管理員留言  "}`, "admin@example.com", true)
 	covWantStatus(t, recorder, http.StatusCreated)
-	covAdminForumWantBody(t, recorder, `"ok":true`, `"id":1`)
+	covAdminForumWantBody(t, recorder, `"ok":true`)
+	covWantCreatedID(t, recorder.Body.String())
 	if !h.sawQuery("INSERT INTO forum_post_comments") {
 		t.Error("沒有執行新增留言")
 	}
@@ -903,7 +905,8 @@ func TestCovAdminForumReportsCreateOK(t *testing.T) {
 		`{"targetType":" POST ","targetId":3,"reporterEmail":" r@example.com ","reason":" 垃圾訊息 ","status":"pending"}`,
 		"admin@example.com", true)
 	covWantStatus(t, recorder, http.StatusCreated)
-	covAdminForumWantBody(t, recorder, `"ok":true`, `"id":1`)
+	covAdminForumWantBody(t, recorder, `"ok":true`)
+	covWantCreatedID(t, recorder.Body.String())
 	if !h.sawQuery("INSERT INTO forum_reports") {
 		t.Error("沒有執行新增檢舉")
 	}

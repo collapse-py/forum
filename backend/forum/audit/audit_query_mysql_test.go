@@ -31,6 +31,8 @@ import (
 	"testing"
 	"time"
 
+	"forum/forum/idgen"
+
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -91,7 +93,7 @@ func auditTestDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { _ = db.Close() })
 
 	if _, err := db.Exec(`CREATE TABLE forum_admin_actions (
-		id BIGINT NOT NULL AUTO_INCREMENT,
+		id BIGINT NOT NULL,
 		actor_email VARCHAR(320) NOT NULL,
 		action VARCHAR(64) NOT NULL,
 		target_type VARCHAR(32) NOT NULL,
@@ -117,6 +119,7 @@ func auditTestDB(t *testing.T) *sql.DB {
 func insertAudit(t *testing.T, db *sql.DB, actor, action, targetType, targetID, created string) {
 	t.Helper()
 	if err := Record(context.Background(), db, Entry{
+		ID:         idgen.Next(),
 		ActorEmail: actor, Action: action, TargetType: targetType, TargetID: targetID,
 		ClientIP: "192.0.2.1", RequestID: "req-" + targetID, CreatedAt: created,
 	}); err != nil {
@@ -133,7 +136,9 @@ func TestListFiltersSortsAndPaginatesMySQL(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	stamp := func(minute int) string { return base.Add(time.Duration(minute) * time.Minute).Format("2006-01-02 15:04:05") }
+	stamp := func(minute int) string {
+		return base.Add(time.Duration(minute) * time.Minute).Format("2006-01-02 15:04:05")
+	}
 
 	insertAudit(t, db, "alice@example.com", "user.suspend", "user", "u1@example.com", stamp(0))
 	insertAudit(t, db, "alice@example.com", "post.delete", "post", "41", stamp(1))
@@ -227,6 +232,7 @@ func TestListFiltersSortsAndPaginatesMySQL(t *testing.T) {
 
 	t.Run("changes 往返：寫進去的 diff 讀得回來", func(t *testing.T) {
 		if err := Record(ctx, db, Entry{
+			ID:         idgen.Next(),
 			ActorEmail: "alice@example.com", Action: "user.tag", TargetType: "user", TargetID: "u9",
 			Changes:   []Change{{Field: "tags", Before: "a", After: "b,c"}},
 			CreatedAt: stamp(9),
@@ -297,11 +303,11 @@ func TestDistinctActionsTruncatesWithWarningMySQL(t *testing.T) {
 	rows := make([]string, 0, maxFacets+5)
 	values := make([]string, 0, maxFacets+5)
 	for i := 0; i < maxFacets+5; i++ {
-		rows = append(rows, "('x@example.com', ?, 'user', '1', '', NULL, '', '', '2026-10-01 12:00:00')")
-		action := fmt.Sprintf("action.%04d", i)
-		values = append(values, action)
+		// id 由應用層給：schema 與 MigrateMySQL 第 23 步一致，沒有 AUTO_INCREMENT。
+		rows = append(rows, "(?, 'x@example.com', ?, 'user', '1', '', NULL, '', '', '2026-10-01 12:00:00')")
+		values = append(values, fmt.Sprintf("%d", idgen.Next()), fmt.Sprintf("action.%04d", i))
 	}
-	query := "INSERT INTO forum_admin_actions (actor_email, action, target_type, target_id, target_label, changes, ip, request_id, created_at) VALUES " +
+	query := "INSERT INTO forum_admin_actions (id, actor_email, action, target_type, target_id, target_label, changes, ip, request_id, created_at) VALUES " +
 		strings.Join(rows, ",")
 	if _, err := db.ExecContext(ctx, query, expand(values)...); err != nil {
 		t.Fatalf("準備大量動作失敗: %v", err)

@@ -217,6 +217,13 @@ func covDataCountZero(src *covDataSource) {
 		cols:   []string{"COUNT(*)"},
 		rows:   [][]covDataValue{{int64(0)}},
 	})
+	// 雪花 id 遷移的 named lock。替身沒有真正的鎖，回 1 代表「取得」；
+	// 沒有這個規則時 QueryRow 會是 ErrNoRows，而遷移會把它當成失敗。
+	src.addQuery(covDataQueryRule{
+		substr: "GET_LOCK",
+		cols:   []string{"GET_LOCK"},
+		rows:   [][]covDataValue{{int64(1)}},
+	})
 }
 
 /* ==========================================================================

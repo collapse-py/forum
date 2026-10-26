@@ -57,6 +57,7 @@ func (f *fakeExecer) ExecContext(_ context.Context, query string, args ...any) (
 func TestRecordPassesEntryToDriver(t *testing.T) {
 	exec := &fakeExecer{}
 	entry := Entry{
+		ID:          9001,
 		ActorEmail:  "admin@example.com",
 		Action:      "post.delete",
 		TargetType:  TargetPost,
@@ -74,23 +75,26 @@ func TestRecordPassesEntryToDriver(t *testing.T) {
 
 	// 參數順序必須與 INSERT 的欄位順序一致 —— 這是宣告式 SQL 最容易錯的
 	// 地方，而且錯了不會報錯，只會把 actor 寫進 action 欄位。
-	if exec.args[0] != entry.ActorEmail {
-		t.Errorf("args[0] = %v, want actorEmail", exec.args[0])
+	if exec.args[0] != entry.ID {
+		t.Errorf("args[0] = %v, want id", exec.args[0])
 	}
-	if exec.args[1] != entry.Action {
-		t.Errorf("args[1] = %v, want action", exec.args[1])
+	if exec.args[1] != entry.ActorEmail {
+		t.Errorf("args[1] = %v, want actorEmail", exec.args[1])
 	}
-	if exec.args[2] != entry.TargetType {
-		t.Errorf("args[2] = %v, want targetType", exec.args[2])
+	if exec.args[2] != entry.Action {
+		t.Errorf("args[2] = %v, want action", exec.args[2])
 	}
-	if exec.args[3] != entry.TargetID {
-		t.Errorf("args[3] = %v, want targetId", exec.args[3])
+	if exec.args[3] != entry.TargetType {
+		t.Errorf("args[3] = %v, want targetType", exec.args[3])
 	}
-	if exec.args[6] != entry.ClientIP {
-		t.Errorf("args[6] = %v, want clientIp", exec.args[6])
+	if exec.args[4] != entry.TargetID {
+		t.Errorf("args[4] = %v, want targetId", exec.args[4])
 	}
-	if exec.args[8] != entry.CreatedAt {
-		t.Errorf("args[8] = %v, want createdAt", exec.args[8])
+	if exec.args[7] != entry.ClientIP {
+		t.Errorf("args[7] = %v, want clientIp", exec.args[7])
+	}
+	if exec.args[9] != entry.CreatedAt {
+		t.Errorf("args[9] = %v, want createdAt", exec.args[9])
 	}
 }
 
@@ -101,7 +105,7 @@ func TestRecordPassesEntryToDriver(t *testing.T) {
 // 而稽核日誌正是用來證明這件事沒發生的工具。
 func TestRecordReturnsErrorOnFailure(t *testing.T) {
 	exec := &fakeExecer{err: errors.New("table forum_admin_actions doesn't exist")}
-	err := Record(t.Context(), exec, Entry{ActorEmail: "a@b", Action: "post.delete"})
+	err := Record(t.Context(), exec, Entry{ID: 1, ActorEmail: "a@b", Action: "post.delete"})
 	if err == nil {
 		t.Fatal("寫入失敗時 Record 必須回傳錯誤，否則操作會在沒有紀錄的情況下發生")
 	}
@@ -120,14 +124,23 @@ func TestRecordRejectsNilDatabase(t *testing.T) {
 
 func TestRecordWithoutChangesStoresEmptyString(t *testing.T) {
 	exec := &fakeExecer{}
-	if err := Record(t.Context(), exec, Entry{ActorEmail: "a@b", Action: "tag.delete"}); err != nil {
+	if err := Record(t.Context(), exec, Entry{ID: 1, ActorEmail: "a@b", Action: "tag.delete"}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	// 沒有變更的動作（純刪除、純建立）必須寫入空字串而不是 "null"：
 	// 前端以 changes 欄位是否為空判斷「這筆有沒有 diff」，而字串 "null"
 	// 反序列化後是一個非 nil 的切片，會讓「無變更」看起來像「有一個 null 欄位」。
-	if got := exec.args[5]; got != "" {
+	if got := exec.args[6]; got != "" {
 		t.Errorf("changes = %v, want 空字串", got)
+	}
+}
+
+// TestRecordRejectsMissingID 守住「呼叫端忘了產生 id」的情況。少了這道檢查，
+// 第一筆會成功、第二筆會以 1062 失敗，而失敗發生在不相關的操作上。
+func TestRecordRejectsMissingID(t *testing.T) {
+	exec := &fakeExecer{}
+	if err := Record(t.Context(), exec, Entry{ActorEmail: "a@b", Action: "tag.delete"}); err == nil {
+		t.Fatal("ID = 0 時 Record 必須回錯誤")
 	}
 }
 

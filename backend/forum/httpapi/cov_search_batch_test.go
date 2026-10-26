@@ -986,7 +986,8 @@ func TestCovSearchBatchAnnouncementsAdmin(t *testing.T) {
 			`{"body":"新公告","active":true,"hoursUntilExpiry":24}`,
 			"admin@example.com", true)
 		covWantStatus(t, recorder, http.StatusCreated)
-		covSearchBatchWantContains(t, recorder.Body.String(), `"ok":true`, `"id":1`)
+		covSearchBatchWantContains(t, recorder.Body.String(), `"ok":true`)
+		covWantCreatedID(t, recorder.Body.String())
 		if !h.sawQuery("INSERT INTO forum_announcements") {
 			t.Error("發佈應寫入 forum_announcements")
 		}
@@ -1036,7 +1037,7 @@ func TestCovSearchBatchAnnouncementsAdmin(t *testing.T) {
 
 	t.Run("發佈寫入失敗", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.execError("INSERT INTO forum_announcements (body, active", errors.New("insert boom"))
+		h.execError("INSERT INTO forum_announcements (id, body, active", errors.New("insert boom"))
 		covWantStatus(t, h.do(h.srv.handleAdminAnnouncements, http.MethodPost,
 			"/api/admin/announcements", `{"body":"x","active":false}`,
 			"admin@example.com", true), http.StatusInternalServerError)
@@ -1537,8 +1538,8 @@ func TestCovSearchBatchNotificationCreate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("createForumNotification: %v", err)
 		}
-		if id != 1 {
-			t.Errorf("通知 id = %d, want 1（替身的 LastInsertId）", id)
+		if id <= 0 {
+			t.Errorf("通知 id = %d，want > 0（應用層產生的雪花 id）", id)
 		}
 	})
 

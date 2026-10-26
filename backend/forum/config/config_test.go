@@ -537,6 +537,24 @@ func TestValidateIsCleanForAProductionConfig(t *testing.T) {
 	}
 }
 
+// TestValidateChecksSnowflakeNodeIDRange 守住「節點編號寫錯」這個沒有症狀的
+// 錯誤。超出範圍的值若不拒絕，idgen 會在啟動時才回錯誤；而真正危險的是
+// 「多個實例都寫 0」這種範圍內的值，那只能由 `-check` 與部署說明提醒。
+func TestValidateChecksSnowflakeNodeIDRange(t *testing.T) {
+	for _, value := range []string{"-1", "64", "1000"} {
+		cfg := loadString(t, "SNOWFLAKE_NODE_ID="+value)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("SNOWFLAKE_NODE_ID=%q 時 Validate() = nil，want 報錯", value)
+		}
+	}
+	for _, value := range []string{"0", "1", "63"} {
+		cfg := loadString(t, "SNOWFLAKE_NODE_ID="+value)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("SNOWFLAKE_NODE_ID=%q 時 Validate() = %v，want nil", value, err)
+		}
+	}
+}
+
 // TestApplyDefaultsCoversEveryEmptyField 覆蓋 applyDefaults 的每一個分支。
 //
 // 逐欄位斷言「空設定檔 → 有預設值」，理由是這個函式的失敗模式是**靜默的**：

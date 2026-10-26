@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"forum/forum/audit"
+	"forum/forum/idgen"
 	"forum/forum/logger"
 )
 
@@ -324,16 +325,14 @@ func (s *Server) publishAnnouncement(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := tx.ExecContext(r.Context(), `
-		INSERT INTO forum_announcements (body, active, created_at, created_by, updated_at, updated_by, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		body, boolToInt(req.Active), now, actor, now, actor, expires)
-	if err != nil {
-		internalError(w, "unable to publish announcement")
-		return
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
+	// id 在寫入前由應用層產生（資料庫的 id 不是 AUTO_INCREMENT）。
+	// 與操作、稽核紀錄放在同一個交易裡：Commit 之後 id 就會被回給前端，
+	// 而 Rollback 只是浪費一個號碼。
+	id := idgen.Next()
+	if _, err := tx.ExecContext(r.Context(), `
+		INSERT INTO forum_announcements (id, body, active, created_at, created_by, updated_at, updated_by, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, body, boolToInt(req.Active), now, actor, now, actor, expires); err != nil {
 		internalError(w, "unable to publish announcement")
 		return
 	}

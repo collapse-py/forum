@@ -55,6 +55,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"forum/forum/audit"
+	"forum/forum/idgen"
 	"net/http"
 	"strconv"
 	"strings"
@@ -443,7 +444,7 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	// ServeMux 只做前綴比對，尾端的 ID 必須自己切出來：
 	// TrimPrefix 去掉路由前綴、Trim 去掉多餘的斜線（/api/admin/forum/reports/7/ 也能解析）、
 	// ParseInt 轉為整數。
-	// 解析失敗或 id < 1 一律回 400：id 是 AUTO_INCREMENT 主鍵，只可能 >= 1，因此 0 或負數
+	// 解析失敗或 id < 1 一律回 400：資料庫主鍵是雪花 id，只可能 >= 1，因此 0 或負數
 	// 必定是客戶端送錯，而不是「資源不存在」。用 400 表達請求不合法比回 404 誠實，
 	// 也省下一次必然落空的資料庫查詢。
 	// 附帶行為：ParseInt 接受前導「+」，所以 /api/admin/forum/reports/+7 會被當成 7。
@@ -847,20 +848,15 @@ func (s *Server) createAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(r.Context(), `
-		INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, req.TargetType, req.TargetID, req.ReporterEmail, req.Reason, req.Status, time.Now())
-	if err != nil {
+	id := idgen.Next()
+	if _, err := tx.ExecContext(r.Context(), `
+		INSERT INTO forum_reports (id, target_type, target_id, reporter_email, reason, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, id, req.TargetType, req.TargetID, req.ReporterEmail, req.Reason, req.Status, time.Now()); err != nil {
 		// 這裡沒有比對 MySQL 錯誤碼 1062（唯一鍵 uq_forum_reports_reporter_target 衝突）：
 		// 使用者面建立檢舉的入口（forum_handlers.go 的 handleForumReport）會把 1062 轉成
 		// 409「你已檢舉過此內容」，這個後台入口沒有對應的處理，重複建立會落到下方的 500。
 		// 屬於已知的兩條路徑不一致；要補上時請一併確認前端是否需要 409。
 		internalError(w, "unable to create forum report")
-		return
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created report")
 		return
 	}
 	if err := s.recordAdminAction(r, tx, adminActionReportCreate, audit.TargetReport, strconv.FormatInt(id, 10), req.Status,
@@ -1261,16 +1257,11 @@ func (s *Server) createAdminForumPost(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(r.Context(), `
-		INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, ?, ?)`,
-		author, req.Content, "", createdAt)
-	if err != nil {
+	id := idgen.Next()
+	if _, err := tx.ExecContext(r.Context(), `
+		INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, ?, ?)`,
+		id, author, req.Content, "", createdAt); err != nil {
 		internalError(w, "unable to create forum post")
-		return
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		internalError(w, "unable to read created post")
 		return
 	}
 	if err := s.recordAdminAction(r, tx, adminActionPostCreate, audit.TargetPost, strconv.FormatInt(id, 10), req.Content,
@@ -1319,7 +1310,7 @@ func (s *Server) handleAdminForumPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// 路徑參數解析：server.go 以 "/api/admin/forum/posts/" 註冊這條路由，ServeMux 只做前綴
 	// 比對，尾端的 ID 要自己切（TrimPrefix 去前綴、Trim 去多餘斜線、ParseInt 轉數字）。
-	// id < 1 一律回 400：AUTO_INCREMENT 主鍵不可能 <= 0，這類請求必定是路徑錯誤而非
+	// id < 1 一律回 400：雪花主鍵不可能 <= 0，這類請求必定是路徑錯誤而非
 	// 「找不到」，用 400 表達請求不合法，同時省下一次必然空結果的 SQL。
 	id, err := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/forum/posts/"), "/"), 10, 64)
 	if err != nil || id < 1 {
@@ -1621,7 +1612,7 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 	case http.MethodGet:
 		// postId 必填且必須 >= 1：留言沒有自己的列表頁，缺少 postId 就無法定位查詢範圍。
 		// 解析失敗或 < 1 一律回 400，理由與路徑 ID 的處理相同
-		//（AUTO_INCREMENT 主鍵不可能 <= 0，必定是請求本身不合法）。
+		//（雪花主鍵不可能 <= 0，必定是請求本身不合法）。
 		postID, err := strconv.ParseInt(r.URL.Query().Get("postId"), 10, 64)
 		if err != nil || postID < 1 {
 			badRequest(w, "invalid post id")
@@ -1719,16 +1710,11 @@ func (s *Server) handleAdminForumComments(w http.ResponseWriter, r *http.Request
 		// （ MigrateMySQL 第 31 步的 DEFAULT 讓它們成為 parent_id=0、depth=1）。
 		// 回覆別人的留言是公開頁的行為；後台的用途是管理與代發，讓它可以指定
 		// parentId 只會多一條沒有介面使用的路徑，卻要一起驗證層級上限。
-		result, err := tx.ExecContext(r.Context(), `
-			INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, ?, ?, ?)`,
-			req.PostID, author, req.Content, time.Now())
-		if err != nil {
+		id := idgen.Next()
+		if _, err := tx.ExecContext(r.Context(), `
+			INSERT INTO forum_post_comments (id, post_id, author_email, content, created_at) VALUES (?, ?, ?, ?, ?)`,
+			id, req.PostID, author, req.Content, time.Now()); err != nil {
 			internalError(w, "unable to create forum comment")
-			return
-		}
-		id, err := result.LastInsertId()
-		if err != nil {
-			internalError(w, "unable to read created comment")
 			return
 		}
 		if err := s.recordAdminAction(r, tx, adminActionCommentPost, audit.TargetComment, strconv.FormatInt(id, 10), req.Content,
@@ -1773,7 +1759,7 @@ func (s *Server) handleAdminForumComment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// 路徑參數解析：TrimPrefix 去掉 "/api/admin/forum/comments/"、Trim 去掉多餘的斜線、
-	// ParseInt 轉為主鍵。解析失敗或 id < 1 一律回 400：AUTO_INCREMENT 主鍵不可能 <= 0，
+	// ParseInt 轉為主鍵。解析失敗或 id < 1 一律回 400：雪花主鍵不可能 <= 0，
 	// 這類請求必定是路徑寫錯而不是「找不到」。
 	id, err := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/forum/comments/"), "/"), 10, 64)
 	if err != nil || id < 1 {

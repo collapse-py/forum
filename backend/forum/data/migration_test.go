@@ -49,10 +49,13 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"forum/forum/idgen"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -375,6 +378,167 @@ func TestMigrateMySQLOnExistingDatabaseWithData(t *testing.T) {
 	}
 }
 
+// TestMigrateMySQLRenumbersLegacyIDs 驗證「既有自增資料改成雪花 id」這條
+// 遷移路徑，包括所有指向它們的欄位。
+//
+// 為什麼要用這種方式模擬舊資料庫：MigrateMySQL 在空資料庫上建立的已經是
+// 新 schema。先把七張表改回 AUTO_INCREMENT、用舊方式（省略 id）塞資料，
+// 再跑一次遷移 —— 這走的就是正式站升級時的那條路徑，而不是一份手寫的
+// 「舊 schema」（那份 schema 會随新欄位增加而過時）。
+//
+// 漏掉任何一個引用欄位的症狀都不是錯誤：子表會指向不存在的 id，而那個
+// 症状只有有人點到那則通知或那張檢舉時才會出現。
+func TestMigrateMySQLRenumbersLegacyIDs(t *testing.T) {
+	t.Parallel()
+	db, name := tempDatabase(t)
+	if err := MigrateMySQL(db); err != nil {
+		t.Fatalf("建立新 schema 失敗: %v", err)
+	}
+
+	idTables := []string{
+		"forum_posts", "forum_post_comments", "forum_reports", "forum_user_tags",
+		"forum_announcements", "forum_notifications", "forum_admin_actions",
+	}
+	for _, table := range idTables {
+		mustExec(t, db, "ALTER TABLE "+table+" MODIFY id BIGINT NOT NULL AUTO_INCREMENT")
+	}
+
+	// 以舊方式（不給 id）建立一組互相引用的資料。所有 old* 變數都是
+	// 自增 id，遷移後必須完全不一樣。
+	res, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES ('a@example.com', '舊貼文', '', NOW())`)
+	if err != nil {
+		t.Fatalf("插入舊貼文失敗（%s）: %v", name, err)
+	}
+	oldPost, _ := res.LastInsertId()
+
+	res, err = db.Exec(`INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (?, 'b@example.com', '舊留言', NOW())`, oldPost)
+	if err != nil {
+		t.Fatalf("插入舊留言失敗: %v", err)
+	}
+	oldComment, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO forum_post_comments (post_id, parent_id, depth, author_email, content, created_at) VALUES (?, ?, 2, 'c@example.com', '舊回覆', NOW())`, oldPost, oldComment); err != nil {
+		t.Fatalf("插入舊回覆失敗: %v", err)
+	}
+
+	mustExec(t, db, `INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (?, 'c@example.com', NOW())`, oldPost)
+	mustExec(t, db, `INSERT INTO forum_post_bookmarks (post_id, author_email, created_at) VALUES (?, 'c@example.com', NOW())`, oldPost)
+
+	res, err = db.Exec(`INSERT INTO forum_user_tags (name, created_at, updated_at) VALUES ('舊標籤', NOW(), NOW())`)
+	if err != nil {
+		t.Fatalf("插入舊標籤失敗: %v", err)
+	}
+	oldTag, _ := res.LastInsertId()
+	mustExec(t, db, `INSERT INTO forum_user_tag_assignments (user_email, tag_id) VALUES ('b@example.com', ?)`, oldTag)
+
+	mustExec(t, db, `INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, status, created_at) VALUES ('post', ?, 'r1@example.com', '檢舉貼文', 'PENDING', NOW())`, oldPost)
+	mustExec(t, db, `INSERT INTO forum_reports (target_type, target_id, reporter_email, reason, status, created_at) VALUES ('comment', ?, 'r2@example.com', '檢舉留言', 'PENDING', NOW())`, oldComment)
+
+	res, err = db.Exec(`INSERT INTO forum_announcements (body, active, created_at, created_by, updated_at, expires_at) VALUES ('舊公告', 0, NOW(), 'admin@example.com', NOW(), NULL)`)
+	if err != nil {
+		t.Fatalf("插入舊公告失敗: %v", err)
+	}
+	oldAnnouncement, _ := res.LastInsertId()
+
+	res, err = db.Exec(`INSERT INTO forum_notifications (recipient_email, actor_email, kind, post_id, comment_id, created_at) VALUES ('b@example.com', 'a@example.com', 'comment', ?, ?, NOW())`, oldPost, oldComment)
+	if err != nil {
+		t.Fatalf("插入舊通知失敗: %v", err)
+	}
+	oldNotification, _ := res.LastInsertId()
+
+	// 稽核紀錄的 target_id 是 VARCHAR，因此它是最容易被漏掉的一種引用。
+	res, err = db.Exec(`INSERT INTO forum_admin_actions (actor_email, action, target_type, target_id, target_label, changes, ip, request_id, created_at) VALUES ('admin@example.com', 'post.delete', 'post', ?, '', NULL, '', '', NOW())`, strconv.FormatInt(oldPost, 10))
+	if err != nil {
+		t.Fatalf("插入舊稽核紀錄失敗: %v", err)
+	}
+	oldAction, _ := res.LastInsertId()
+
+	if err := MigrateMySQL(db); err != nil {
+		t.Fatalf("第二次 MigrateMySQL（重新編號）失敗: %v", err)
+	}
+
+	// 每一張表的 id 都必須變成雪花（遠大於舊的自增值），且 AUTO_INCREMENT 已移除。
+	const snowflakeFloor = int64(1) << 40
+	for _, table := range idTables {
+		var extra string
+		if err := db.QueryRow(`SELECT EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'id'`, table).Scan(&extra); err != nil {
+			t.Fatalf("讀取 %s 的欄位資訊失敗: %v", table, err)
+		}
+		if strings.Contains(strings.ToLower(extra), "auto_increment") {
+			t.Errorf("%s.id 仍然帶 AUTO_INCREMENT", table)
+		}
+	}
+
+	newPost := mustScanInt64(t, db, `SELECT id FROM forum_posts WHERE author_email = 'a@example.com'`)
+	newComment := mustScanInt64(t, db, `SELECT id FROM forum_post_comments WHERE author_email = 'b@example.com'`)
+	newTag := mustScanInt64(t, db, `SELECT id FROM forum_user_tags WHERE name = '舊標籤'`)
+	newAnnouncement := mustScanInt64(t, db, `SELECT id FROM forum_announcements WHERE body = '舊公告'`)
+	newNotification := mustScanInt64(t, db, `SELECT id FROM forum_notifications WHERE recipient_email = 'b@example.com'`)
+	newAction := mustScanInt64(t, db, `SELECT id FROM forum_admin_actions WHERE actor_email = 'admin@example.com'`)
+
+	for _, got := range []int64{newPost, newComment, newTag, newAnnouncement, newNotification, newAction} {
+		if got < snowflakeFloor {
+			t.Errorf("重新編號後的 id = %d，want >= %d（雪花 id）", got, snowflakeFloor)
+		}
+	}
+	if newPost == oldPost || newComment == oldComment || newTag == oldTag ||
+		newAnnouncement == oldAnnouncement || newNotification == oldNotification || newAction == oldAction {
+		t.Errorf("重新編號前後 id 相同: post %d/%d comment %d/%d tag %d/%d announcement %d/%d notification %d/%d action %d/%d",
+			oldPost, newPost, oldComment, newComment, oldTag, newTag,
+			oldAnnouncement, newAnnouncement, oldNotification, newNotification, oldAction, newAction)
+	}
+
+	// 所有指向它們的欄位都必須跟著改。
+	checks := []struct {
+		name  string
+		query string
+		args  []any
+		want  int64
+	}{
+		{"留言的 post_id", `SELECT post_id FROM forum_post_comments WHERE author_email = 'b@example.com'`, nil, newPost},
+		{"回覆的 parent_id", `SELECT parent_id FROM forum_post_comments WHERE author_email = 'c@example.com'`, nil, newComment},
+		{"按讚的 post_id", `SELECT post_id FROM forum_post_likes WHERE author_email = 'c@example.com'`, nil, newPost},
+		{"收藏的 post_id", `SELECT post_id FROM forum_post_bookmarks WHERE author_email = 'c@example.com'`, nil, newPost},
+		{"標籤關聯的 tag_id", `SELECT tag_id FROM forum_user_tag_assignments WHERE user_email = 'b@example.com'`, nil, newTag},
+		{"貼文檢舉的 target_id", `SELECT target_id FROM forum_reports WHERE reporter_email = 'r1@example.com'`, nil, newPost},
+		{"留言檢舉的 target_id", `SELECT target_id FROM forum_reports WHERE reporter_email = 'r2@example.com'`, nil, newComment},
+		{"通知的 post_id", `SELECT post_id FROM forum_notifications WHERE recipient_email = 'b@example.com'`, nil, newPost},
+		{"通知的 comment_id", `SELECT comment_id FROM forum_notifications WHERE recipient_email = 'b@example.com'`, nil, newComment},
+	}
+	for _, c := range checks {
+		if got := mustScanInt64(t, db, c.query, c.args...); got != c.want {
+			t.Errorf("%s = %d，want %d", c.name, got, c.want)
+		}
+	}
+
+	// 稽核的 target_id 是字串，比對也要用字串。
+	var auditTarget string
+	if err := db.QueryRow(`SELECT target_id FROM forum_admin_actions WHERE actor_email = 'admin@example.com' AND action = 'post.delete'`).Scan(&auditTarget); err != nil {
+		t.Fatalf("讀取稽核 target_id 失敗: %v", err)
+	}
+	if want := strconv.FormatInt(newPost, 10); auditTarget != want {
+		t.Errorf("稽核 target_id = %q，want %q", auditTarget, want)
+	}
+
+	// 舊 id 不該还能指向任何一列。
+	var oldRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM forum_posts WHERE id = ?`, oldPost).Scan(&oldRows); err != nil {
+		t.Fatalf("查詢舊 id 失敗: %v", err)
+	}
+	if oldRows != 0 {
+		t.Errorf("舊 id %d 仍然存在", oldPost)
+	}
+}
+
+// mustScanInt64 執行一句回傳單一整數的查詢。
+func mustScanInt64(t *testing.T, db *sql.DB, query string, args ...any) int64 {
+	t.Helper()
+	var value int64
+	if err := db.QueryRow(query, args...).Scan(&value); err != nil {
+		t.Fatalf("查詢失敗（%s）: %v", query, err)
+	}
+	return value
+}
+
 // TestUnicodeRoundTrip 驗證 utf8mb4 的往返。
 //
 // 這個測試存在的理由是「utf8mb3 vs utf8mb4」是本專案明確做過的一個決定
@@ -413,8 +577,8 @@ func TestUnicodeRoundTrip(t *testing.T) {
 			// created_at 與 image_url 顯式給值（NOT NULL 而無 DEFAULT，見
 			// seedForumPost 的說明）：只給兩個欄位的 INSERT 在嚴格模式下會 1364。
 			mustExec(t, db,
-				"INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)",
-				email, tc.text, time.Now())
+				"INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, '', ?)",
+				idgen.Next(), email, tc.text, time.Now())
 
 			var got string
 			if err := db.QueryRow(
@@ -568,7 +732,9 @@ func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 // 執行都以 1364 收場 —— 而它要驗證的「第二次遷移不會清掉資料」從來沒被測到。
 func seedForumPost(t *testing.T, db *sql.DB, content, email string) {
 	t.Helper()
+	// id 必須由應用層給：MigrateMySQL 已經移除 AUTO_INCREMENT，而這支
+	// helper 是在第一次遷移**之後**才被呼叫的。
 	mustExec(t, db,
-		"INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)",
-		email, content, time.Now())
+		"INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, '', ?)",
+		idgen.Next(), email, content, time.Now())
 }

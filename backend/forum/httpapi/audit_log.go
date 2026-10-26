@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"forum/forum/audit"
+	"forum/forum/idgen"
 	"forum/forum/logger"
 )
 
@@ -65,9 +66,9 @@ const (
 	adminActionUserComment   = "user.comments.create"
 	adminActionUserContent   = "user.content.delete"
 
-	adminActionPostCreate  = "post.create"
-	adminActionPostUpdate  = "post.update"
-	adminActionPostDelete  = "post.delete"
+	adminActionPostCreate = "post.create"
+	adminActionPostUpdate = "post.update"
+	adminActionPostDelete = "post.delete"
 	// adminActionPostRestore 是刪文的反向（MigrateMySQL 第 30 步的軟刪除之後
 	// 有了這條路徑）。它與 post.delete 成對出現，稽核紀錄才能回答「這篇被
 	// 刪掉又救回來了嗎」，而不是只有一半的故事。
@@ -142,6 +143,10 @@ func (s *Server) recordAdminAction(r *http.Request, tx *sql.Tx, action, targetTy
 	}
 	meta := logger.MetadataFromContext(r.Context())
 	err := audit.Record(r.Context(), tx, audit.Entry{
+		// 稽核 id 與其他主鍵一樣由應用層產生。刻意在交易內才產生：
+		// 交易的 Rollback 會讓這個 id 被浪費，而 id 的單調性只需要
+		// 「大致等於時間」，浪費幾個號碼不影響任何查詢。
+		ID:          idgen.Next(),
 		ActorEmail:  meta.UserEmail,
 		Action:      action,
 		TargetType:  targetType,

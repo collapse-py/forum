@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"forum/forum/idgen"
 	"forum/forum/logger"
 )
 
@@ -156,8 +157,9 @@ type forumNotificationMarkRequest struct {
 // createForumNotification 寫入一則通知，成功時回傳新通知的 id（跳過時為 0）。
 //
 // 回傳 id 是為了推播：呼叫端拿到 id 之後可以呼叫 notifyForumNotificationCreated
-// 把這一則即時推給收件者開著的頁面。id 由 AUTO_INCREMENT 產生，因此它就是
-// 「這一則通知」的識別碼 —— 推播訊息裡帶的也是它。
+// 把這一則即時推給收件者開著的頁面。id 在寫入前由應用層的雪花演算法產生
+// （資料庫沒有 AUTO_INCREMENT），因此它就是「這一則通知」的識別碼 ——
+// 推播訊息裡帶的也是它。
 //
 // 刻意 best-effort：任何失敗都只記日誌並回傳 error 給呼叫端「參考」，而呼叫端
 // 一律忽略它。理由與 forumAuthor 對 DB 錯誤退化成匿名代號相同 —— 通知是一個
@@ -178,16 +180,10 @@ func (s *Server) createForumNotification(ctx context.Context, recipient, actor, 
 	if recipient == "" || actor == "" || recipient == actor {
 		return 0, nil
 	}
-	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO forum_notifications (recipient_email, actor_email, kind, post_id, comment_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		recipient, actor, kind, postID, commentID, time.Now())
-	if err != nil {
-		return 0, err
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		// 通知已經寫進去了，只是拿不到 id。對呼叫端而言這與「寫入失敗」在
-		// 功能上等價（那則通知的推播會少一次），但資料庫裡有那一列。
+	id := idgen.Next()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO forum_notifications (id, recipient_email, actor_email, kind, post_id, comment_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, recipient, actor, kind, postID, commentID, time.Now()); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -282,7 +278,7 @@ func (s *Server) listForumNotifications(w http.ResponseWriter, r *http.Request, 
 
 	// 排序用 id DESC 而非 created_at DESC：created_at 是秒級精度，同一秒寫入
 	// 的多則通知若用時間排序會沒有確定順序，分頁時可能漏讀或重複。id 是
-	// AUTO_INCREMENT，本身就是「產生的先後」，且 idx_forum_notifications_recipient
+	// 雪花 id，本身就是「產生的先後」，且 idx_forum_notifications_recipient
 	// 的二級索引尾端就接著主鍵，這個排序不必額外排序。
 	//
 	// LEFT JOIN forum_profiles 取暱稱與頭像：觸發者可能從未建檔（早期使用者），

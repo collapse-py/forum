@@ -143,7 +143,13 @@ func TestAdminDeletePostAndReportMySQL(t *testing.T) {
 	if report.Code < 200 || report.Code >= 300 {
 		t.Fatalf("檢舉回應 = %d; body=%s", report.Code, report.Body.String())
 	}
-	reportID := countRows(t, db, `SELECT COUNT(*) FROM forum_reports`)
+	// 讀真正的檢舉 id，而不是「目前有幾列」。後者在 AUTO_INCREMENT 時代
+	// 剛好等於新插入的 id，但雪花 id 不是從 1 開始 —— 原本的寫法會拿 1
+	// 去刪一筆不存在的檢舉，症狀是 404 而不是測試失敗。
+	var reportID int64
+	if err := db.QueryRow(`SELECT id FROM forum_reports`).Scan(&reportID); err != nil {
+		t.Fatalf("讀取檢舉 id 失敗: %v", err)
+	}
 
 	// 管理員刪文：軟刪除（deleted_at 設值，列保留）。
 	recorder := httptest.NewRecorder()

@@ -106,6 +106,7 @@ import (
 	"forum/forum/data"
 	"forum/forum/es"
 	"forum/forum/httpapi"
+	"forum/forum/idgen"
 	"forum/forum/ipban"
 	"forum/forum/logger"
 	"forum/forum/metrics"
@@ -243,6 +244,20 @@ func main() {
 	 */
 	if err := cfg.Validate(); err != nil {
 		logger.Fatalf("[CONFIG] %v", err)
+	}
+
+	/*
+	 * 設定主鍵產生器的節點編號。
+	 *
+	 * 必須排在 MigrateMySQL 之前：遷移的第 38 步會用同一隻產生器替既有資料
+	 * 重新編號，而那個時候的節點編號必須已經是最終值 —— 否則同一個資料庫裡
+	 * 會出現兩個節點編號產生的 id，而那正是 SNOWFLAKE_NODE_ID 要避免的事。
+	 *
+	 * Validate 已經檢查過範圍；這裡再呼叫一次 Configure 是為了讓「設定值」
+	 * 只有一個進入產生器的入口，而不是在兩個地方各驗一次。
+	 */
+	if err := idgen.Configure(int64(cfg.SnowflakeNodeID)); err != nil {
+		logger.Fatalf("[IDGEN] %v", err)
 	}
 
 	// 同一個 Redis 實例被兩處共用，肩負兩種職責：
@@ -791,6 +806,9 @@ func checkConfig(path string) error {
 	fmt.Fprintf(out, "  MySQL              : %s\n", dbEndpoint(cfg.DbDSN))
 	fmt.Fprintf(out, "  連線池             : 開 %d / 閒置 %d / 存活 %s\n",
 		cfg.DbMaxOpenConns, cfg.DbMaxIdleConns, cfg.DbConnMaxLifetimeMinutes)
+	// 節點編號要在啟動報告裡看得到：多實例部署時它必須每個實例不同，
+	// 而寫錯的症狀是「偶爾撞主鍵」，沒有任何日誌會指向設定。
+	fmt.Fprintf(out, "  主鍵節點編號       : %d（SNOWFLAKE_NODE_ID）\n", cfg.SnowflakeNodeID)
 	fmt.Fprintf(out, "  Redis              : %s (db %d)\n", cfg.RedisAddr, cfg.RedisDB)
 	fmt.Fprintf(out, "  檔案伺服器（後台） : %s\n", cfg.FilesServerURL)
 	fmt.Fprintf(out, "  檔案伺服器（對外） : %s\n", cfg.FilesServerPublicURL)

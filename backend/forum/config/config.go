@@ -37,6 +37,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"forum/forum/idgen"
 	"os"
 	"strconv"
 	"strings"
@@ -204,11 +205,17 @@ type Config struct {
 	DbMaxOpenConns           int           // DB_MAX_OPEN_CONNS
 	DbMaxIdleConns           int           // DB_MAX_IDLE_CONNS
 	DbConnMaxLifetimeMinutes time.Duration // DB_CONN_MAX_LIFETIME_MINUTES（設定檔單位：分鐘）
-	FilesServerURL           string        // FILES_SERVER_URL（後端後台連線用，通常是內網）
-	FilesServerPublicURL     string        // FILES_SERVER_PUBLIC_URL（寫進貼文給瀏覽器用）
-	FilesServerToken         string        // FILES_SERVER_TOKEN（後備值來自同名環境變數）
-	MediaTokenKeyPrefix      string        // MEDIA_TOKEN_KEY_PREFIX
-	MediaTokenTTLSecs        int           // MEDIA_TOKEN_TTL_SECONDS（設定檔單位：秒）
+	// SnowflakeNodeID 是這個實例在雪花 ID 中的節點編號（SNOWFLAKE_NODE_ID，
+	// 0–63）。資料庫主鍵由應用層以雪花演算法產生（見 forum/idgen），節點編號
+	// 必須在「同一個資料庫上的所有實例」之間唯一。單一實例維持 0 即可；
+	// 同時跑多個實例（水平擴充、藍綠部署）時若都設成 0，同一毫秒內可能發出
+	// 相同的 id，症狀是「偶爾有寫入撞主鍵」而不是任何啟動錯誤。
+	SnowflakeNodeID      int    // SNOWFLAKE_NODE_ID
+	FilesServerURL       string // FILES_SERVER_URL（後端後台連線用，通常是內網）
+	FilesServerPublicURL string // FILES_SERVER_PUBLIC_URL（寫進貼文給瀏覽器用）
+	FilesServerToken     string // FILES_SERVER_TOKEN（後備值來自同名環境變數）
+	MediaTokenKeyPrefix  string // MEDIA_TOKEN_KEY_PREFIX
+	MediaTokenTTLSecs    int    // MEDIA_TOKEN_TTL_SECONDS（設定檔單位：秒）
 	// MediaTokenTTLExplicit 記錄 MEDIA_TOKEN_TTL_SECONDS 是否在設定檔中以正整數
 	// 明確出現過。存在的原因是「兜底值」與「刻意設成同一個數字」在 Config 上
 	// 長得一模一樣，而這個專案對 30 天的兜底值有明確的安全立场（見 Validate）：
@@ -390,6 +397,11 @@ func Load(path string) (Config, error) {
 		case "DB_CONN_MAX_LIFETIME_MINUTES":
 			mins, _ := strconv.Atoi(val)
 			cfg.DbConnMaxLifetimeMinutes = time.Duration(mins) * time.Minute
+		case "SNOWFLAKE_NODE_ID":
+			// 範圍由 Validate 檢查，而不是在這裡悄悄夾到 0–63：夾到邊界會讓
+			// 一個打錯的設定看起來「有生效」，而兩個實例共用同一個節點
+			// 編號的症狀只有偶發的主鍵衝突。
+			cfg.SnowflakeNodeID, _ = strconv.Atoi(val)
 		case "FILES_SERVER_URL":
 			// 同樣去掉尾斜線，上傳時程式端會再 TrimRight 一次並接上 "/upload"。
 			cfg.FilesServerURL = strings.TrimRight(val, "/")
@@ -722,6 +734,17 @@ func (c Config) Validate() error {
 				"正式環境的圖片存取權杖不該存活這麼久；請在設定檔明確設定一個值"+
 				"（若確實需要長期有效，寫出你想要的數字即可，這個值會被視為知情同意）",
 			c.MediaTokenTTLSecs,
+		))
+	}
+
+	// 節點編號的範圍。與 MEDIA_TOKEN_TTL_SECONDS 不同，這一項沒有「開發環境
+	// 可以寬容」的餘地：超出範圍的值不會被 idgen 接受，而錯的節點編號（例如
+	// 兩個實例都寫 0）不會有啟動錯誤，只會在寫入時偶發地撞主鍵。
+	if c.SnowflakeNodeID < 0 || c.SnowflakeNodeID > idgen.MaxNodeID {
+		problems = append(problems, fmt.Sprintf(
+			"SNOWFLAKE_NODE_ID = %d 超出範圍（0–%d）。多實例部署時每個實例必須不同；"+
+				"超出範圍的值會在啟動時被拒絕，而不是被夾到邊界",
+			c.SnowflakeNodeID, idgen.MaxNodeID,
 		))
 	}
 

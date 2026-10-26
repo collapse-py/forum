@@ -36,6 +36,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"forum/forum/data"
+	"forum/forum/idgen"
 )
 
 // subtreeTestCounter 讓每個測試的資料庫名稱都不相同（同 migration_test.go
@@ -144,14 +145,11 @@ type subtreeComment struct {
 // 它的 INSERT 會以 1364 失敗。
 func insertSubtreePost(t *testing.T, db *sql.DB, author string) int64 {
 	t.Helper()
-	result, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)`,
-		author, "subtree test post", time.Now())
-	if err != nil {
+	// schema 沒有 AUTO_INCREMENT（MigrateMySQL 已移除），id 必須自己給。
+	id := idgen.Next()
+	if _, err := db.Exec(`INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, '', ?)`,
+		id, author, "subtree test post", time.Now()); err != nil {
 		t.Fatalf("插入貼文失敗: %v", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		t.Fatalf("讀取貼文 id 失敗: %v", err)
 	}
 	return id
 }
@@ -159,15 +157,11 @@ func insertSubtreePost(t *testing.T, db *sql.DB, author string) int64 {
 // insertSubtreeComment 建一則留言（parentID 0 代表第一層）並回傳其 id。
 func insertSubtreeComment(t *testing.T, db *sql.DB, postID, parentID int64, depth int, author string) int64 {
 	t.Helper()
-	result, err := db.Exec(`INSERT INTO forum_post_comments
-		(post_id, parent_id, depth, author_email, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		postID, parentID, depth, author, "comment", time.Now())
-	if err != nil {
+	id := idgen.Next()
+	if _, err := db.Exec(`INSERT INTO forum_post_comments
+		(id, post_id, parent_id, depth, author_email, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, postID, parentID, depth, author, "comment", time.Now()); err != nil {
 		t.Fatalf("插入留言失敗: %v", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		t.Fatalf("讀取留言 id 失敗: %v", err)
 	}
 	return id
 }
@@ -226,11 +220,11 @@ const userScope = `JOIN forum_post_comments root
 /*
 TestForumCommentSubtreeDeleteMySQL 對真的 MySQL 執行子樹刪除，逐項確認：
 
-  1. 三層子樹整棵消失（自己 + 回覆 + 回覆的回覆），而別棵樹不受影響。
-  2. 孫留言也真的在路徑上：少一路徑的症狀是「第一層刪了、孫子留在樹外」。
-  3. 權限：不是那一則的作者時 0 列、什麼都不刪（子孫即使是你寫的也不留）。
-  4. 母文章軟刪除後 0 列（使用者的刪除路徑要求貼文還活著）。
-  5. 跨篇掛錯：拿 A 篇的留言 id 配 B 篇的 postID，0 列且 A 篇的資料不動。
+ 1. 三層子樹整棵消失（自己 + 回覆 + 回覆的回覆），而別棵樹不受影響。
+ 2. 孫留言也真的在路徑上：少一路徑的症狀是「第一層刪了、孫子留在樹外」。
+ 3. 權限：不是那一則的作者時 0 列、什麼都不刪（子孫即使是你寫的也不留）。
+ 4. 母文章軟刪除後 0 列（使用者的刪除路徑要求貼文還活著）。
+ 5. 跨篇掛錯：拿 A 篇的留言 id 配 B 篇的 postID，0 列且 A 篇的資料不動。
 */
 func TestForumCommentSubtreeDeleteMySQL(t *testing.T) {
 	db := subtreeTempDatabase(t)

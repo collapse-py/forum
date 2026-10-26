@@ -18,6 +18,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"forum/forum/idgen"
 )
 
 func rollupRow(db *sql.DB, day string) (users, posts, comments, likes int, exists bool) {
@@ -48,36 +50,40 @@ func TestRollupBackfillAndRefreshMySQL(t *testing.T) {
 			t.Fatalf("插入使用者失敗: %v", err)
 		}
 	}
+	// 主鍵由應用層給（schema 沒有 AUTO_INCREMENT）。先產生四筆貼文 id，
+	// 後面留言與按讚都用它們當 post_id —— 寫死 1/4 的版本在雪花 id 下
+	// 會指向不存在的貼文，而計數仍是錯的。
+	postIDs := []int64{idgen.Next(), idgen.Next(), idgen.Next(), idgen.Next()}
 	for i := 0; i < 3; i++ {
 		deleted := sql.NullTime{}
 		if i == 2 {
 			deleted = sql.NullTime{Time: now, Valid: true}
 		}
-		if _, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at, deleted_at) VALUES (?, ?, '', ?, ?)`,
-			"a@example.com", "post "+string(rune('a'+i)), oldDay.Add(time.Duration(i)*time.Hour), deleted); err != nil {
+		if _, err := db.Exec(`INSERT INTO forum_posts (id, author_email, content, image_url, created_at, deleted_at) VALUES (?, ?, ?, '', ?, ?)`,
+			postIDs[i], "a@example.com", "post "+string(rune('a'+i)), oldDay.Add(time.Duration(i)*time.Hour), deleted); err != nil {
 			t.Fatalf("插入貼文失敗: %v", err)
 		}
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := db.Exec(`INSERT INTO forum_post_comments (post_id, author_email, content, created_at) VALUES (1, ?, ?, ?)`,
-			"b"+string(rune('a'+i))+"@example.com", "comment", oldDay.Add(time.Duration(i)*time.Hour)); err != nil {
+		if _, err := db.Exec(`INSERT INTO forum_post_comments (id, post_id, author_email, content, created_at) VALUES (?, ?, ?, ?, ?)`,
+			idgen.Next(), postIDs[0], "b"+string(rune('a'+i))+"@example.com", "comment", oldDay.Add(time.Duration(i)*time.Hour)); err != nil {
 			t.Fatalf("插入留言失敗: %v", err)
 		}
 	}
 	for i := 0; i < 4; i++ {
-		if _, err := db.Exec(`INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (1, ?, ?)`,
-			"c"+string(rune('a'+i))+"@example.com", oldDay.Add(time.Duration(i)*time.Hour)); err != nil {
+		if _, err := db.Exec(`INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (?, ?, ?)`,
+			postIDs[0], "c"+string(rune('a'+i))+"@example.com", oldDay.Add(time.Duration(i)*time.Hour)); err != nil {
 			t.Fatalf("插入按讚失敗: %v", err)
 		}
 	}
 
 	// 今天：一筆貼文、一筆按讚。
-	if _, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES (?, ?, '', ?)`,
-		"d@example.com", "today post", now); err != nil {
+	if _, err := db.Exec(`INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUES (?, ?, ?, '', ?)`,
+		postIDs[3], "d@example.com", "today post", now); err != nil {
 		t.Fatalf("插入今日貼文失敗: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (4, ?, ?)`,
-		"e@example.com", now); err != nil {
+	if _, err := db.Exec(`INSERT INTO forum_post_likes (post_id, author_email, created_at) VALUES (?, ?, ?)`,
+		postIDs[3], "e@example.com", now); err != nil {
 		t.Fatalf("插入今日按讚失敗: %v", err)
 	}
 
