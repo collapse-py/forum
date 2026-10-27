@@ -152,7 +152,7 @@ func TestCovForumProfilePublicProfile(t *testing.T) {
 	t.Run("有資料且有頭像且追蹤中", func(t *testing.T) {
 		h := newCovHarness(t)
 		covProfileConfigureMedia(h)
-		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key = ?",
+		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email", "nickname", "bio", "avatar_url"},
 			[]driverValue{"target@example.com", "目標", "簡介", "avatar.png"},
 		)
@@ -178,7 +178,7 @@ func TestCovForumProfilePublicProfile(t *testing.T) {
 	t.Run("看自己的頁面不帶 following", func(t *testing.T) {
 		h := newCovHarness(t)
 		covProfileConfigureMedia(h)
-		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key = ?",
+		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email", "nickname", "bio", "avatar_url"},
 			[]driverValue{covProfileEmail, "自己", "", ""},
 		)
@@ -198,7 +198,7 @@ func TestCovForumProfilePublicProfile(t *testing.T) {
 		h := newCovHarness(t)
 		covProfileConfigureMedia(h)
 		h.srv.mediaRedis = nil
-		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key = ?",
+		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email", "nickname", "bio", "avatar_url"},
 			[]driverValue{"target@example.com", "目標", "", "avatar.png"},
 		)
@@ -213,7 +213,7 @@ func TestCovForumProfilePublicProfile(t *testing.T) {
 
 	t.Run("追蹤狀態查詢失敗退化成 false", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key = ?",
+		h.rows("SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email", "nickname", "bio", "avatar_url"},
 			[]driverValue{"target@example.com", "目標", "", ""},
 		)
@@ -229,7 +229,7 @@ func TestCovForumProfilePublicProfile(t *testing.T) {
 
 	t.Run("資料庫錯誤", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.queryError("FROM forum_profiles WHERE public_key = ?", errors.New("db down"))
+		h.queryError("FROM forum_profiles WHERE public_key_hmac = ?", errors.New("db down"))
 		recorder := h.do(h.srv.handleForumPublicProfile, http.MethodGet,
 			"/api/forum/public-profile?key="+strings.Repeat("1", 64), "", "", false)
 		covWantStatus(t, recorder, http.StatusInternalServerError)
@@ -523,14 +523,14 @@ func TestCovForumProfilePublicPosts(t *testing.T) {
 
 	t.Run("查詢失敗", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.queryError("SELECT author_email FROM forum_profiles WHERE public_key = ? LIMIT 1", errors.New("db down"))
+		h.queryError("SELECT author_email FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1", errors.New("db down"))
 		recorder := h.do(h.srv.handleForumPublicPosts, http.MethodGet, "/api/forum/public-posts?user="+key, "", "", false)
 		covWantStatus(t, recorder, http.StatusInternalServerError)
 	})
 
 	t.Run("offset 不合法", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.rows("SELECT author_email FROM forum_profiles WHERE public_key = ? LIMIT 1",
+		h.rows("SELECT author_email FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email"}, []driverValue{"author@example.com"})
 		recorder := h.do(h.srv.handleForumPublicPosts, http.MethodGet, "/api/forum/public-posts?user="+key+"&offset=-3", "", "", false)
 		covWantStatus(t, recorder, http.StatusBadRequest)
@@ -538,7 +538,7 @@ func TestCovForumProfilePublicPosts(t *testing.T) {
 
 	t.Run("成功列出貼文", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.rows("SELECT author_email FROM forum_profiles WHERE public_key = ? LIMIT 1",
+		h.rows("SELECT author_email FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email"}, []driverValue{"author@example.com"})
 		h.rows("FROM forum_posts fp", covProfilePostCols(), covProfilePostRow(7, "author@example.com", "內容", ""))
 		h.rows("FROM forum_user_tag_assignments", []string{"name"}, []driverValue{"標籤"})
@@ -580,7 +580,7 @@ func TestCovForumProfilePublicPosts(t *testing.T) {
 		h := newCovHarness(t)
 		covProfileConfigureMedia(h)
 		h.srv.mediaRedis = nil
-		h.rows("SELECT author_email FROM forum_profiles WHERE public_key = ? LIMIT 1",
+		h.rows("SELECT author_email FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email"}, []driverValue{"author@example.com"})
 		h.rows("FROM forum_posts fp", covProfilePostCols(), covProfilePostRow(9, "author@example.com", "有圖", "pic.png"))
 		recorder := h.do(h.srv.handleForumPublicPosts, http.MethodGet, "/api/forum/public-posts?user="+key, "", "", false)
@@ -589,7 +589,7 @@ func TestCovForumProfilePublicPosts(t *testing.T) {
 
 	t.Run("載入貼文失敗", func(t *testing.T) {
 		h := newCovHarness(t)
-		h.rows("SELECT author_email FROM forum_profiles WHERE public_key = ? LIMIT 1",
+		h.rows("SELECT author_email FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1",
 			[]string{"author_email"}, []driverValue{"author@example.com"})
 		h.queryError("FROM forum_posts fp", errors.New("db down"))
 		recorder := h.do(h.srv.handleForumPublicPosts, http.MethodGet, "/api/forum/public-posts?user="+key, "", "", false)

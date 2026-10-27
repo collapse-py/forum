@@ -50,11 +50,11 @@ func TestCheckConfigReportsProductionRisks(t *testing.T) {
 	})
 
 	wants := []string{
-		"未設定 TRUSTED_PROXY_CIDRS", // 空代理白名單
-		"有 client id 卻沒有回呼網址",          // GOOGLE_CLIENT_ID 有、REDIRECT 無
-		"正式環境未設定 FILES_SERVER_TOKEN",   // 上傳端點會接受任何來源
-		"正式環境不接受兜底值",                   // Validate 的結論
-		`不得含 "session"`,                // 媒體 token 前綴與 session 重疊
+		"未設定 TRUSTED_PROXY_CIDRS",    // 空代理白名單
+		"有 client id 卻沒有回呼網址",        // GOOGLE_CLIENT_ID 有、REDIRECT 無
+		"正式環境未設定 FILES_SERVER_TOKEN", // 上傳端點會接受任何來源
+		"正式環境不接受兜底值",                 // Validate 的結論
+		`不得含 "session"`,              // 媒體 token 前綴與 session 重疊
 		"結論：不通過",
 		"驗證 basic", // ES_URL 有值時一併報驗證種類
 	}
@@ -133,6 +133,60 @@ func TestCheckConfigWarnsProxyAndInsecureCookieWithoutProductionFlags(t *testing
 		}
 		if strings.Contains(out, "不會送 Strict-Transport-Security") {
 			t.Errorf("COOKIE_SECURE=true 時不該警告 HSTS:\n%s", out)
+		}
+	})
+}
+
+// TestCheckConfigReportsAuthorKeySecret 釘住 F-03 那行警告：對外的作者識別碼
+// 能不能被離線還原，取決於 AUTHOR_KEY_SECRET 有沒有設定。
+//
+// 它刻意不進 Validate（本機開發與尚未導入秘密的部署都還在舊形態，讓啟動失敗
+// 會把一個「部署者要做的決定」變成「這支行程跑不了」）。因此唯一讓它被看見的
+// 地方就是 `-check` 的報告 —— 那一列不在，這個暴露就沒有人知道。
+func TestCheckConfigReportsAuthorKeySecret(t *testing.T) {
+	t.Setenv("FILES_SERVER_TOKEN", "")
+
+	t.Run("未設定時提出警告", func(t *testing.T) {
+		cfgPath := writeConfigFile(t, strings.Join([]string{
+			"COOKIE_SECURE=true",
+			"PUBLIC_BASE_URL=https://forum.example.com",
+			"SERVER_PORT=:9443",
+			"MEDIA_TOKEN_TTL_SECONDS=600",
+		}, "\n")+"\n")
+
+		out := captureStdout(t, func() { _ = checkConfig(cfgPath) })
+		for _, want := range []string{"未設定 AUTHOR_KEY_SECRET", "SHA-256(email)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("報告缺少 %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "AUTHOR_KEY_SECRET · 已設定") {
+			t.Errorf("未設定時憑證列不應報已設定:\n%s", out)
+		}
+		if !strings.Contains(out, "AUTHOR_KEY_SECRET · 未設定") {
+			t.Errorf("憑證列沒有報未設定:\n%s", out)
+		}
+	})
+
+	// 設定值本身不能進報告：它出現在 CI 日誌與 issue 裡就等于洩漏。
+	t.Run("已設定時不警告且不洩漏內容", func(t *testing.T) {
+		cfgPath := writeConfigFile(t, strings.Join([]string{
+			"COOKIE_SECURE=true",
+			"PUBLIC_BASE_URL=https://forum.example.com",
+			"SERVER_PORT=:9443",
+			"MEDIA_TOKEN_TTL_SECONDS=600",
+			"AUTHOR_KEY_SECRET=author-key-secret-value",
+		}, "\n")+"\n")
+
+		out := captureStdout(t, func() { _ = checkConfig(cfgPath) })
+		if strings.Contains(out, "未設定 AUTHOR_KEY_SECRET") {
+			t.Errorf("已設定卻仍警告:\n%s", out)
+		}
+		if strings.Contains(out, "author-key-secret-value") {
+			t.Errorf("報告洩漏了秘密內容:\n%s", out)
+		}
+		if !strings.Contains(out, "AUTHOR_KEY_SECRET · 已設定（") {
+			t.Errorf("憑證列沒有報有無與長度:\n%s", out)
 		}
 	})
 }

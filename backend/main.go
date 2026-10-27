@@ -294,6 +294,26 @@ func main() {
 	}
 
 	/*
+	 * 回填公開識別碼的 HMAC 欄位（forum_profiles.public_key_hmac，MigrateMySQL 第 39 步）。
+	 *
+	 * 排在開始服務之前：那兩個查識別碼的公開端點（/api/forum/public-profile 與
+	 * /api/forum/public-posts）如果看到空欄位，會落到有界掃描的退路 —— 功能還在，
+	 * 但成本變成掃一遍作者清單。先把欄位補齊，讓公開端點走索引。
+	 *
+	 * 未設定 AUTHOR_KEY_SECRET 時這個呼叫不做任何事（keyFor 是 nil）：那是舊形態的
+	 * 部署，欄位本來就該保持空字串。失敗只記警告，不讓啟動失敗 —— 缺了回填的後果
+	 * 是「公開個人頁走退路」，不是功能消失；而讓一個衍生欄位的回填拖垮整個啟動，
+	 * 與本站「衍生資料可重建」的取向不符。
+	 */
+	if cfg.AuthorKeySecret != "" {
+		if err := data.BackfillProfileAuthorKeys(context.Background(), db, func(email string) string {
+			return httpapi.DeriveAuthorKey(cfg.AuthorKeySecret, email)
+		}); err != nil {
+			logger.Warnf("[DB] 公開識別碼回填失敗（公開個人頁會走退路掃描，直到下次啟動補齊）: %v", err)
+		}
+	}
+
+	/*
 	 * 回填日別彙總表（forum_daily_stats）。
 	 *
 	 * 同步執行、排在開始服務之前：回填的量有界（「有資料的天數」），而若
@@ -854,6 +874,7 @@ func checkConfig(path string) error {
 		{"FILES_SERVER_TOKEN", cfg.FilesServerToken},
 		{"REDIS_PASSWORD", cfg.RedisPassword},
 		{"DB_DSN 內含帳密", cfg.DbDSN},
+		{"AUTHOR_KEY_SECRET", cfg.AuthorKeySecret},
 		{"ES_USERNAME", cfg.ESUsername},
 		{"ES_PASSWORD", cfg.ESPassword},
 		{"ES_API_KEY", cfg.ESAPIKey},
@@ -867,6 +888,14 @@ func checkConfig(path string) error {
 	if cfg.IsProduction() && cfg.FilesServerToken == "" {
 		fmt.Fprintf(out, "  警告              : 正式環境未設定 FILES_SERVER_TOKEN —— "+
 			"上傳端點會接受任何來源的請求\n")
+	}
+	// 未設定 AUTHOR_KEY_SECRET 時，對外的作者識別碼仍是未加鹽的 SHA-256(email)：
+	// 任何持有候選信箱的人都能離線比對還原作者身分（稽核 F-03）。刻意只警告而不讓
+	// Validate 失敗 —— 本機開發與既有部署都還在舊形態，換成 HMAC 是部署者要做的
+	// 決定，而且換那把秘密會讓舊的公開連結失效（舊連結仍由 public_key 欄位解析）。
+	if cfg.AuthorKeySecret == "" {
+		fmt.Fprintf(out, "  警告              : 未設定 AUTHOR_KEY_SECRET —— 對外作者識別碼仍為 SHA-256(email)，"+
+			"持有候選信箱者可離線還原作者；設定一把秘密後改為 HMAC\n")
 	}
 	// ES 的三個驗證欄位是「配對設定」，而每一種不對稱的組合都有不同的症狀，
 	// 且全部是靜默的（搜尋只是安靜地退回 MySQL LIKE）。分開報而不是合成一句

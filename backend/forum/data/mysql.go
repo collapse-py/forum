@@ -15,7 +15,7 @@ Package data 負責 MySQL 連線的建立與 schema 遷移。
 	forum_post_comments          文章留言：id / post_id / parent_id / depth / author_email / content / created_at
 	                           （parent_id 指回應的另一則留言，depth 是層級 1..3，見第 31 步）
 	forum_reports                檢舉工單（可指向文章或留言），含處理狀態與覆核者
-	forum_profiles               使用者公開資料：author_email 為主鍵、public_key 為 email 的 SHA-256、avatar_url 只存檔名
+	forum_profiles               使用者公開資料：author_email 為主鍵、public_key 為 email 的 SHA-256（舊形態）、public_key_hmac 為目前派生的識別碼（HMAC，未設定秘密時為空）、avatar_url 只存檔名
 	forum_users                  使用者帳號主檔與停權狀態（status = ACTIVE / SUSPENDED）
 	forum_user_tags              標籤字典
 	forum_user_tag_assignments   使用者與標籤的多對多關聯
@@ -1239,7 +1239,114 @@ func MigrateMySQL(db *sql.DB) error {
 		return fmt.Errorf("snowflake id migration: %w", err)
 	}
 
+	// 39) 公開識別碼的第二種形態：forum_profiles.public_key_hmac。
+	//
+	//     為什麼要另一個欄位而不是直接覆寫 public_key：public_key 裡存的是舊的
+	//     SHA-256(email)，而舊連結（書籤、外部分享、舊版前端留下的網址）用的就是
+	//     那個值。覆寫它等於讓所有舊連結一次性失效；兩欄位並存讓「目前的形態」
+	//     與「舊連結還能解析」同時成立（查詢端同時比對兩者，見 handleForumPublicProfile）。
+	//
+	//     值由應用層派生（HMAC(secret, email)），不是 SQL 的 SHA2 —— HMAC 需要
+	//     部署秘密，而秘密不該出現在 SQL 字串裡（它會進日誌與 general log）。
+	//     因此這一步只加欄位與索引，回填由 data.BackfillProfileAuthorKeys 在啟動時做。
+	//     未設定秘密時該欄位保持空字串：空字串永遠不會被 64 字元的 key 命中，
+	//     所以「沒秘密」的部署行為完全等同第 16 步的舊形態。
+	if err := addColumnIfNotExists(db, "forum_profiles", "public_key_hmac", "VARCHAR(64) NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+
+	//     索引的理由與第 20 步相同：/api/forum/public-profile 與 /api/forum/public-posts
+	//     是不限流的公開端點，以這欄位為條件的查詢必須走索引。非唯一（同第 20 步的
+	//     取捨：既有資料若出現重複值，UNIQUE 會讓整個啟動失敗）。
+	if err := addIndexIfNotExists(db, "forum_profiles",
+		"idx_forum_profiles_public_key_hmac", "public_key_hmac"); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// authorKeyBackfillBatch 是回填公開識別碼時每批處理的列數。
+//
+// 分批是因為 forum_profiles 可能有數萬列，而每一列都要在應用層算一次 HMAC：
+// 一次載入全部 email 會讓記憶體用量與單次請求的體積都失去上界。
+const authorKeyBackfillBatch = 500
+
+// BackfillProfileAuthorKeys 把 forum_profiles.public_key_hmac 補成「目前的派生方式」
+// 應有的值（第 39 步只加欄位，值不在 SQL 裡算）。
+//
+// keyFor 是唯一的派生來源，由呼叫端傳入（main.go 以 httpapi.DeriveAuthorKey 組出閉包）。
+// 本套件刻意不知道秘密是什麼：秘密不進 SQL 字串（它會進 MySQL 的 general log 與
+// 日誌），data 也不需要同步依賴 config 或 httpapi。
+//
+// keyFor == nil 代表「尚未設定秘密」，本函式不做任何事 —— 那種部署的公開識別碼
+// 本來就是第 16 步的 SHA-256，欄位保持空字串是正確狀態。
+//
+// 冪等：只動 public_key_hmac = '' 的列。已回填的列不重算，所以換秘密不會被
+// 這一步靜默覆蓋（換秘密時既有 key 會失效，那是部署者明示的代價，舊連結仍由
+// public_key 欄位解析）。每批處理後該批的列不再符合條件，因此迴圈自然終止；
+// 上限是「表大小 / 批次」次往返，只在首次啟動或手動清空後發生。
+func BackfillProfileAuthorKeys(ctx context.Context, db *sql.DB, keyFor func(email string) string) error {
+	if db == nil {
+		return errors.New("nil database")
+	}
+	if keyFor == nil {
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rows, err := db.QueryContext(ctx,
+			`SELECT author_email FROM forum_profiles WHERE public_key_hmac = '' LIMIT ?`, authorKeyBackfillBatch)
+		if err != nil {
+			return fmt.Errorf("read profiles without author key: %w", err)
+		}
+		emails := make([]string, 0, authorKeyBackfillBatch)
+		for rows.Next() {
+			var email string
+			if err := rows.Scan(&email); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan profile email: %w", err)
+			}
+			emails = append(emails, email)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan profile emails: %w", err)
+		}
+		rows.Close()
+
+		if len(emails) == 0 {
+			return nil
+		}
+
+		// 預言式：同一條 UPDATE 語句對每批的列重複使用，省掉每列一次 prepare。
+		stmt, err := db.PrepareContext(ctx,
+			`UPDATE forum_profiles SET public_key_hmac = ? WHERE author_email = ? AND public_key_hmac = ''`)
+		if err != nil {
+			return fmt.Errorf("prepare author key update: %w", err)
+		}
+		for _, email := range emails {
+			key := keyFor(email)
+			if key == "" {
+				// 派生回空字串只可能是 keyFor 實作的 bug（HMAC 永遠 64 字元）；
+				// 寧可停下來也不要寫進一個「查不到的空值」。錯誤訊息刻意不含
+				// email：那會跟著日誌把個資寫出去（見 docs/SECURITY.md 的日誌界限）。
+				stmt.Close()
+				return errors.New("derive author key returned empty value")
+			}
+			if _, err := stmt.ExecContext(ctx, key, email); err != nil {
+				stmt.Close()
+				return fmt.Errorf("write author key: %w", err)
+			}
+		}
+		stmt.Close()
+
+		if len(emails) < authorKeyBackfillBatch {
+			return nil
+		}
+	}
 }
 
 // snowflakeMigrationLock 是重新編號時持有的 MySQL named lock。

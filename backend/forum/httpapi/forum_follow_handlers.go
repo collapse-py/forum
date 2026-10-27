@@ -10,7 +10,7 @@
 二、為什麼是「追蹤使用者」而不是別的對象
 
 	論壇沒有 thread 結構（貼文與留言是兩張表，沒有回覆串的層級），因此「追蹤一篇
-	討論」沒有可對應的實體；使用者則是全站唯一有穩定識別（publicForumKey）、有內容
+	討論」沒有可對應的實體；使用者則是全站唯一有穩定識別（forumAuthorKey）、有內容
 	（forum_posts.author_email）又有個人頁的對象。
 
 三、資料表依賴
@@ -22,7 +22,7 @@
 四、四條貫穿全檔的設計決策
 
  1. 完全私有。沒有任何端點回傳「誰追蹤了誰」或「某人有幾個追蹤者」。這不只是
-    少做功能：公開 API 一律以 publicForumKey 代表身分，開放追蹤關係等於新增一條
+    少做功能：公開 API 一律以 forumAuthorKey 代表身分，開放追蹤關係等於新增一條
     可用來還原 email 的關聯路徑（追蹤表存的就是 email）。回傳給本人的只有
     「我追蹤了哪些 key」與「我是否追蹤了這個人」。
  2. 關聯鍵是 email，API 表面只有 64 個十六進位元的 publicKey。理由見 MigrateMySQL
@@ -61,17 +61,17 @@ const followKeyScanLimit = 20000
 
 // forumFollowRequest 是 POST /api/forum/follows 的請求主體。
 //
-//	Key 是被追蹤者的 publicForumKey（email 的 SHA-256，64 個十六進位字元）。
+//	Key 是被追蹤者的公開識別碼（forumAuthorKey，64 個十六進位字元）。
 //
 // 刻意不接受 email：公開 API 全程拿不到原始位址，這是本站個資設計的底線
-// （見 publicForumKey 的說明）。追蹤對象的身分由金鑰決定，伺服器自行解析。
+// （見 forumAuthorKey 的說明）。追蹤對象的身分由金鑰決定，伺服器自行解析。
 type forumFollowRequest struct {
 	Key string `json:"key"`
 }
 
 // forumFollowTarget 是 GET /api/forum/follows 回傳的單一對象。
 //
-//	Key         publicForumKey(target_email)，由伺服器現算 —— 資料庫裡沒有也不需要
+//	Key         forumAuthorKey(target_email)，由伺服器現算 —— 資料庫裡沒有也不需要
 //	            存這一欄。email 永不出現在回應中。
 //	Nickname    forum_profiles.nickname 原樣回傳（可能為空字串）。刻意不用
 //	            forumAuthor()：那個函式對沒有暱稱的人回的是「每次請求都不同」的
@@ -193,11 +193,11 @@ func (s *Server) listForumFollows(w http.ResponseWriter, r *http.Request, follow
 		if avatar != "" && mediaToken == "" {
 			avatar = ""
 		}
-		// key 在應用層現算：publicForumKey 是 email 的確定性雜湊，
-		// 因此這個值與貼文卡上的 authorKey 必然一致（那是同一個函式算出來的）。
+		// key 在應用層現算：forumAuthorKey 對同一個 email 永遠給同一個值，
+		// 因此這個值與貼文卡上的 authorKey 必然一致（那是同一支函式算出來的）。
 		// 也因為是現算，email 從不離開後端。
 		items = append(items, forumFollowTarget{
-			Key:        publicForumKey(targetEmail),
+			Key:        s.forumAuthorKey(targetEmail),
 			Nickname:   nickname,
 			AvatarURL:  s.forumImageURL(avatar, mediaToken),
 			FollowedAt: followedAt,
@@ -219,7 +219,7 @@ func (s *Server) listForumFollows(w http.ResponseWriter, r *http.Request, follow
 		// 之所以由這支端點順便回傳而不動 /api/check：/api/check 是首頁與
 		// 所有殼層共用的端點，改它的回應形狀會牽動每一頁；而每一個渲染
 		// PostCard 或顯示追蹤鈕的頁面都已經需要呼叫這支端點了。
-		"selfKey": publicForumKey(follower),
+		"selfKey": s.forumAuthorKey(follower),
 	})
 }
 
@@ -362,19 +362,23 @@ func (e followTargetError) Error() string {
  * 讓它開一個交易再回 400 只是在白花一次往返。
  *
  * 會被擋掉的原因：
- *   - 長度不對：真正的比對靠 public_key 的索引，長度檢查只是提早拒絕明顯無效的輸入。
+ *   - 長度不對：真正的比對靠兩把識別碼欄位的索引（見 forumEmailByPublicKey），
+ *     長度檢查只是提早拒絕明顯無效的輸入。
  *   - 追蹤自己：沒有任何意義（自己的貼文本來就在首頁），而複合主鍵
  *     (follower_email, target_email) 無法擋掉 ('x','x') 這種合法的重複組合。
  *     這是「唯一只能靠應用層守住」的資料完整性規則。
  *
+ * 它是 Server 的方法而不是包層函式：「是不是自己」要比的是目前形態的識別碼，
+ * 而那取決於 s.cfg.AuthorKeySecret。
+ *
  * 回傳 nil 代表這條輸入可以拿去解析。
  */
-func checkFollowTargetInput(follower, key string) error {
+func (s *Server) checkFollowTargetInput(follower, key string) error {
 	if len(key) != 64 {
 		return followTargetBadKey
 	}
-	if key == publicForumKey(follower) {
-		// 直接比對 follower 自己的雜湊，不等於「解析之後才比較」：那會讓自我
+	if key == s.forumAuthorKey(follower) {
+		// 直接比對 follower 自己的識別碼，不等於「解析之後才比較」：那會讓自我
 		// 追蹤多花一次查詢（而且解析走的是退路掃描時，是全表掃描）。
 		return followTargetSelf
 	}
@@ -382,8 +386,11 @@ func checkFollowTargetInput(follower, key string) error {
 }
 
 // resolveFollowTarget 檢查輸入規則並把 publicKey 還原成 email。
+//
+// 解析完再比一次 email：key 的比對只看目前形態，而舊形態（public_key 欄位）
+// 仍能解析出同一個人，因此「不能追蹤自己」需要第二道檢查（見下面那段註解）。
 func (s *Server) resolveFollowTarget(ctx context.Context, follower, key string) (string, error) {
-	if problem := checkFollowTargetInput(follower, key); problem != nil {
+	if problem := s.checkFollowTargetInput(follower, key); problem != nil {
 		return "", problem
 	}
 	email, err := s.forumEmailByPublicKey(ctx, key)
@@ -392,6 +399,13 @@ func (s *Server) resolveFollowTarget(ctx context.Context, follower, key string) 
 	}
 	if err != nil {
 		return "", followTargetLookupFailed
+	}
+	// 第二道自我追蹤檢查：上面比的是「目前形態」的 key，而 public_key 欄位裡
+	// 存的舊形態值仍可被解析（舊連結要能點開）。設了秘密之後那把舊 key 不再
+	// 對外發布，但它仍可能從舊連結或離線枚舉進來，而複合主鍵 (follower, target)
+	// 擋掉不了 ('x','x')。比的是解析出來的 email —— 那是這筆交易真正要寫的兩欄。
+	if email == follower {
+		return "", followTargetSelf
 	}
 	return email, nil
 }
@@ -428,7 +442,7 @@ func (s *Server) writeFollowTargetError(w http.ResponseWriter, r *http.Request, 
 //	這涵蓋所有設定過暱稱的使用者，是絕大多數的情況。
 //
 //	第二段是退路。貼文卡上的 authorKey 對「每一個」作者都算得出來
-//	（publicForumKey(email) 不需要任何資料表），但 public_key 只存在於
+//	（forumAuthorKey(email) 不需要任何資料表），但 public_key 只存在於
 //	forum_profiles。早期使用者（帳號由 MigrateMySQL 第 13 步從既有貼文回填、
 //	從未建過檔）因此會有 authorKey 卻查不到 email。只做第一段的話，他們的
 //	追蹤鈕會恆回 404 —— 一個沒有任何錯誤訊息、只有按不動的按鈕。
@@ -443,15 +457,18 @@ func (s *Server) writeFollowTargetError(w http.ResponseWriter, r *http.Request, 
 //	上限的取捨與 session_list.go 的 20000 個 key 同一個形狀：掃描邊界被触碰時
 //	**安靜地找不到**，而不是讓一次請求的成本沒有上界。差別在這裡更值得注意 ——
 //	/public-profile 與 /public-posts 是刻意不限流的公開端點，而它們也走這段退路；
-//	一個 64 字元的 random key 就能觸發一次全表作者掃描（每個作者一次 SHA-256）。
-//	把邊界寫下來，是為了讓「上限該是多少」變成一個可以被討論的數字，而不是一个
+//	一個 64 字元的 random key 就能觸發一次全表作者掃描（每個作者一次識別碼派生）。
+//	把邊界寫下來，是為了讓「上限該是多少」變成一個可以被討論的數字，而不是「一個」
 //	藏在 SQL 裡的預設行為。
 //
 //	回傳 sql.ErrNoRows 表示兩段都找不到，呼叫端據此回 404。
 func (s *Server) forumEmailByPublicKey(ctx context.Context, key string) (string, error) {
 	var email string
+	// 先查兩把識別碼的欄位（public_key_hmac 是目前的形態、public_key 是舊形態），
+	// 兩者都有索引。把新欄位排在前面是刻意的：部署導入 AUTHOR_KEY_SECRET 之後，
+	// 對外的 key 幾乎都是 HMAC，讓它走第一次命中而不是兩次。
 	err := s.db.QueryRowContext(ctx,
-		`SELECT author_email FROM forum_profiles WHERE public_key = ? LIMIT 1`, key).Scan(&email)
+		`SELECT author_email FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1`, key, key).Scan(&email)
 	if err == nil {
 		return email, nil
 	}
@@ -476,9 +493,11 @@ func (s *Server) forumEmailByPublicKey(ctx context.Context, key string) (string,
 		if err := rows.Scan(&candidate); err != nil {
 			return "", err
 		}
-		// 雜湊比對在應用層做：SHA-256 是確定性的，兩邊演算法一致
-		// （與第 16 步的 SQL SHA2 回填位元級相同）。
-		if publicForumKey(candidate) == key {
+		// 識別碼比對在應用層做：同一個 email 在同一個秘密下永遠得到同一個值
+		// （與第 16 步的 SQL SHA2 回填位元級相同 —— 未設定秘密時就是那個 SHA-256）。
+		// 設定秘密時這裡算的是 HMAC，攻擊者手上沒有秘密，因此這條退路不會被
+		// 「拿候選信箱去掃」利用：它只回答「我們自己算得出的 key 裡是哪一個」。
+		if s.forumAuthorKey(candidate) == key {
 			return candidate, rows.Err()
 		}
 	}

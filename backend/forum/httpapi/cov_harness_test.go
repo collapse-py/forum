@@ -6,6 +6,8 @@
 
   - QueryContext：依「SQL 片段」回傳預先登記的結果集；沒有登記就回空結果集。
   - ExecContext：預設成功（LastInsertId = 1、RowsAffected = 1）。
+  - 兩者都把 SQL 與**參數**記進 calls：SQL 文字看不到的東西（寫進哪一把 key）
+    要靠 `h.argsFor(...)` 才觀察得到。
   - BeginTx / Commit / Rollback：全部成功。
 
 與 sqlmock 的差異：這個替身**不要求**每一筆查詢都被預期，也不檢查順序。
@@ -66,6 +68,14 @@ type covDB struct {
 	queries []covQueryRule
 	execs   []covExecRule
 	seen    []string
+	calls   []covCall
+}
+
+// covCall 記錄一次實際執行的 SQL 與參數。參數不在 SQL 文字裡，而「對外看到
+// 什麼」常常就寫在參數裡（例如個人資料寫的是哪一把 key），因此要能分開觀察。
+type covCall struct {
+	query string
+	args  []driverValue
 }
 
 func (d *covDB) addQuery(rule covQueryRule) {
@@ -80,10 +90,20 @@ func (d *covDB) addExec(rule covExecRule) {
 	d.execs = append(d.execs, rule)
 }
 
-func (d *covDB) matchQuery(query string) (covQueryRule, bool) {
+// recordLocked 把這次執行記進 seen 與 calls。它不自己加鎖：呼叫端已持 d.mu。
+func (d *covDB) recordLocked(query string, args []driver.NamedValue) {
+	values := make([]driverValue, len(args))
+	for i, arg := range args {
+		values[i] = arg.Value
+	}
+	d.seen = append(d.seen, query)
+	d.calls = append(d.calls, covCall{query: query, args: values})
+}
+
+func (d *covDB) matchQuery(query string, args []driver.NamedValue) (covQueryRule, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.seen = append(d.seen, query)
+	d.recordLocked(query, args)
 	for _, rule := range d.queries {
 		if strings.Contains(query, rule.substr) {
 			return rule, true
@@ -92,16 +112,28 @@ func (d *covDB) matchQuery(query string) (covQueryRule, bool) {
 	return covQueryRule{}, false
 }
 
-func (d *covDB) matchExec(query string) (covExecRule, bool) {
+func (d *covDB) matchExec(query string, args []driver.NamedValue) (covExecRule, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.seen = append(d.seen, query)
+	d.recordLocked(query, args)
 	for _, rule := range d.execs {
 		if strings.Contains(query, rule.substr) {
 			return rule, true
 		}
 	}
 	return covExecRule{}, false
+}
+
+// argsFor 回第一條「SQL 含 substr」的呼叫參數（依原順序）。找不到回 nil。
+func (d *covDB) argsFor(substr string) []driverValue {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, call := range d.calls {
+		if strings.Contains(call.query, substr) {
+			return call.args
+		}
+	}
+	return nil
 }
 
 func (d *covDB) sawQuery(substr string) bool {
@@ -141,8 +173,8 @@ func (c *covConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) 
 }
 func (c *covConn) Ping(context.Context) error { return nil }
 
-func (c *covConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	rule, ok := c.db.matchQuery(query)
+func (c *covConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	rule, ok := c.db.matchQuery(query, args)
 	if !ok {
 		// 沒有登記 → 空結果集。對 QueryRow 而言就是 sql.ErrNoRows，對 Query
 		// 而言就是「這個清單是空的」，兩者都是 handler 必須處理的正常情況。
@@ -154,8 +186,8 @@ func (c *covConn) QueryContext(_ context.Context, query string, _ []driver.Named
 	return &covRows{cols: rule.cols, rows: rule.rows}, nil
 }
 
-func (c *covConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	rule, ok := c.db.matchExec(query)
+func (c *covConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	rule, ok := c.db.matchExec(query, args)
 	if ok && rule.err != nil {
 		return nil, rule.err
 	}
@@ -289,6 +321,18 @@ func (h *covHarness) execError(substr string, err error) {
 }
 
 func (h *covHarness) sawQuery(substr string) bool { return h.db.sawQuery(substr) }
+
+// argsFor 回第一條「SQL 含 substr」的執行參數。寫在參數裡的東西（例如個人
+// 資料兩把識別碼欄位的值）不會出現在 SQL 文字裡，因此要用這一支來釘。
+func (h *covHarness) argsFor(substr string) []driverValue { return h.db.argsFor(substr) }
+
+// queriesSeen 依順序回所有執行過的 SQL 文字（不含參數）。用來釘「SQL 裡不應
+// 出現的東西」：秘密、email 等都不該出現在會進 general log 與日誌的文字裡。
+func (h *covHarness) queriesSeen() []string {
+	h.db.mu.Lock()
+	defer h.db.mu.Unlock()
+	return append([]string(nil), h.db.seen...)
+}
 
 // login 建立一個真的 session（miniredis），回傳可直接加進請求的 cookie。
 func (h *covHarness) login(email string, admin bool) *http.Cookie {

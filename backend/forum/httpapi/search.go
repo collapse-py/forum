@@ -496,13 +496,15 @@ func (s *Server) loadForumPostsByIDs(r *http.Request, ids []int64) ([]forumPost,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// 補作者顯示名、雜湊 key 與標籤。這三項都需要 per-row 查詢
+	// 補作者顯示名、公開識別碼與標籤。這三項都需要 per-row 查詢
 	// （最壞情況 25 篇 = 75 次往返），與 listForumPosts 承擔的 N+1 相同；
-	// 單頁筆數有 pageSizeMax 封頂，因此代價可控。
+	// 單頁筆數有 pageSizeMax 封頂，因此代價可控。識別碼走 forumAuthorKey：
+	// 搜尋結果與貼文卡必須用同一種 key，否則前端從搜尋結果連出去的個人頁
+	// 會在設了秘密的部署上查不到人（見 DeriveAuthorKey）。
 	for index := range ordered {
 		authorEmail := ordered[index].Author
 		ordered[index].Author = s.forumAuthor(r, authorEmail)
-		ordered[index].AuthorKey = publicForumKey(authorEmail)
+		ordered[index].AuthorKey = s.forumAuthorKey(authorEmail)
 		tags, err := s.forumAuthorTags(r.Context(), authorEmail)
 		if err != nil {
 			return nil, err

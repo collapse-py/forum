@@ -43,6 +43,11 @@ type covDataQueryRule struct {
 	cols   []string
 	rows   [][]covDataValue
 	err    error
+	// consume 為 true 時命中一次後清空列：讓同一條 SELECT 在下一輪回空，
+	// 用來測分批迴圈而不會變成無限迴圈。
+	consume bool
+	// iterErr 是列讀完後 Next 回的回覆錯誤（不是 io.EOF），讓 rows.Err() 有錯誤可觀察。
+	iterErr error
 }
 
 type covDataExecRule struct {
@@ -51,10 +56,11 @@ type covDataExecRule struct {
 }
 
 type covDataSource struct {
-	mu      sync.Mutex
-	queries []covDataQueryRule
-	execs   []covDataExecRule
-	seen    []string
+	mu       sync.Mutex
+	queries  []covDataQueryRule
+	execs    []covDataExecRule
+	prepares []covDataExecRule
+	seen     []string
 }
 
 func (s *covDataSource) addQuery(rule covDataQueryRule) {
@@ -67,6 +73,14 @@ func (s *covDataSource) addExec(rule covDataExecRule) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.execs = append(s.execs, rule)
+}
+
+// addPrepare 讓「準備這條語句」本身失敗（例如欄位不存在）。只有走預備語句的
+// 路徑（db.PrepareContext）會命中；conn 的 ExecContext 快路不受影響。
+func (s *covDataSource) addPrepare(rule covDataExecRule) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prepares = append(s.prepares, rule)
 }
 
 func (s *covDataSource) queryCount() int {
@@ -116,27 +130,48 @@ func (covDataDriver) Open(name string) (driver.Conn, error) {
 
 type covDataConn struct{ src *covDataSource }
 
-func (c *covDataConn) Prepare(string) (driver.Stmt, error) { return covDataStmt{}, nil }
-func (c *covDataConn) Close() error                        { return nil }
-func (c *covDataConn) Begin() (driver.Tx, error)           { return covDataTx{}, nil }
+func (c *covDataConn) Prepare(query string) (driver.Stmt, error) {
+	c.src.mu.Lock()
+	defer c.src.mu.Unlock()
+	for _, rule := range c.src.prepares {
+		if strings.Contains(query, rule.substr) {
+			return nil, rule.err
+		}
+	}
+	return &covDataStmt{src: c.src, query: query}, nil
+}
+func (c *covDataConn) Close() error              { return nil }
+func (c *covDataConn) Begin() (driver.Tx, error) { return covDataTx{}, nil }
 func (c *covDataConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
 	return covDataTx{}, nil
 }
 func (c *covDataConn) Ping(context.Context) error { return nil }
 
+// pickQueryLocked 依登記順序找出第一條命中的 query 規則；呼叫端必須已持鎖。
+// consume 的規則在回列後清空自己的列，因此同一條 SQL 下一輪拿到空結果。
+func (s *covDataSource) pickQueryLocked(query string) (driver.Rows, error) {
+	for i := range s.queries {
+		rule := &s.queries[i]
+		if !strings.Contains(query, rule.substr) {
+			continue
+		}
+		if rule.err != nil {
+			return nil, rule.err
+		}
+		rows := &covDataRows{cols: rule.cols, rows: rule.rows, iterErr: rule.iterErr}
+		if rule.consume {
+			rule.rows = nil
+		}
+		return rows, nil
+	}
+	return &covDataRows{}, nil
+}
+
 func (c *covDataConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.src.mu.Lock()
 	defer c.src.mu.Unlock()
 	c.src.seen = append(c.src.seen, query)
-	for _, rule := range c.src.queries {
-		if strings.Contains(query, rule.substr) {
-			if rule.err != nil {
-				return nil, rule.err
-			}
-			return &covDataRows{cols: rule.cols, rows: rule.rows}, nil
-		}
-	}
-	return &covDataRows{}, nil
+	return c.src.pickQueryLocked(query)
 }
 
 func (c *covDataConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
@@ -159,12 +194,36 @@ type covDataTx struct{}
 func (covDataTx) Commit() error   { return nil }
 func (covDataTx) Rollback() error { return nil }
 
-type covDataStmt struct{}
+type covDataStmt struct {
+	src   *covDataSource
+	query string
+}
 
-func (covDataStmt) Close() error                               { return nil }
-func (covDataStmt) NumInput() int                              { return -1 }
-func (covDataStmt) Exec([]covDataValue) (driver.Result, error) { return covDataResult{}, nil }
-func (covDataStmt) Query([]covDataValue) (driver.Rows, error)  { return &covDataRows{}, nil }
+func (s *covDataStmt) Close() error  { return nil }
+func (s *covDataStmt) NumInput() int { return -1 }
+
+// Exec 記錄預備語句的 SQL，並套用 exec 規則：與 conn 的 ExecContext 快路一致。
+func (s *covDataStmt) Exec([]covDataValue) (driver.Result, error) {
+	s.src.mu.Lock()
+	defer s.src.mu.Unlock()
+	s.src.seen = append(s.src.seen, s.query)
+	for _, rule := range s.src.execs {
+		if strings.Contains(s.query, rule.substr) {
+			if rule.err != nil {
+				return nil, rule.err
+			}
+			break
+		}
+	}
+	return covDataResult{}, nil
+}
+
+func (s *covDataStmt) Query([]covDataValue) (driver.Rows, error) {
+	s.src.mu.Lock()
+	defer s.src.mu.Unlock()
+	s.src.seen = append(s.src.seen, s.query)
+	return s.src.pickQueryLocked(s.query)
+}
 
 type covDataResult struct{}
 
@@ -172,15 +231,19 @@ func (covDataResult) LastInsertId() (int64, error) { return 1, nil }
 func (covDataResult) RowsAffected() (int64, error) { return 1, nil }
 
 type covDataRows struct {
-	cols []string
-	rows [][]covDataValue
-	next int
+	cols    []string
+	rows    [][]covDataValue
+	next    int
+	iterErr error
 }
 
 func (r *covDataRows) Columns() []string { return r.cols }
 func (r *covDataRows) Close() error      { return nil }
 func (r *covDataRows) Next(dest []covDataValue) error {
 	if r.next >= len(r.rows) {
+		if r.iterErr != nil {
+			return r.iterErr
+		}
 		return io.EOF
 	}
 	copy(dest, r.rows[r.next])
@@ -463,14 +526,24 @@ func TestCovMigrateMySQLRunsAllSteps(t *testing.T) {
 		"ADD INDEX idx_forum_posts_deleted_at_id",
 		"ADD INDEX idx_forum_reports_target",
 		"CREATE TABLE IF NOT EXISTS forum_media_deletions",
+		// 第 39 步：公開識別碼的 HMAC 欄位與它的索引（值由應用層回填，不在 SQL 裡算）。
+		"ADD COLUMN public_key_hmac",
+		"ADD INDEX idx_forum_profiles_public_key_hmac",
 	} {
 		if !src.saw(want) {
 			t.Errorf("遷移路線沒有執行到 %q", want)
 		}
 	}
 
-	if got := src.countSeen("ADD INDEX idx_forum_profiles_public_key"); got != 1 {
+	// 兩把識別碼各有一條索引，且都只被建立一次（探測到「已存在」時不重複 ALTER）。
+	// 計數用「含括號與欄名」的完整片段而不是只比索引名前綴：
+	// idx_forum_profiles_public_key_hmac 包含 idx_forum_profiles_public_key，
+	// 只比前綴會讓一條變成兩條。
+	if got := src.countSeen("ADD INDEX idx_forum_profiles_public_key (public_key)"); got != 1 {
 		t.Errorf("addIndexIfNotExists 的 ALTER 次數 = %d, want 1", got)
+	}
+	if got := src.countSeen("ADD INDEX idx_forum_profiles_public_key_hmac (public_key_hmac)"); got != 1 {
+		t.Errorf("public_key_hmac 的 ALTER 次數 = %d, want 1", got)
 	}
 }
 

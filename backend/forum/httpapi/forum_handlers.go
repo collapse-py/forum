@@ -62,8 +62,9 @@ Origin 檢查在 csrf.go。
     註冊新路由時漏掉中介層就意外開放寫入。
  2. 縱深防禦不取代 Origin 檢查：所有會改動資料的分支都另外呼叫 isTrustedOrigin，
     因為中介層的判斷依據是 session cookie，而 cookie 會隨跨站表單 POST 一起送出。
- 3. 個資不外洩：email 永不出現在回應中，對外一律以 publicForumKey（email 的
-    SHA-256 十六進位）代表身分，顯示名稱則取暱稱或隨機匿名代號。
+ 3. 個資不外洩：email 永不出現在回應中，對外一律以 forumAuthorKey（部署秘密的
+    HMAC；未設定秘密時為 email 的 SHA-256 十六進位，見 DeriveAuthorKey）代表身分，
+    顯示名稱則取暱稱或隨機匿名代號。
  4. 圖片不落地論壇服務：檔案交給獨立的檔案伺服器，論壇只保存它的檔名；
     完整網址在回應時才以 FILES_SERVER_PUBLIC_URL 組出，資料庫不存環境相關資訊。
     讀取圖片需要短效 token，token 存在 Redis，由本服務簽發、也由本服務刪除。
@@ -101,6 +102,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -127,15 +129,15 @@ import (
 
 // forumPost 是文章列表與建立文章回應共用的傳輸物件。
 //
-// 隱私設計：Author 是「顯示名稱」而非 email，AuthorKey 是 email 的雜湊值，
-// 前端以 AuthorKey 當 React/Vue 的 key，並以它呼叫 /api/forum/public-profile，
-// 這樣公開 API 全程不需要也不會洩漏 email。
+// 隱私設計：Author 是「顯示名稱」而非 email，AuthorKey 是 email 派生的公開識別碼
+// （forumAuthorKey，見 DeriveAuthorKey），前端以 AuthorKey 當 React/Vue 的 key，
+// 並以它呼叫 /api/forum/public-profile，這樣公開 API 全程不需要也不會洩漏 email。
 //
 // 欄位說明（註解刻意置於型別之外，避免打斷欄位原本的欄位對齊排版）：
 //
 //	ID           對應 forum_posts.id，由應用層的雪花演算法產生。
 //	Author       顯示名稱：優先取 forum_profiles.nickname，取不到則為隨機匿名代號。
-//	AuthorKey    publicForumKey(email) 的結果，長度固定 64 個十六進位字元。
+//	AuthorKey    forumAuthorKey(email) 的結果，長度固定 64 個十六進位字元。
 //	AuthorTags   管理員指派的標籤；未指派時為空切片，因 omitempty 而省略欄位。
 //	Content      貼文本文，伺服器端已 TrimSpace 且限制在 10000 個 rune 以內。
 //	CreatedAt    直接對應 forum_posts.created_at，時區格式化交給前端。
@@ -181,7 +183,7 @@ type forumPost struct {
 //
 //	ID        對應 forum_post_comments.id。
 //	Author    顯示名稱，語意與 forumPost.Author 相同。
-//	AuthorKey email 的雜湊值，供前端作為穩定識別碼。
+//	AuthorKey email 派生的公開識別碼（forumAuthorKey），供前端作為穩定識別碼。
 //	AuthorAvatar 作者的頭像網址；語意與 forumPost.AuthorAvatar 相同（無頭像時省略）。
 //	Content   留言本文，已 TrimSpace 且限制在 2000 個 rune 以內。
 //	CreatedAt 對應 forum_post_comments.created_at；列表以它遞增排序。
@@ -557,7 +559,7 @@ func (s *Server) loadForumPosts(r *http.Request, condition string, conditionArgs
 		// 雜湊與標籤，而 Author 欄位對外只能放顯示名稱。
 		authorEmail := post.Author
 		post.Author = s.forumAuthor(r, authorEmail)
-		post.AuthorKey = publicForumKey(authorEmail)
+		post.AuthorKey = s.forumAuthorKey(authorEmail)
 		post.AuthorTags, err = s.forumAuthorTags(ctx, authorEmail)
 		if err != nil {
 			// 標籤是裝飾性資訊，但此處選擇讓整個請求失敗而非安靜地省略，
@@ -1318,7 +1320,7 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 			// 每筆留言各查一次暱稱，屬 N+1，但單次請求上限 12 筆故最壞情況可控。
 			authorEmail := comment.Author
 			comment.Author = s.forumAuthor(r, authorEmail)
-			comment.AuthorKey = publicForumKey(authorEmail)
+			comment.AuthorKey = s.forumAuthorKey(authorEmail)
 			// 頭像走的是與貼文附圖同一個函式與同一把 token：呼叫端因此不必分辨
 			// 「這張圖是頭像還是附圖」，釋放時也只需交出那一把 token。
 			avatarName := s.forumImageFileName(comment.AuthorAvatar)
@@ -1483,7 +1485,7 @@ func (s *Server) handleForumComments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"ok": true,
 		"item": forumComment{
-			ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author),
+			ID: id, Author: s.forumAuthor(r, author), AuthorKey: s.forumAuthorKey(author),
 			AuthorAvatar: authorAvatarURL,
 			Content:      req.Content, CreatedAt: createdAt,
 			ParentID:     req.ParentID, Depth: depth,
@@ -2345,7 +2347,8 @@ func (s *Server) handleForumPublicProfile(w http.ResponseWriter, r *http.Request
 	}
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	// 長度檢查只為擋掉明顯無效的輸入；真正的比對靠 SQL 的等值條件，
-	// 而 public_key 有索引（MigrateMySQL 第 20 步），不會因此變成全表掃描。
+	// 而兩把識別碼的欄位都有索引（public_key 是 MigrateMySQL 第 20 步、
+	// public_key_hmac 是第 39 步），不會因此變成全表掃描。
 	if len(key) != 64 {
 		badRequest(w, "invalid profile key")
 		return
@@ -2355,10 +2358,16 @@ func (s *Server) handleForumPublicProfile(w http.ResponseWriter, r *http.Request
 	me := s.sessions.ResolveUser(r)
 
 	var email, nickname, bio, avatar string
-	// 依 public_key 而非 author_email 查詢。public_key 的值由 MigrateMySQL
-	// 以 SHA2(author_email, 256) 回填，與 publicForumKey 的算法一致，兩邊必須對齊。
+	// 依兩把公開識別碼查詢，而不是 author_email：
+	//   public_key_hmac  ── 目前形態（HMAC，MigrateMySQL 第 39 步加的欄位）
+	//   public_key       ── 舊形態（SHA-256，第 16 步以 SHA2(author_email, 256) 回填，
+	//                        與 publicForumKey 的演算法一致，兩邊必須對齊）
+	// 兩個條件都留著是因為舊連結（書籤、外部貼文）用的還是舊值；只查新欄位會讓
+	// 那些連結變成「使用者存在但頁面查不到」。MySQL 對兩個索引欄位的 OR 走 index
+	// merge，不會退化成全表掃描。
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key = ?`, key).Scan(&email, &nickname, &bio, &avatar)
+		`SELECT author_email, nickname, bio, avatar_url FROM forum_profiles WHERE public_key_hmac = ? OR public_key = ? LIMIT 1`,
+		key, key).Scan(&email, &nickname, &bio, &avatar)
 	if err == sql.ErrNoRows {
 		// 找不到時回 200 加預設值而非 404：前端（/forum/others-profile）
 		// 因此不必處理錯誤分支，也不會因為狀態碼差異而洩漏
@@ -2528,12 +2537,17 @@ func (s *Server) handleForumProfile(w http.ResponseWriter, r *http.Request) {
 		// 以單一 upsert 語句同時處理「首次建立」與「更新」，省掉一次
 		// 先 SELECT 判斷再分支寫入的往返。author_email 是主鍵，故
 		// ON DUPLICATE KEY 只會在「自己的資料已存在」時觸發。
-		// 順帶每次都寫入 publicForumKey，讓早期在該欄位存在前建立的資料
-		// 自動補齊公開識別碼。
+		//
+		// 順帶每次都寫入兩把公開識別碼（舊的 SHA-256 與目前的 HMAC），讓早期在
+		// 該欄位存在前建立的資料自動補齊。兩個欄位都在 UPDATE 裡出現，是因為
+		// 部署可能中途才加上 AUTHOR_KEY_SECRET：只寫 INSERT 的話，既有資料列的
+		// HMAC 欄位會永遠空著，公開個人頁就查不到那個人（見 data.BackfillProfileAuthorKeys
+		// —— 它在啟動時回填一次，這裡則是在使用者存資料時自動補上）。
 		_, err := s.db.ExecContext(r.Context(), `
-			INSERT INTO forum_profiles (author_email, public_key, nickname, bio, avatar_url, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), bio = VALUES(bio), avatar_url = VALUES(avatar_url), updated_at = VALUES(updated_at)`,
-			email, publicForumKey(email), req.Nickname, req.Bio, avatarName, time.Now())
+			INSERT INTO forum_profiles (author_email, public_key, public_key_hmac, nickname, bio, avatar_url, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), bio = VALUES(bio), avatar_url = VALUES(avatar_url),
+				public_key = VALUES(public_key), public_key_hmac = VALUES(public_key_hmac), updated_at = VALUES(updated_at)`,
+			email, publicForumKey(email), s.forumAuthorKey(email), req.Nickname, req.Bio, avatarName, time.Now())
 		if err != nil {
 			// 用 errors.As 而非型別斷言：driver 回傳的錯誤未來若被包裝
 			// （例如加上連線重試或額外註解），errors.As 仍能穿透包裝找出
@@ -2653,7 +2667,8 @@ func (s *Server) forumAuthor(r *http.Request, email string) string {
 	return publicForumAuthor(email)
 }
 
-// publicForumKey 以 email 的 SHA-256 雜湊作為公開識別碼。
+// publicForumKey 以 email 的 SHA-256 雜湊作為公開識別碼 —— 這是「沒有部署秘密」
+// 時的形態，也是資料庫 forum_profiles.public_key 欄位裡存的舊值。
 //
 // 為什麼要雜湊：公開 API 必須能把「同一個人」穩定地辨識出來（給前端當 key、
 // 供 /api/forum/public-profile 查詢），但不能直接回傳 email——
@@ -2662,11 +2677,41 @@ func (s *Server) forumAuthor(r *http.Request, email string) string {
 //
 // 誠實的界限：雜湊是確定性的，而 email 的取值空間很小，攻擊者仍可枚舉
 // 常見信箱與雜湊比對還原。它的作用是「不直接外洩原始位址」，
-// 不是讓這個身分無法被推知；真正的保護不應依賴它。
+// 不是讓這個身分無法被推知。真正讓它無法被反推的是 DeriveAuthorKey 的
+// HMAC 秘密 —— 本函式只保留舊形態與舊連結的解析。
 func publicForumKey(email string) string {
 	hash := sha256.Sum256([]byte(email))
 	// %x 產生 64 個小寫十六進位字元，長度與 handleForumPublicProfile 的檢查一致。
 	return fmt.Sprintf("%x", hash[:])
+}
+
+// DeriveAuthorKey 是「對外看到的作者識別碼」唯一的產生點。
+//
+// 兩種形態：
+//
+//	有秘密：HMAC-SHA256(secret, email) 的小寫十六進位。反推需要那把秘密，
+//	因此持有候選信箱的人無法離線比對還原身分（這是 F-03 的修法）。
+//	無秘密：publicForumKey(email)，也就是舊形態。留空是合法的（開發環境
+//	與尚未導入秘密的部署），代價是仍可離線枚舉，`-check` 會提出警告。
+//
+// 兩種形態都是 64 個小寫十六進位字元，前端與長度檢查不需要分辨它們。
+// email 以原始位元組計算，不做正規化：同一個信箱在資料庫裡就是同一個字串，
+// 正規化只會讓「應用層算出的 key」與「資料庫回填的值」出現兩種可能。
+func DeriveAuthorKey(secret, email string) string {
+	if secret == "" {
+		return publicForumKey(email)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(email))
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
+// forumAuthorKey 用本站目前的秘密派生作者識別碼。呼叫端一律走這一支，
+// 而不是直接呼叫 DeriveAuthorKey 或 publicForumKey —— 這樣「用的是哪種形態」
+// 只取決於 s.cfg.AuthorKeySecret 一個來源，不會出現「貼文用 HMAC、
+// 追蹤清單用 SHA」這種兩個端點漂移的情況。
+func (s *Server) forumAuthorKey(email string) string {
+	return DeriveAuthorKey(s.cfg.AuthorKeySecret, email)
 }
 
 // createForumPost 建立一篇文章，並直接回傳組好的物件供前端插入列表。
@@ -2808,7 +2853,7 @@ func (s *Server) createForumPost(w http.ResponseWriter, r *http.Request) {
 	// time.Now()：兩者可能相差不到一秒，而列表與首頁插入的項目必須顯示同一個時間。
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"ok":           true,
-		"item":         forumPost{ID: id, Author: s.forumAuthor(r, author), AuthorKey: publicForumKey(author), AuthorTags: authorTags, AuthorAvatar: authorAvatarURL, Content: req.Content, ImageURL: func() string {
+		"item":         forumPost{ID: id, Author: s.forumAuthor(r, author), AuthorKey: s.forumAuthorKey(author), AuthorTags: authorTags, AuthorAvatar: authorAvatarURL, Content: req.Content, ImageURL: func() string {
 			if len(imageNames) == 0 {
 				return ""
 			}

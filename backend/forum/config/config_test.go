@@ -1009,3 +1009,46 @@ func TestValidateIgnoresESAuthWithoutURL(t *testing.T) {
 		t.Errorf("Validate() = %v, want nil（沒有 ES_URL 時憑證只是沒被使用）", err)
 	}
 }
+
+// TestLoadAuthorKeySecret 釘住 AUTHOR_KEY_SECRET 的解析。
+//
+// 這個欄位是「公開作者識別碼能不能被離線反推」的唯一開關（見 httpapi.DeriveAuthorKey），
+// 因此兩條方向都要有測試：
+//   - 有值必須原樣保留：轉小寫、去空白、截斷都會讓算出的 key 與資料庫回填的值不一致，
+//     症狀是「所有人都查不到自己的公開頁」而不是任何錯誤訊息。
+//   - 留空是合法值：那是舊的 SHA-256 形態。 Validate 不能把它報成錯誤，否則本機開發
+//     與尚未導入秘密的部署會無法啟動（提示只在 -check 的警告列）。
+func TestLoadAuthorKeySecret(t *testing.T) {
+	t.Run("有值時逐字保留", func(t *testing.T) {
+		cfg := loadString(t, "AUTHOR_KEY_SECRET=AbC123\n")
+		if cfg.AuthorKeySecret != "AbC123" {
+			t.Errorf("AuthorKeySecret = %q, want \"AbC123\"", cfg.AuthorKeySecret)
+		}
+	})
+
+	t.Run("前後空白去除（值兩側的空白不是秘密的一部分）", func(t *testing.T) {
+		cfg := loadString(t, "  AUTHOR_KEY_SECRET =   s3cr3t   \n")
+		if cfg.AuthorKeySecret != "s3cr3t" {
+			t.Errorf("AuthorKeySecret = %q, want \"s3cr3t\"", cfg.AuthorKeySecret)
+		}
+	})
+
+	t.Run("留空合法，Validate 不拒絕", func(t *testing.T) {
+		cfg := loadString(t, "AUTHOR_KEY_SECRET=\n")
+		if cfg.AuthorKeySecret != "" {
+			t.Errorf("AuthorKeySecret = %q, want \"\"", cfg.AuthorKeySecret)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() = %v, want nil（未設定是舊形態，不是部署錯誤）", err)
+		}
+	})
+
+	t.Run("後備環境變數不生效", func(t *testing.T) {
+		// 與多數憑證同一個契約：只從設定檔取值（見 FilesServerToken 的欄位說明）。
+		t.Setenv("AUTHOR_KEY_SECRET", "from-env")
+		cfg := loadString(t, "COOKIE_NAME=x\n")
+		if cfg.AuthorKeySecret != "" {
+			t.Errorf("AuthorKeySecret = %q, want \"\"（環境變數不該被讀取）", cfg.AuthorKeySecret)
+		}
+	})
+}

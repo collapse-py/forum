@@ -150,6 +150,11 @@ import (
 // 在 session 內標記為管理員，不需資料庫中的角色資料；因此新增一項等同授予後臺權限，
 // 屬高風險操作。逗號兩側的空白會去除，整串轉小寫，比對時傳入值也做同樣正規化
 // （見 IsAdminEmail）—— 否則帶空白或大寫的白名單會靜默失效。
+// AuthorKeySecret 是公開作者識別碼的 HMAC 秘密（見下方欄位說明與 httpapi.DeriveAuthorKey）。
+// 留空是合法的：那等於維持舊的 SHA-256(email) 形態，本專案的開發環境與既有部署就是這樣。
+// 但正式環境留空等於作者身分仍可被持有候選信箱的人離線還原，因此 `-check` 會提出警告。
+// 換掉這把秘密等於換掉所有人的公開識別碼：舊的個人頁連結與前端追蹤清單中的 key
+// 都會失效（資料庫裡同時保留舊 SHA-256 值，因此舊連結仍可解析，見 httpapi 的說明）。
 // LogLevel 是日誌門檻，門檻低於此值的訊息完全不輸出；無法辨識的值由 logger 退回
 // INFO。範例設定檔的正式環境使用 WARN，可減少磁碟寫入但也會失去錯誤前的診斷線索。
 // LogFile 是日誌輸出檔案路徑，以附加（O_APPEND）模式開啟，檔案不存在時會被建立，
@@ -243,6 +248,14 @@ type Config struct {
 	GoogleClientSecret    string   // GOOGLE_CLIENT_SECRET
 	GoogleRedirectURL     string   // GOOGLE_REDIRECT_URL（須與 Google Console 登記值逐字相符）
 	AllowedAdminEmail     []string // ALLOWED_ADMIN_EMAIL（逗號分隔，載入時已 TrimSpace + ToLower）
+	// AuthorKeySecret 是公開作者識別碼的 HMAC 秘密（AUTHOR_KEY_SECRET）。
+	// 有值時對外識別碼是 HMAC-SHA256(secret, email)；留空時退回未加鹽的
+	// SHA-256(email)，也就是本專案舊有的形態。這個欄位存在的原因是：
+	// SHA-256(email) 是確定性的，任何持有候選信箱的人都能離線比對還原作者
+	// （見 httpapi.DeriveAuthorKey 的說明），而 HMAC 的反推需要這把秘密。
+	// 它屬高敏感憑證：洩漏等於把「公開識別碼 ↔ 信箱」的對應表交出去，
+	// 與 GOOGLE_CLIENT_SECRET 同樣以明文載入、不寫日誌、不進版控。
+	AuthorKeySecret       string   // AUTHOR_KEY_SECRET（留空＝沿用 SHA-256 形態）
 	ESURL                 string   // ES_URL（留空＝不啟用 Elasticsearch，搜尋退回 MySQL LIKE）
 	ESIndex               string   // ES_INDEX（預設 forum_posts）
 	ESUsername            string   // ES_USERNAME（ES 的 Basic Auth 帳號，留空＝不驗證）
@@ -467,6 +480,11 @@ func Load(path string) (Config, error) {
 			// 逗號分隔的白名單；parseList 去除每項前後空白，normalizeEmails 再
 			// 轉小寫 —— 兩者缺一不可，理由見 normalizeEmails 的說明。
 			cfg.AllowedAdminEmail = normalizeEmails(parseList(val))
+		case "AUTHOR_KEY_SECRET":
+			// 敏感值：以明文載入、不做加密，也不會被寫進任何日誌（見 GOOGLE_CLIENT_SECRET
+			// 的同樣處理）。空字串是合法值，代表「仍用未加鹽的 SHA-256」；
+			// 不在此處兜底產生隨機秘密，因為那樣每次重啟都會換掉所有人的公開識別碼。
+			cfg.AuthorKeySecret = val
 		case "ES_URL":
 			// 去掉尾斜線：es 套件會以 baseURL + "/{index}" 組出路徑，
 			// 留著尾斜線會變成 "//forum_posts"（ES 容忍但 log 很難看）。

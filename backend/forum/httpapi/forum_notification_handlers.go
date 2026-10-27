@@ -24,8 +24,13 @@
 三、身分一律是 email，對外一律是 publicKey
 
 	與追蹤功能同一個設計（見 forum_follow_handlers.go 的檔頭）：資料表以 email
-	當關聯鍵（可以走索引），而任何對外的 JSON 都只出現 publicForumKey(email)。
+	當關聯鍵（可以走索引），而任何對外的 JSON 都只出現 forumAuthorKey(email)。
 	actor_email 從不出現在回應裡，回應帶的是 actor（顯示名稱）與 actorKey。
+
+	actorKey 也走 forumAuthorKey 而不是舊的 SHA-256：通知是私密的，但它帶的是
+	「別人的」識別碼，而且前端用它連到那個人的公開個人頁。兩件事都要求它與
+	貼文卡上的 key 同一種形態 —— 否則設了秘密的部署上，個人頁連結會查不到人，
+	而舊形態仍是可離線枚舉還原的 SHA-256（見 DeriveAuthorKey）。
 
 四、三個端點都掛 requireLogin
 
@@ -71,7 +76,7 @@ const (
 //	Kind        comment / reply / follow，見上面的常數。
 //	Actor       觸發者的顯示名稱（暱稱，沒有則為匿名代號）。與貼文卡上的
 //	            作者名稱走同一個函式，因此同一個人在兩處顯示一致。
-//	ActorKey    觸發者的 publicForumKey，供前端連結到他的公開個人頁。
+//	ActorKey    觸發者的 forumAuthorKey，供前端連結到他的公開個人頁。
 //	ActorAvatar 觸發者頭像網址（已附加 token）；沒有頭像時省略。
 //	PostID      相關貼文編號（kind=follow 時為 0，omitempty 因此省略）。
 //	CommentID   相關留言編號：comment／reply 都是「這一則新留言」，follow 為 0
@@ -134,7 +139,7 @@ func (s *Server) forumNotificationItemFromRow(row forumNotificationRow, mediaTok
 		ID:          row.ID,
 		Kind:        row.Kind,
 		Actor:       actor,
-		ActorKey:    publicForumKey(row.ActorMail),
+		ActorKey:    s.forumAuthorKey(row.ActorMail),
 		ActorAvatar: s.forumImageURL(avatar, mediaToken),
 		PostID:      row.PostID,
 		CommentID:   row.CommentID,
