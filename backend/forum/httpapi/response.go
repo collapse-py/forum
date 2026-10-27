@@ -59,7 +59,7 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	// Cache-Control 固定為 no-store：這裡送出的每一份 JSON 都可能與請求者的
 	// 身分有關（貼文、留言、通知、後台資料），而中介層在 handler 之前就寫過
 	// 帶 token 的 Set-Cookie。沒有這一行，共享快取（CDN、反向代理）可能把
-	// 登入者的回應连同 cookie 一起儲存並送給下一個訪客；本站的 service worker
+	// 登入者的回應連同 cookie 一起儲存並送給下一個訪客；本站的 service worker
 	// 也會把這些 JSON 存進本地快取並在離線時重放（見 service-worker.ts）。
 	// no-store 同時表示「不得儲存」，因此那兩個行為都不會發生。
 	w.Header().Set("Cache-Control", "no-store")

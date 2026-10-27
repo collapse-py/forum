@@ -696,7 +696,7 @@ func (s *Server) handleAdminForumReport(w http.ResponseWriter, r *http.Request) 
 	// 沒有任何使用者輸入參與；相對地，所有「值」都必須以佔位符 ? 交給驅動程式做轉義，
 	// 因為值來自 HTTP body、完全可以被構造。若改用 fmt.Sprintf 把值塞進 SQL 字串，
 	// 等於直接開了 SQL 注入。
-	// 這是本檔案處理動態 SQL 的唯一准則：白名單決定「結構」，佔位符綁定「資料」。
+	// 這是本檔案處理動態 SQL 的唯一準則：白名單決定「結構」，佔位符綁定「資料」。
 	// 同一個原則也出現在 ensureForumReportTarget（表名來自 if/else 白名單，ID 走佔位符）。
 	query := `UPDATE forum_reports SET status = ?, reviewed_at = ?, reviewed_by = ?`
 	// reviewed_by 記錄的是當下操作的管理員（session 的 email 欄位），不是被檢舉對象、
@@ -948,7 +948,7 @@ ensureForumReportTarget 確認檢舉目標（文章或留言）真的存在。
 
 安全性：表名以字串拼接是安全的，因為 table 只可能是本函式內的兩個字面值，
 無論外部輸入為何都不會影響它；targetID 則一律以佔位符傳入，不進入 SQL 文字。
-這個「白名單決定結構、佔位符綁定資料」的分工是本檔案處理動態 SQL 的唯一准則。
+這個「白名單決定結構、佔位符綁定資料」的分工是本檔案處理動態 SQL 的唯一準則。
 */
 func (s *Server) ensureForumReportTarget(ctx context.Context, targetType string, targetID int64) error {
 	// 預設視為 post。呼叫端都會先跑過 validateAdminForumReport（擋掉 post/comment 以外的值），

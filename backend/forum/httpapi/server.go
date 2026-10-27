@@ -28,7 +28,6 @@ package httpapi
 import (
 	"context"
 	"database/sql"
-	"forum/forum/auth"
 	"forum/forum/config"
 	"forum/forum/es"
 	"forum/forum/ipban"
@@ -433,7 +432,7 @@ func (s *Server) requireLogin(next http.HandlerFunc) http.HandlerFunc {
 		if email == "" {
 			// 帶上 RequestURI（path + query）而非只有 path，使用者回到原頁時
 			// 篩選條件等狀態才不會遺失；QueryEscape 避免目標網址本身的參數
-			// 污染登入頁網址。return 值在 auth.HandleLogin 會再經
+			// 污染登入頁網址。return 值在 httpapi.handleGoogleLogin 會再經
 			// isSafeReturnPath 驗證，非站內路徑會被丟棄。
 			location := "/forum/login?return=" + url.QueryEscape(r.RequestURI)
 			w.Header().Set("Location", location)
@@ -623,7 +622,7 @@ func (s *Server) Handler() http.Handler {
 
 		基礎設施（不需認證）
 		  /healthz                        handleHealth
-		  /auth/google                    rateLimitAllMethods(auth) → auth.HandleLogin（307 轉 Google）
+		  /auth/google                    rateLimitAllMethods(auth) → handleGoogleLogin（307 轉 Google，見 oauth_login.go）
 		  /auth/callback                  rateLimitAllMethods(auth) → handleGoogleCallback
 		  /api/logout                     requireTrustedOrigin → handleLogout（僅接受 POST）
 		  /api/check                      handleCheck
@@ -697,7 +696,7 @@ func (s *Server) Handler() http.Handler {
 	// 的端點，是轟炸 Google 端點與消耗自身 quota 的合理目標。
 	// 刻意用 rateLimitAllMethods 而非 rateLimit：這兩條本身即為 GET 導向，
 	// 用會放行 GET 的版本會讓限流形同不存在（見該函式的說明）。
-	mux.HandleFunc("/auth/google", s.rateLimitAllMethods(s.authRateLimiter, auth.HandleLogin))
+	mux.HandleFunc("/auth/google", s.rateLimitAllMethods(s.authRateLimiter, s.handleGoogleLogin))
 	mux.HandleFunc("/auth/callback", s.rateLimitAllMethods(s.authRateLimiter, s.handleGoogleCallback))
 	// 登出是「改變伺服器端狀態」的動作，因此掛 requireTrustedOrigin 做
 	// 跨站請求偽造防護：即使攻擊者能讓 victim's 瀏覽器送出 POST，
@@ -716,7 +715,7 @@ func (s *Server) Handler() http.Handler {
 	// GET 掛 read 額度（見 rateLimitRead）：動態分頁是全站請求量最大的端點，
 	// 沒有額度時一個自動翻頁的 bug 就能把整份動態拉完而不會被 429 擋住。
 	// 兩層疊加的順序是「先讀取額度、再寫入額度」，因為 rateLimit 會放行 GET、
-	// rateLimitRead 會放行非 GET —— 反過來疊不會改變結果，但讀起來像兩層都在挡。
+	// rateLimitRead 會放行非 GET —— 反過來疊不會改變結果，但讀起來像兩層都在擋。
 	mux.HandleFunc("/api/forum/posts", s.requireLoginForWrite(
 		s.rateLimitRead(s.readRateLimiter, s.rateLimit(s.writeRateLimiter, s.handleForumPosts))))
 	// 圖片上傳與 token 釋放一律需登入：兩者都會動到 mediaRedis 的資源配額。

@@ -1929,7 +1929,7 @@ type forumCommentExecer interface {
 //
 // 為什麼這一條是必要的（而貼文早就能刪）：一則被人檢舉或回應得不舒服的留言，
 // 使用者原本完全無法自己移除 —— 只能等管理員。而貼文的同一個動作早就存在，
-// 兩者不一致本身就是一个會被使用者當成 bug 回報的落差。
+// 兩者不一致本身就是一個會被使用者當成 bug 回報的落差。
 //
 // 附帶的行為：留言消失後該貼文的 comment_count 會跟著少，但那是另一支查詢的
 // 衍生子查詢（forumPostProjection 裡的 COUNT），下一次讀取自然就正確了，
@@ -1961,7 +1961,7 @@ func (s *Server) handleForumCommentDelete(w http.ResponseWriter, r *http.Request
 	// 回覆留下，於是樹又出現孤兒。放進「那一則是誰的」JOIN 則只檢查被指定的那一列，
 	// 不是每一列。確認框（posts.deleteCommentMessage）說的就是這件事。
 	//
-	// 兩者都是 INNER JOIN：root 或母文章不符合條件時整个 JOIN 沒有列，RowsAffected
+	// 兩者都是 INNER JOIN：root 或母文章不符合條件時整個 JOIN 沒有列，RowsAffected
 	// 為 0，呼叫端因此回 404 —— 與舊的單列 DELETE 用 EXISTS 表達的是同一件事。
 	//
 	// RowsAffected 因此可能大於 1，而它正是回應給前端的 removed：畫面上要少幾則、
@@ -2181,7 +2181,7 @@ func forumReportTargetID(path, targetType string) (int64, error) {
 		value := strings.TrimSuffix(strings.TrimPrefix(path[start+len(marker):], "/"), "/report")
 		id, err := strconv.ParseInt(value, 10, 64)
 		// <= 0 一併拒絕：資料庫的 id 皆為正數（雪花演算法產生的值），0 與負值只可能
-		// 來自惡意或異常輸入，放行等於讓無意义的查詢打到 DB。
+		// 來自惡意或異常輸入，放行等於讓無意義的查詢打到 DB。
 		if err != nil || id <= 0 {
 			return 0, fmt.Errorf("invalid comment id")
 		}

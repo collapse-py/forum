@@ -24,6 +24,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1732,9 +1733,26 @@ func TestCovAdminUserAuthHandlers(t *testing.T) {
 		covWantStatus(t, recorder, http.StatusOK)
 	})
 
-	t.Run("callback without code", func(t *testing.T) {
+	// 空白的回呼（沒有 state、也沒有 code）：state 的驗證在換 token 之前，因此這一條
+	// 現在是 400 而不是 500 —— 「這不是本站發起的流程」是使用者的問題，不是伺服器故障。
+	t.Run("callback without state or code", func(t *testing.T) {
 		h := newCovHarness(t)
 		recorder := h.do(h.srv.handleGoogleCallback, http.MethodGet, "/auth/callback", "", "", false)
+		covWantStatus(t, recorder, http.StatusBadRequest)
+	})
+
+	// state 可信、但沒有 code：流程是真的（ nonce 還在 Redis 裡、綁定 cookie 相符），
+	// 失敗在「上游沒有回傳授權碼」那一側，因此仍然是 500（這一支函式把上游失敗當
+	// 伺服器端錯誤處理，並只回固定短句）。
+	t.Run("callback with valid state but no code", func(t *testing.T) {
+		h := newCovHarness(t)
+		withOAuthEndpoints(t, "http://127.0.0.1:1/token", "http://127.0.0.1:1/userinfo")
+		nonce, _, bound, _ := startLogin(t, h.srv, "/forum")
+
+		request := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+url.QueryEscape(nonce), nil)
+		request.AddCookie(bound)
+		recorder := httptest.NewRecorder()
+		h.srv.handleGoogleCallback(recorder, request)
 		covWantStatus(t, recorder, http.StatusInternalServerError)
 	})
 }

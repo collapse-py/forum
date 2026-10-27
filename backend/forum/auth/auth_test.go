@@ -1,24 +1,29 @@
 /*
-auth_test.go 覆蓋 OAuth 流程中「壞掉時不會有錯誤訊息」的三個地方。
+auth_test.go 覆蓋 OAuth 流程中「壞掉時不會有錯誤訊息」的幾個地方。
 
 【優先順序與理由】
 ROADMAP.md 把 auth 列為 0% 覆蓋的目標，而它最該先被測的不是「能不能登入」
 （那需要真的跟 Google 對話），而是**開放轉向**與**錯誤路徑**：
 
- 1. isSafeReturnPath：這是本套件唯一的防線（見 auth.go 的檔頭）。
+ 1. IsSafeReturnPath：開放轉向的防線（見 auth.go 的檔頭）。
     它壞掉時的症狀是：攻擊者送一個 /auth/google?return=https://evil.example
     的連結，使用者登入後被轉到他的站，並且**帶著一個已登入的 session**。
     那不是「跳錯頁」，那是一次完整的 session 竊取。它不會出現在任何日誌裡 ——
     因為從伺服器的角度，登入流程完全正常。
- 2. HandleLogin / ReturnPath：state 的編碼與解碼往返。任何一邊漏掉 URL
-    解碼或編碼，症狀都是「登入後跳回錯誤的頁面」或「登入後回首頁」，
-    而前者只在使用者的瀏覽器裡發生。
+ 2. AuthorizeURL：授權網址的形狀（client_id、redirect_uri、scope、state，以及
+    PKCE 的 challenge）。它們壞掉時的症狀是 Google 回 redirect_uri_mismatch、
+    「沒有這個 scope」，或「challenge 與 verifier 不相符」—— 三個都要人去
+    端點那側比對才會發現。verifier 出現在授權網址裡也是同一類：那正是 PKCE 要
+    擋的東西被送出去。
  3. GetUserEmail 的錯誤分支：這些是登入失敗時唯一能被觀察到的東西。
     它們的失效症狀是「登入失敗但沒有任何訊息」。
+ 4. state nonce 與回跳路徑的往返、綁定 cookie 的比對 —— 那些在 httpapi
+    （oauth_login.go 與回呼）那一側，測試也寫在那裡，因為這個套件本身不碰
+    Redis 也不碰 cookie。
 
 【測試 GetUserEmail 的做法與它的代價】
 GetUserEmail 原本把 userinfo 端點的主機名寫死，因此整支函式無法測試。本檔
-因此在 auth.go 加了一個 userInfoURL 變數作為注入點（理由寫在該處的說明）。
+因此在 auth.go 加了一個 UserInfoURL 變數作為注入點（理由寫在該處的說明）。
 有了它，這裡就能用 httptest 伺服器走完 token 交換與 userinfo 查詢，並驗證
 四件靠真實 Google 絕對測不到的事：
   - 上游回 4xx/5xx 時的錯誤分類（狀態碼進日誌、body 進不了 HTTP 回應）
@@ -53,24 +58,24 @@ func withOauthConfig(t *testing.T, cfg *oauth2.Config, infoURL string) {
 	t.Helper()
 
 	prevConfig := OauthConfig
-	prevURL := userInfoURL
+	prevURL := UserInfoURL
 	OauthConfig = cfg
-	userInfoURL = infoURL
+	UserInfoURL = infoURL
 	t.Cleanup(func() {
 		OauthConfig = prevConfig
-		userInfoURL = prevURL
+		UserInfoURL = prevURL
 	})
 }
 
 // withUninitializedOauth 把 OauthConfig 設成 nil。
 func withUninitializedOauth(t *testing.T) {
 	t.Helper()
-	withOauthConfig(t, nil, userInfoURL)
+	withOauthConfig(t, nil, UserInfoURL)
 }
 
 // TestIsSafeReturnPath 是這個檔最重要的一支測試。
 //
-// 它逐條涵蓋 isSafeReturnPath 註解裡列出的每一個拒絕條件，外加**編碼繞過**
+// 它逐條涵蓋 IsSafeReturnPath 註解裡列出的每一個拒絕條件，外加**編碼繞過**
 // 這一族 —— 那才是真實攻擊會用的形式。
 func TestIsSafeReturnPath(t *testing.T) {
 	safe := []struct {
@@ -89,33 +94,21 @@ func TestIsSafeReturnPath(t *testing.T) {
 	}
 	for _, tc := range safe {
 		t.Run("允許/"+tc.name, func(t *testing.T) {
-			if !isSafeReturnPath(tc.in) {
-				t.Errorf("isSafeReturnPath(%q) = false，want true（這是合法的站內路徑）", tc.in)
+			if !IsSafeReturnPath(tc.in) {
+				t.Errorf("IsSafeReturnPath(%q) = false，want true（這是合法的站內路徑）", tc.in)
 			}
 		})
 	}
 
 	// 空字串刻意**不在**安全清單裡：它不以 "/" 開頭，因此這個函式拒絕它。
 	// 那是正確的 —— 函式的契約是「回傳以 / 開頭的站內路徑」，而空字串不是。
-	// 呼叫端（HandleLogin 與 ReturnPath）各自把它換成 "/"，
-	// 而 TestReturnPath / TestHandleLoginPreservesSafeReturnPathInState 會驗證
-	// 那個轉換。這裡把它釘住，是為了讓「空字串由呼叫端負責」這件事有明確出處，
-	// 而不是被誤認為是這個函式的漏網。
+	// 呼叫端（httpapi 的登入與回呼兩端）各自把它換成 "/"，那兩個轉換由
+	// httpapi/oauth_login_test.go 釘住。這裡把它釘住，是為了讓「空字串由呼叫端
+	// 負責」這件事有明確出處，而不是被誤認為是這個函式的漏網。
 	t.Run("空字串由呼叫端負責", func(t *testing.T) {
-		if isSafeReturnPath("") {
-			t.Fatal("isSafeReturnPath(\"\") = true。若這裡變成 true，HandleLogin 的 returnPath " +
-				"預設值就不會被套用，state 會變成空字串，ReturnPath 又會因為「空字串不安全」而無條件退回首頁")
-		}
-		// 而呼叫端確實有處理：沒有 return 參數時 state 必須是 "/"。
-		withOauthConfig(t, testConfig(t, "http://127.0.0.1:1/callback"), "http://127.0.0.1:1/userinfo")
-		rec := httptest.NewRecorder()
-		HandleLogin(rec, httptest.NewRequest(http.MethodGet, "/auth/google", nil))
-		parsed, err := url.Parse(rec.Header().Get("Location"))
-		if err != nil {
-			t.Fatalf("授權網址不是合法 URL: %v", err)
-		}
-		if got := parsed.Query().Get("state"); got != "/" {
-			t.Errorf("沒有 return 參數時 state = %q，want \"/\"", got)
+		if IsSafeReturnPath("") {
+			t.Fatal("IsSafeReturnPath(\"\") = true。若這裡變成 true，httpapi 的登入端就不會把 " +
+				"缺失的 return 退回首頁，Redis 裡會存進一個空字串，回呼的導向目標因此變成空字串")
 		}
 	})
 
@@ -136,7 +129,7 @@ func TestIsSafeReturnPath(t *testing.T) {
 		{"data URI", "data:text/html,<script>alert(1)</script>", "XSS 向量"},
 
 		// --- 編碼繞過這一族 ---
-		// 這些是攻擊者真正會寫的東西。若 isSafeReturnPath 只比對字面而不先解碼，
+		// 這些是攻擊者真正會寫的東西。若 IsSafeReturnPath 只比對字面而不先解碼，
 		// 這幾個會被判定為「以 / 開頭且不是 //」而放行，然後在
 		// AuthCodeURL 的編碼 → Google 回送 → Query().Get 解碼之後變成
 		// //evil.example。
@@ -156,138 +149,95 @@ func TestIsSafeReturnPath(t *testing.T) {
 	}
 	for _, tc := range unsafe {
 		t.Run("拒絕/"+tc.name, func(t *testing.T) {
-			if isSafeReturnPath(tc.in) {
-				t.Errorf("isSafeReturnPath(%q) = true，但應該拒絕：%s", tc.in, tc.why)
+			if IsSafeReturnPath(tc.in) {
+				t.Errorf("IsSafeReturnPath(%q) = true，但應該拒絕：%s", tc.in, tc.why)
 			}
 		})
 	}
 }
 
-// TestIsSafeReturnPathBlocksTheActualAttackChain 走一遍完整的攻擊鏈。
+// TestAuthorizeURLCarriesNoReturnPath 釘住「state 不再攜帶回跳路徑」這件事。
 //
-// 單純的表格測試會告訴我們「每一個輸入單獨來看是對的」，卻不會告訴我們
-// 「串起來之後會不會漏」。這個測試模擬真實的攻擊者：把 return 參數塞進
-// /auth/google，確認 HandleLogin 產生的授權網址裡，state 解碼後不是站外網址。
-//
-// 這一條是本檔最重要的斷言，因為它測的不是字串比對，而是**那個實際會被導向
-// 的目標**。
-func TestIsSafeReturnPathBlocksTheActualAttackChain(t *testing.T) {
-	attacks := []string{
-		"https://evil.example",
-		"//evil.example",
-		"/\\evil.example",
-		"%2F%2Fevil.example",
-		"/%2Fevil.example",
-		"%5C%5Cevil.example",
+// 舊版把 return（登入後要回到哪一頁）放進 state，那讓攻擊者能決定「這個人在完成
+// 登入後會被送到哪」，也讓 state 變成一個使用者可控的值（login CSRF 的入口）。
+// 現在 state 是伺服器產生的隨機 nonce，回跳路徑存在 Redis 裡。這一條變紅時的症状是
+// 那兩個缺口一起回來，而日誌裡不會有任何異常 —— 從伺服器的角度流程完全正常。
+func TestAuthorizeURLCarriesNoReturnPath(t *testing.T) {
+	withOauthConfig(t, testConfig(t, "https://forum.example.com/auth/callback"), "http://127.0.0.1:1/userinfo")
+
+	nonce := "abcdef0123456789abcdef0123456789"
+	loginURL := AuthorizeURL(nonce, "the-verifier")
+
+	parsed, err := url.Parse(loginURL)
+	if err != nil {
+		t.Fatalf("授權網址不是合法 URL: %v (%q)", err, loginURL)
 	}
-
-	for _, attack := range attacks {
-		t.Run(attack, func(t *testing.T) {
-			withOauthConfig(t, testConfig(t, "http://127.0.0.1:1/callback"), "http://127.0.0.1:1/userinfo")
-
-			r := httptest.NewRequest(http.MethodGet, "/auth/google?return="+url.QueryEscape(attack), nil)
-			rec := httptest.NewRecorder()
-			HandleLogin(rec, r)
-
-			if rec.Code != http.StatusTemporaryRedirect {
-				t.Fatalf("狀態碼 = %d，want 307", rec.Code)
+	if got := parsed.Query().Get("state"); got != nonce {
+		t.Errorf("state = %q, want %q（state 必須就是那個 nonce）", got, nonce)
+	}
+	// 沒有任何參數是站內路徑：回跳路徑不在這條網址上。
+	for key, values := range parsed.Query() {
+		for _, value := range values {
+			if strings.HasPrefix(value, "/") {
+				t.Errorf("參數 %s 帶著一個站內路徑 %q —— 那不該出現在第三方會看到的網址裡", key, value)
 			}
-
-			// 從授權網址取出 state —— 那才是未來會被當成導回目標的東西。
-			loginURL := rec.Header().Get("Location")
-			parsed, err := url.Parse(loginURL)
-			if err != nil {
-				t.Fatalf("授權網址不是合法 URL: %v (%q)", err, loginURL)
-			}
-			state := parsed.Query().Get("state")
-
-			// state 必須已被退回首頁，而不是保留了攻擊者的目標。
-			if state != "/" {
-				t.Errorf("state = %q，want \"/\"（攻擊者的 return 被接受了）", state)
-			}
-			if isSafeReturnPath(state) && !strings.HasPrefix(state, "/forum") && state != "/" {
-				t.Errorf("state %q 仍然是一個站外目標", state)
-			}
-		})
+		}
+	}
+	// verifier 絕不在授權網址裡：那是瀏覽器與第三方都看得到的地方，而 PKCE 的
+	// 整個意義就是「challenge 公開、verifier 只有發起端知道」。
+	if strings.Contains(loginURL, "the-verifier") {
+		t.Errorf("verifier 出現在授權網址裡: %s", loginURL)
+	}
+	// client_secret 同樣不能出現（這是瀏覽器會去的網址）。
+	if strings.Contains(loginURL, "test-secret") {
+		t.Errorf("client_secret 出現在授權網址裡: %s", loginURL)
 	}
 }
 
-// TestHandleLoginPreservesSafeReturnPathInState 是上面的對照組。
+// TestAuthorizeURLAttachesPKCEChallenge 驗證 PKCE 的兩個參數都在。
 //
-// 只測「攻擊被擋下」不夠 —— 若實作是把所有 state 都清空，那攻擊也擋得住，
-// 但每一個人登入後都會回首頁。因此必須同時證明合法路徑會被完整保留。
-func TestHandleLoginPreservesSafeReturnPathInState(t *testing.T) {
-	preserved := []string{
-		"/forum",
-		"/admin/log",
-		"/forum?tab=2",
-		"/forum#post-3",
-		"/api/forum/posts/123",
-		// 含中文：state 必須能被 URL 編碼 / 解碼往返。
-		"/forum/公告",
+// 少了 code_challenge，Google 就不會要求 verifier —— PKCE 整個消失而流程看起來
+// 一樣正常；少了 code_challenge_method，端點會把它當成 plain，而我們送的是 S256
+// 的雜湊，症狀變成「換 token 時 invalid_grant」。
+func TestAuthorizeURLAttachesPKCEChallenge(t *testing.T) {
+	withOauthConfig(t, testConfig(t, "https://forum.example.com/auth/callback"), "http://127.0.0.1:1/userinfo")
+
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	loginURL := AuthorizeURL("nonce-value", verifier)
+	parsed, err := url.Parse(loginURL)
+	if err != nil {
+		t.Fatalf("授權網址不是合法 URL: %v", err)
 	}
-
-	for _, path := range preserved {
-		t.Run(path, func(t *testing.T) {
-			withOauthConfig(t, testConfig(t, "http://127.0.0.1:1/callback"), "http://127.0.0.1:1/userinfo")
-
-			r := httptest.NewRequest(http.MethodGet, "/auth/google?return="+url.QueryEscape(path), nil)
-			rec := httptest.NewRecorder()
-			HandleLogin(rec, r)
-
-			parsed, err := url.Parse(rec.Header().Get("Location"))
-			if err != nil {
-				t.Fatalf("授權網址不是合法 URL: %v", err)
-			}
-			if got := parsed.Query().Get("state"); got != path {
-				t.Errorf("state = %q, want %q（合法的返回路徑必須完整往返）", got, path)
-			}
-		})
+	q := parsed.Query()
+	if q.Get("code_challenge") != oauth2.S256ChallengeFromVerifier(verifier) {
+		t.Errorf("code_challenge = %q, want S256(%q) 的雜湊", q.Get("code_challenge"), verifier)
+	}
+	if q.Get("code_challenge_method") != "S256" {
+		t.Errorf("code_challenge_method = %q, want \"S256\"", q.Get("code_challenge_method"))
 	}
 }
 
-// TestHandleLoginWithoutOauthConfig 守住啟動時忘記呼叫 Init 的情況。
+// TestAuthorizeURLWithoutOauthConfig 守住啟動時忘記呼叫 Init 的情況。
 //
-// 這個分支的註解說明為什麼是 500 而不是仍然導向 Google：導過去也拿不到合法
-// 憑證，使用者只會卡在 Google 的頁面上，而伺服器端看不出為什麼。
-func TestHandleLoginWithoutOauthConfig(t *testing.T) {
+// 這一支函式的回傳值是「空字串」而不是 panic 或 error，因此呼叫端（httpapi）必須
+// 把它當成錯誤處理。若有人拿空字串去導向，症狀是「登入導向一個空網址」。
+func TestAuthorizeURLWithoutOauthConfig(t *testing.T) {
 	withUninitializedOauth(t)
 
-	r := httptest.NewRequest(http.MethodGet, "/auth/google", nil)
-	rec := httptest.NewRecorder()
-
-	// 刻意不設想 panic：若這裡 panic，症狀會是使用者在伺服器錯誤頁上看到
-	// 一个 stack trace，而不是「忘記呼叫 Init」。
-	HandleLogin(rec, r)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("狀態碼 = %d，want 500（OauthConfig 尚未初始化）", rec.Code)
-	}
-	if loc := rec.Header().Get("Location"); loc != "" {
-		t.Errorf("仍然導向 %q，使用者會卡在 Google 頁面上", loc)
-	}
-	if !strings.Contains(rec.Body.String(), "not initialized") {
-		t.Errorf("回應內容沒有指出原因: %q", rec.Body.String())
+	if got := AuthorizeURL("nonce", "verifier"); got != "" {
+		t.Errorf("OauthConfig 為 nil 時回 %q，want 空字串（呼叫端據此回 500）", got)
 	}
 }
 
-// TestHandleLoginIssuesAuthorizationRequest 驗證授權網址本身的形狀。
+// TestAuthorizeURLIssuesAuthorizationRequest 驗證授權網址本身的形狀。
 //
 // 這些是「能不能登入」的決定條件，而它們壞掉時的症狀是 Google 回
 // redirect_uri_mismatch 或「沒有這個 scope」—— 兩個都需要人去 Google Console
 // 比對才會發現。
-func TestHandleLoginIssuesAuthorizationRequest(t *testing.T) {
+func TestAuthorizeURLIssuesAuthorizationRequest(t *testing.T) {
 	withOauthConfig(t, testConfig(t, "https://forum.example.com/auth/callback"), "http://127.0.0.1:1/userinfo")
 
-	r := httptest.NewRequest(http.MethodGet, "/auth/google", nil)
-	rec := httptest.NewRecorder()
-	HandleLogin(rec, r)
-
-	if rec.Code != http.StatusTemporaryRedirect {
-		t.Fatalf("狀態碼 = %d，want 307", rec.Code)
-	}
-
-	parsed, err := url.Parse(rec.Header().Get("Location"))
+	parsed, err := url.Parse(AuthorizeURL("nonce-value", "verifier-value"))
 	if err != nil {
 		t.Fatalf("授權網址不是合法 URL: %v", err)
 	}
@@ -305,78 +255,9 @@ func TestHandleLoginIssuesAuthorizationRequest(t *testing.T) {
 	if got := q.Get("scope"); got != "https://www.googleapis.com/auth/userinfo.email" {
 		t.Errorf("scope = %q（本專案只申請 email，不申請 openid 與 profile）", got)
 	}
-	// state 必須存在，因為 GetUserEmail 與 ReturnPath 都依賴它。
-	// 刻意不斷言它的值（沒有 return 參數時是 "/"），那是另一支測試的責任。
+	// state 必須存在：回呼靠它找到 Redis 裡那一筆（見 httpapi/oauth_login.go）。
 	if q.Get("state") == "" {
-		t.Error("授權網址沒有 state —— ReturnPath 會無法運作")
-	}
-	// client_secret 絕不能出現在授權網址裡（它是機密，且這是瀏覽器會去的網址）。
-	if strings.Contains(rec.Header().Get("Location"), "test-secret") {
-		t.Errorf("client_secret 出現在授權網址裡了: %s", rec.Header().Get("Location"))
-	}
-}
-
-// TestReturnPath 覆蓋 state 的解碼往返與失效時的退路。
-func TestReturnPath(t *testing.T) {
-	cases := []struct {
-		name  string
-		query string
-		want  string
-	}{
-		{name: "正常往返", query: "state=%2Fadmin", want: "/admin"},
-		{name: "帶查詢參數", query: "state=%2Fforum%3Ftab%3D2", want: "/forum?tab=2"},
-		{name: "未指定 state", query: "", want: "/"},
-		{name: "state 為空", query: "state=", want: "/"},
-		{name: "站外網址", query: "state=https%3A%2F%2Fevil.example", want: "/"},
-		{name: "protocol-relative", query: "state=%2F%2Fevil.example", want: "/"},
-		{name: "編碼繞過", query: "state=%252F%252Fevil.example", want: "/"},
-		{name: "反斜線", query: "state=%2F%5Cevil.example", want: "/"},
-		{name: "不完整的編碼", query: "state=%", want: "/"},
-		{name: "只有 code 沒有 state", query: "code=abc", want: "/"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, "/auth/callback?"+tc.query, nil)
-			if got := ReturnPath(r); got != tc.want {
-				t.Errorf("ReturnPath(state=%q) = %q, want %q", tc.query, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestReturnPathRoundTripsThroughHandleLogin 是兩個函式之間的整合測試。
-//
-// 分開測兩邊都不夠：HandleLogin 用 AuthCodeURL 編碼 state、ReturnPath 用
-// Query().Get 解碼它，而這兩個用的是**不同的**編碼規則（QueryEscape 與
-// url.Values 的編碼）。它們之間的不對稱正是「登入後跳回錯誤頁面」最可能的
-// 來源，而它只有走完整條鏈才會現形。
-func TestReturnPathRoundTripsThroughHandleLogin(t *testing.T) {
-	paths := []string{
-		"/", "/forum", "/admin/log", "/forum?tab=2&sort=new",
-		"/forum#post-3", "/api/forum/posts/123", "/forum/公告", "/a b",
-	}
-
-	withOauthConfig(t, testConfig(t, "https://forum.example.com/auth/callback"), "http://127.0.0.1:1/userinfo")
-
-	for _, path := range paths {
-		t.Run(path, func(t *testing.T) {
-			// 第一段：HandleLogin 產生 state。
-			loginReq := httptest.NewRequest(http.MethodGet, "/auth/google?return="+url.QueryEscape(path), nil)
-			loginRec := httptest.NewRecorder()
-			HandleLogin(loginRec, loginReq)
-
-			parsed, err := url.Parse(loginRec.Header().Get("Location"))
-			if err != nil {
-				t.Fatalf("授權網址不是合法 URL: %v", err)
-			}
-			state := parsed.Query().Get("state")
-
-			// 第二段：Google 把 state 原樣送回來，ReturnPath 取回它。
-			cbReq := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+url.QueryEscape(state), nil)
-			if got := ReturnPath(cbReq); got != path {
-				t.Errorf("往返後 = %q, want %q", got, path)
-			}
-		})
+		t.Error("授權網址沒有 state —— 回呼無法驗證這個流程是誰發起的")
 	}
 }
 
@@ -389,7 +270,7 @@ func TestGetUserEmailRequiresCode(t *testing.T) {
 
 	for _, query := range []string{"", "error=access_denied", "state=%2Fforum", "code="} {
 		r := httptest.NewRequest(http.MethodGet, "/auth/callback?"+query, nil)
-		email, err := GetUserEmail(r)
+		email, err := GetUserEmail(r, "")
 		if err == nil {
 			t.Errorf("query=%q 時 GetUserEmail 回 nil error，want 錯誤", query)
 		}
@@ -456,7 +337,7 @@ func TestGetUserEmailSuccess(t *testing.T) {
 	withOauthConfig(t, cfg, infoSrv.URL)
 
 	r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=test-code", nil)
-	email, err := GetUserEmail(r)
+	email, err := GetUserEmail(r, "")
 	if err != nil {
 		t.Fatalf("GetUserEmail 回錯誤: %v", err)
 	}
@@ -483,6 +364,98 @@ func TestGetUserEmailSuccess(t *testing.T) {
 	if !basicAuthCarries && !formCarries {
 		t.Errorf("token 請求沒有帶 client 憑證（Authorization = %q，client_id = %q，client_secret = %q）",
 			tokenAuthHdr, tokenForm.Get("client_id"), tokenForm.Get("client_secret"))
+	}
+}
+
+// TestGetUserEmailSendsCodeVerifier 是 PKCE 的另一半：授權網址裡放的是 challenge，
+// 這裡放的必须是原本的 verifier。
+//
+// 這一條壞掉時的症状很難從表面看出：交換會以 invalid_grant 失敗（端點要求 verifier），
+// 或 —— 更糟的那一種 —— 端點沒要求 verifier，於是「被竊取的授權碼在別處也能換出
+// token」這件事安靜地成立，而登入看起來完全正常。因此它需要被釘住，而不是靠註解。
+func TestGetUserEmailSendsCodeVerifier(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		tokenForm url.Values
+	)
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		tokenForm = r.Form
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"test-access-token","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	infoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"email":"someone@example.com"}`))
+	}))
+	defer infoSrv.Close()
+
+	withOauthConfig(t, &oauth2.Config{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://forum.example.com/auth/callback",
+		Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint:     oauth2.Endpoint{AuthURL: "https://accounts.example.com/o/oauth2/auth", TokenURL: tokenSrv.URL},
+	}, infoSrv.URL)
+
+	r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=test-code", nil)
+	if _, err := GetUserEmail(r, "the-original-verifier"); err != nil {
+		t.Fatalf("GetUserEmail 回錯誤: %v", err)
+	}
+	mu.Lock()
+	gotVerifier := tokenForm.Get("code_verifier")
+	mu.Unlock()
+	if gotVerifier != "the-original-verifier" {
+		t.Errorf("token 端點收到的 code_verifier = %q，want \"the-original-verifier\"", gotVerifier)
+	}
+}
+
+// TestGetUserEmailWithoutVerifierSendsNone 釘住空 verifier 的 fallback：不帶參數，
+// 而不是帶一個空字串（後者會讓端點把它當成「有帶 verifier 但內容是空的」）。
+func TestGetUserEmailWithoutVerifierSendsNone(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		tokenForm url.Values
+	)
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		tokenForm = r.Form
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"test-access-token","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	infoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"email":"someone@example.com"}`))
+	}))
+	defer infoSrv.Close()
+
+	withOauthConfig(t, &oauth2.Config{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://forum.example.com/auth/callback",
+		Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint:     oauth2.Endpoint{AuthURL: "https://accounts.example.com/o/oauth2/auth", TokenURL: tokenSrv.URL},
+	}, infoSrv.URL)
+
+	r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=test-code", nil)
+	if _, err := GetUserEmail(r, ""); err != nil {
+		t.Fatalf("GetUserEmail 回錯誤: %v", err)
+	}
+	mu.Lock()
+	_, present := tokenForm["code_verifier"]
+	mu.Unlock()
+	if present {
+		t.Errorf("verifier 為空時仍然送了 code_verifier（%q）", tokenForm.Get("code_verifier"))
 	}
 }
 
@@ -573,7 +546,7 @@ func TestGetUserEmailErrorBranches(t *testing.T) {
 			withOauthConfig(t, cfg, infoSrv.URL)
 
 			r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=test-code", nil)
-			email, err := GetUserEmail(r)
+			email, err := GetUserEmail(r, "")
 			if err == nil {
 				t.Fatalf("GetUserEmail 回 nil error，want 錯誤（%s）", tc.name)
 			}
@@ -625,7 +598,7 @@ func TestGetUserEmailWithUnreachableServer(t *testing.T) {
 	withOauthConfig(t, cfg, deadURL)
 
 	r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=test-code", nil)
-	email, err := GetUserEmail(r)
+	email, err := GetUserEmail(r, "")
 	if err == nil {
 		t.Fatal("連不到 userinfo 端點卻回 nil error")
 	}
@@ -671,7 +644,7 @@ func TestGetUserEmailRespectsContextCancellation(t *testing.T) {
 	cancel() // 立即取消
 
 	r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=test-code", nil).WithContext(ctx)
-	email, err := GetUserEmail(r)
+	email, err := GetUserEmail(r, "")
 	if err == nil {
 		t.Fatal("context 已取消卻沒有回錯誤")
 	}

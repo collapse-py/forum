@@ -3,14 +3,14 @@ auth 封裝以 Google 為唯一識別證供應者的 OAuth2 授權碼流程（Au
 
 【對外介面】
 Init 建立全域 oauth2.Config，必須在服務開始處理請求前呼叫一次。
-HandleLogin 是 GET /auth/google 的 handler，產生授權網址並轉向 Google。
-ReturnPath 從 OAuth 回呼的 state 參數取回登入前想前往的路徑。
-GetUserEmail 用回呼的 code 換取 token，再向 Google 查詢使用者 email。
+AuthorizeURL 產生要導向 Google 的授權網址（帶 state 與 PKCE 的 code_challenge）。
+IsSafeReturnPath 判斷一個「登入後要回到哪一頁」的值是否為站內相對路徑。
+GetUserEmail 用回呼的 code（與当初的 code_verifier）換取 token，再向 Google 查詢 email。
 GoogleUser 與 OauthConfig 是公開符號，供測試或其他套件引用。
-路由實際註冊於 httpapi.Server.Handler()：
-GET /auth/google 由 auth.HandleLogin 處理；
-GET /auth/callback 由 httpapi 自己的 handleGoogleCallback 處理，該函式內部呼叫
-GetUserEmail 與 ReturnPath，並負責建立 session cookie 與導回。
+路由與流程的編排都在 httpapi（見 httpapi/oauth_login.go 與 httpapi/auth_handlers.go）：
+GET /auth/google 產生 nonce 與 verifier、把它們存進 Redis 並寫下一份綁定 cookie，
+再以 state=nonce 導向 Google；GET /auth/callback 比對 state 與那份 cookie、從 Redis
+取回（並刪除）nonce，然後呼叫 GetUserEmail。
 
 【主要依賴】
 golang.org/x/oauth2 及其 oauth2/google 套件，google.Endpoint 內含 Google 的
@@ -19,24 +19,26 @@ golang.org/x/oauth2 內建的 context 感知 HTTP client。
 forum/forum/logger，支援帶入 request context，日誌可附帶 request_id、ip、user_email。
 
 【關鍵設計決策與限制】
-state 參數被重複利用為「登入後要回到哪一頁」的載體，而不是標準建議的 CSRF 隨機
-nonce。取捨是不必落地 cookie 或 session 就能完成導回，但 state 並未綁定發起登入
-的瀏覽器，因此無法防禦 login CSRF（攻擊者可用自己的帳號完成登入並把狀態寫進
-受害者的瀏覽器）。本套件唯一的防線是 isSafeReturnPath 這道開放轉向檢查。
+state 是一次隨機 nonce，不是「回跳路徑」。它綁定發起登入的瀏覽器（同一個 nonce 存在
+Redis 裡，並寫進一頁只給 /auth 用的 HttpOnly cookie），回呼時兩者必須相符且 nonce
+尚未被用過 —— 這是 login CSRF 的防線：攻擊者無法「用自己的帳號完成登入、把登入態寫進
+受害者的瀏覽器」，因為他拿不到受害者那份 cookie 對應的 nonce。回跳路徑因此改存在 Redis
+裡（寫入前已通過 IsSafeReturnPath），不再由 state 攜帶。
+配套的是 PKCE（code_verifier）：授權網址帶 S256 challenge，換 token 時帶 verifier，
+讓被竊取的授權碼無法在另一處被換成 token。
+本套件不碰 Redis 也不碰 cookie —— 那些是 httpapi 的工作，本檔只提供「產生網址」與
+「用 code 換 email」。
 
 只申請 userinfo.email 這一個 scope，不申請 openid 與 profile。代價是拿不到使用者
 名稱與頭像，論壇以 email 作為唯一識別；好處是不需要通過 Google 對敏感或受限
 scope 的審查。
 
-本套件完全不碰 cookie：session 的建立、續期與清除都由呼叫端
-（httpapi 與 forum/forum/session）負責，auth 只提供「這個 email 是誰」。
-
 Init 寫入的 OauthConfig 是無保護的全域變數，設計上假設只在啟動時寫入一次、
 之後唯讀。若執行期間仍可能寫入，會與併發讀取產生資料競爭，本套件未提供鎖定。
 
 GetUserEmail 假設 Init 已經呼叫：OauthConfig 為 nil 時，OauthConfig.Exchange 會在
-讀取 c.RedirectURL 時發生 nil 解參考而 panic。HandleLogin 有檢查 nil 並回應 500，
-但 GetUserEmail 沒有，因此呼叫端必須自行確保初始化已完成。
+讀取 c.RedirectURL 時發生 nil 解參考而 panic。呼叫端（httpapi 的登入與回呼兩端）都先
+檢查 nil，因此不會走到那一步。
 
 Google 回傳的 email 對應到 forum_users 資料表的 email 欄位（VARCHAR(255) 主鍵
 角色），但本套件本身不寫資料庫。實作也沒有檢查 Google 回應中的 verified_email
@@ -77,7 +79,7 @@ var (
 	// 會與併發讀取產生資料競爭，本套件沒有提供任何鎖定或 once 保護。
 	OauthConfig *oauth2.Config
 
-	// userInfoURL 是向 Google 查詢 email 的端點。
+	// UserInfoURL 是向 Google 查詢 email 的端點。
 	//
 	// 為什麼是變數而不是直接寫在 GetUserEmail 裡：GetUserEmail 是本套件唯一
 	// 有分支邏輯（狀態碼檢查、JSON 解析、錯誤分類）的函式，而它的兩次對外
@@ -85,8 +87,10 @@ var (
 	// oauth2 的 Endpoint（TokenURL / AuthURL）本來就是透過 OauthConfig 注入的，
 	// 這裡讓 userinfo 端點有同樣的注入點，兩者就一致了。
 	//
+	// 它與 OauthConfig 同樣是公開符號：理由不是「外部需要改它」，而是「跨套件的
+	// 測試要能注入假端點」（httpapi 的回呼測試就是這個使用者）。
 	// 限制與 OauthConfig 相同：只在啟動時或測試中寫入，之後唯讀。
-	userInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+	UserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
 )
 
 // Init 建立 Google OAuth2 用戶端設定並寫入全域變數 OauthConfig。
@@ -122,57 +126,29 @@ func Init(clientID, clientSecret, redirectURL string) {
 	}
 }
 
-// HandleLogin 是 GET /auth/google 的 handler：產生 Google 授權網址並把瀏覽器導過去。
+// AuthorizeURL 產生要把瀏覽器導向 Google 的授權網址。
 //
-// 副作用：寫出 307 轉向回應，Location 標頭指向 Google 授權頁。不寫資料庫、
-// 不設定 cookie。
-// 無錯誤回傳值：所有失敗情境都以 HTTP 回應表達。
-func HandleLogin(w http.ResponseWriter, r *http.Request) {
-	// OauthConfig 為 nil 代表啟動時忘了呼叫 Init。此時回 500 而不是仍然導向
-	// Google，因為導過去也拿不到合法憑證完成流程，只會讓使用者卡在 Google 頁面。
+// state 是一次性 nonce（由呼叫端產生、存進 Redis，並綁定在那個瀏覽器的一份 cookie
+// 上），不是回跳路徑 —— 見檔頭對 login CSRF 的說明。codeVerifier 非空時附上海報
+// （code_challenge 與 method=S256），換 token 時必須帶回原本的 verifier，因此被竊取
+// 的授權碼在別處換不出 token。
+//
+// AuthCodeURL 會對每個參數做 URL 編碼，nonce 與 challenge 因此不需要自行處理。
+// 純函式：不寫回應、不寫資料庫、不發請求。
+// OauthConfig 為 nil 時回空字串 —— 呼叫端必須把它當成錯誤處理，不要拿它去導向。
+func AuthorizeURL(state, codeVerifier string) string {
 	if OauthConfig == nil {
-		logger.ErrorContext(r.Context(), "[AUTH] OAuth config not initialized")
-		// 用 500 而非 503：這是伺服器設定錯誤而非暫時性不可用，重試沒有意義。
-		http.Error(w, "OAuth config not initialized", http.StatusInternalServerError)
-		return
+		return ""
 	}
-	// 登入完成後要回到哪一頁，由呼叫端（/forum/login?return=...）提供。
-	// 使用前必須通過 isSafeReturnPath，否則退回首頁，避免被當成開放轉向的跳板。
-	returnPath := r.URL.Query().Get("return")
-	if !isSafeReturnPath(returnPath) {
-		returnPath = "/"
+	if codeVerifier == "" {
+		return OauthConfig.AuthCodeURL(state)
 	}
-	// 第二個參數會成為 OAuth 的 state 參數。AuthCodeURL 會對它做 URL 編碼，
-	// 因此即使 returnPath 含有 / 與 ? 也不會破壞查詢字串結構。
-	loginURL := OauthConfig.AuthCodeURL(returnPath)
-	// 授權網址含有 client_id 與 state，記在 DEBUG 級別供排查
-	// 「登入後跳錯頁」這類問題；常駐環境維持 INFO 以上時不會產生噪音。
-	logger.DebugfContext(r.Context(), "[AUTH] Redirecting user to Google login: url=%s", loginURL)
-	// 選 307 Temporary Redirect 而非 302：307 在 HTTP 語意上要求用戶端保留
-	// 原始的方法與主體，比 302 更精確地表達「這是登入流程中的一段轉址，
-	// 不是資源的永久位置」。此端點僅供瀏覽器以 GET 進入，兩者在此路徑上的
-	// 實際行為差異不大，選 307 是為了語意正確。
-	http.Redirect(w, r, loginURL, http.StatusTemporaryRedirect)
+	// S256ChallengeOption 一次寫出 code_challenge 與 code_challenge_method=S256，
+	// 因此不必自行組那兩個參數。verifier 本身絕不進授權網址 —— 那正是它存在的理由。
+	return OauthConfig.AuthCodeURL(state, oauth2.S256ChallengeOption(codeVerifier))
 }
 
-// ReturnPath 從 OAuth 回呼的查詢參數 state 取回登入前指定的返回路徑。
-//
-// 不驗證 state 的 CSRF 性質（見檔案層說明），只做開放轉向防護。
-// 回傳值保證是以 "/" 開頭的站內路徑，或是使用者未指定時的 "/"。
-// 副作用：無，只讀取 r 的查詢字串。
-func ReturnPath(r *http.Request) string {
-	// Google 會原樣送回 state，而 Query().Get 會做一次 URL 解碼，正好還原
-	// AuthCodeURL 當初編碼的內容。若 state 遺失或為空字串，這裡會得到 ""。
-	returnPath := r.URL.Query().Get("state")
-	// 使用者按取消、Google 拒絕授權、state 被竄改等情況都可能得不到安全值，
-	// 此時一律回首頁，不嘗試猜測原本的目標。
-	if !isSafeReturnPath(returnPath) {
-		return "/"
-	}
-	return returnPath
-}
-
-// isSafeReturnPath 判斷 returnPath 是否為安全的「站內相對路徑」。
+// IsSafeReturnPath 判斷一個「登入後要回到哪一頁」的值是否為安全的站內相對路徑。
 //
 // 拒絕的條件與依據：
 // QueryUnescape 失敗代表含有不合法的百分號編碼，無法確定其意圖，直接視為不安全。
@@ -181,8 +157,11 @@ func ReturnPath(r *http.Request) string {
 // 含反斜線，因為部分瀏覽器與舊版 URL 解析器會把 "/\evil.example" 正規化成
 // "//evil.example"，等於繞過上一條檢查。
 //
+// 它是公開符號：寫入端與讀取端（都在 httpapi）都要過它。回跳路徑存在 Redis 裡，
+// 但那筆資料的產生與消費是兩個不同的請求，兩邊各自檢查才不用假設「寫進去的那次
+// 一定檢查過」。
 // 副作用：無，是純函式，可安全併行呼叫。
-func isSafeReturnPath(returnPath string) bool {
+func IsSafeReturnPath(returnPath string) bool {
 	// 先解碼再判斷：若直接比對字面，攻擊者可用 %2F%2Fevil.example 這類編碼形式
 	// 繞過 "//" 檢查。解碼失敗不回退到原字串比對，因為失敗本身就代表內容不可信。
 	decoded, err := url.QueryUnescape(returnPath)
@@ -194,11 +173,14 @@ func isSafeReturnPath(returnPath string) bool {
 	return strings.HasPrefix(decoded, "/") && !strings.HasPrefix(decoded, "//") && !strings.Contains(decoded, "\\")
 }
 
-// GetUserEmail 處理 OAuth2 回呼的核心步驟：用 code 換取 token，再以 token 向 Google
-// 查詢使用者 email。
+// GetUserEmail 處理 OAuth2 回呼的核心步驟：用 code（與當初授權網址的 verifier）換取
+// token，再以 token 向 Google 查詢使用者 email。
 //
 // 參數：r 必須是 /auth/callback 的請求，且帶有 Google 回傳的 "code" 查詢參數。
 // 換 token 的請求掛在 r.Context() 上，使用者中途關閉分頁會直接取消該在途請求。
+// codeVerifier 是發起登入時產生、存在 Redis 裡的那個 PKCE verifier（呼叫端從 state
+// nonce 查出來）。傳空字串表示這次沒有 PKCE —— 那會退回不帶 verifier 的舊行為，
+// 只應出現在測試裡；線上流程必須帶它。
 //
 // 回傳值：Google 帳號的 email；失敗時回傳空字串與非 nil 的 error。
 //
@@ -209,7 +191,7 @@ func isSafeReturnPath(returnPath string) bool {
 //
 // 副作用：對 oauth2.googleapis.com 與 googleapis.com 各發出一次對外 HTTPS 請求。
 // 不寫資料庫、不設定 cookie。
-func GetUserEmail(r *http.Request) (string, error) {
+func GetUserEmail(r *http.Request, codeVerifier string) (string, error) {
 	// 沒有 code 代表這不是合法的回呼：常見於使用者直接造訪 /auth/callback，
 	// 或 Google 在使用者未授權時以 error 查詢參數結束流程。
 	// 錯誤刻意不帶上游內容，避免把內部細節洩漏給呼叫端。
@@ -223,7 +205,15 @@ func GetUserEmail(r *http.Request) (string, error) {
 	// 掛上 r.Context() 讓請求可被取消，而不是在使用者已離開後仍繼續等待。
 	// 注意：OauthConfig 為 nil 時此行會 panic，呼叫端必須先確認已呼叫 Init。
 	logger.DebugContext(r.Context(), "[AUTH] Exchanging code for token")
-	token, err := OauthConfig.Exchange(r.Context(), code)
+	// PKCE：把當初的 verifier 帶回給 token 端點。授權碼即使被竊取（瀏覽器延伸、
+	// Referer、代理日誌），沒有 verifier 就換不出 token —— 這是 state nonce 之外
+	// 的另一半，兩件事各自擋掉不同的竊取路徑。
+	// 空字串時不帶任何選項（測試與非 PKCE 的呼叫），Google 不會因此失敗。
+	exchangeOptions := []oauth2.AuthCodeOption{}
+	if codeVerifier != "" {
+		exchangeOptions = append(exchangeOptions, oauth2.VerifierOption(codeVerifier))
+	}
+	token, err := OauthConfig.Exchange(r.Context(), code, exchangeOptions...)
 	if err != nil {
 		// 常見成因：redirect_uri 與 Google Console 登記值不一致、授權碼已被
 		// 使用過（重播攻擊）、或使用者授權的是另一組 client。
@@ -239,7 +229,7 @@ func GetUserEmail(r *http.Request) (string, error) {
 	client := OauthConfig.Client(context.Background(), token)
 	// 使用 oauth2 的 client 而非裸 http.Client：它會在 token 過期時自動以
 	// refresh_token 換發新 token，並在需要時於請求前先做一次更新。
-	resp, err := client.Get(userInfoURL)
+	resp, err := client.Get(UserInfoURL)
 	if err != nil {
 		logger.ErrorfContext(r.Context(), "[AUTH] Failed getting user info: %v", err)
 		return "", fmt.Errorf("failed getting user info: %s", err.Error())
