@@ -1504,6 +1504,82 @@ func tableUsesAutoIncrement(ctx context.Context, conn *sql.Conn, table string) (
 	return strings.Contains(strings.ToLower(extra), "auto_increment"), nil
 }
 
+// rowQuerier 是 QueryRowContext 的最小介面。*sql.Conn 與 *sql.Tx 都實作它，
+// 因此同一份探測可以在「那條連線」與「那條連線上的交易」裡使用 —— 重新編號
+// 的暫存表是連線層級的，探測必須與它在同一條連線（與同一個交易）裡。
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// columnCollation 回報一個文字欄位的 collation 與它所屬的 charset。
+// 該欄位沒有 collation（數值或 BLOB）時回兩個空字串。
+//
+// 為什麼重新編號需要它：MySQL 8 對「DEFAULT CHARSET=utf8mb4 但沒寫 COLLATE」的表
+// 用的是 **charset 的預設 collation**（utf8mb4_0900_ai_ci），不是資料庫的 collation；
+// 而 `CAST(m.old_id AS CHAR)` 帶著連線的 collation（utf8mb4_general_ci）。兩邊都是
+// IMPLICIT，MySQL 找不到共同的 collation，因此回
+// Error 1267 (HY000): Illegal mix of collations ... for operation '='。
+// 這是第 38 步（雪花 id 重新編號）在 CI 的 mysql:8.0.29 上的失敗；本機的開發資料庫
+// 是 MariaDB，那裡 utf8mb4 的預設 collation 正好就是 utf8mb4_general_ci，兩者相同，
+// 因此這個錯誤在本機出不來（見 migration_test.go 的 collation 測試）。
+//
+// 比對被換成「欄位自己的 collation」，而不是隨意挑一個：
+//   - 顯式的 COLLATE 壓過欄位的 IMPLICIT collation，兩側因此一致，1267 消失。
+//   - 比對用的 collation 與索引的 collation 相同，因此
+//     idx_forum_admin_actions_target (target_type, target_id) 仍然能被 JOIN 用到。
+//     兩側都強制 utf8mb4_general_ci 也能消除 1267，但索引必然用不上，
+//     一個有數十萬筆稽核紀錄的站會變成「遷移跑不完」。
+//   - 欄位的 collation 不被改寫：那是 DDL，會改變該欄位的排序與大小寫語意，
+//     而且這個專案沒有降級路徑。
+//   - COLLATE 只能套在它所屬 charset 的運算式上，所以 CAST 的結果要先 CONVERT
+//     到那個 charset。charset 由 collation 名稱的前綴推得，而不是探測另一個欄位：
+//     MySQL 的 information_schema 叫它 CHARACTER_SET_NAME，MariaDB 叫它
+//     CHARSET_NAME，同一句 SQL 無法同時相容兩個名字；而 collation 名稱在兩種
+//     伺服器都叫 COLLATION_NAME。
+func columnCollation(ctx context.Context, q rowQuerier, table, column string) (collation, charset string, err error) {
+	var value sql.NullString
+	// table / column 是本檔的字面值（與 DDL 一樣組接字串，探測的 DDL 無法參數化），
+	// 因此「哪個欄位的探測掛了」會直接出現在錯誤輸出裡，理由同 addColumnIfNotExists。
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COLLATION_NAME FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = '%s'
+	`, table, column)).Scan(&value); err != nil {
+		return "", "", fmt.Errorf("探測 %s.%s 的 collation 失敗: %w", table, column, err)
+	}
+	if !value.Valid || value.String == "" {
+		// 沒有 collation：原本的比對就是對的，不必強制。
+		return "", "", nil
+	}
+	charset = collationCharset(value.String)
+	// 這兩個名稱會被組進 SQL。它們來自伺服器自己的 information_schema，不是使用者
+	// 輸入，但「不尋常的名稱」在這裡值得直接拒絕：拼出一句語法錯誤的 UPDATE 比
+	// 回一個指明是哪個 collation 的錯誤更難查。
+	if !isSQLName(value.String) || !isSQLName(charset) {
+		return "", "", fmt.Errorf("%s.%s 的 collation 名稱不尋常: %q", table, column, value.String)
+	}
+	return value.String, charset, nil
+}
+
+// collationCharset 推得一個 collation 所屬的 charset。MySQL 與 MariaDB 的 collation
+// 名稱都是「<charset>_...」；唯一的例外是 binary（它沒有前綴）。
+func collationCharset(collation string) string {
+	if i := strings.IndexByte(collation, '_'); i > 0 {
+		return collation[:i]
+	}
+	return collation
+}
+
+// isSQLName 判斷一個 charset / collation 名稱是否只由字母、數字與底線組成。
+func isSQLName(name string) bool {
+	for _, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return name != ""
+}
+
 // renumberTable 在一個交易內把一張表的 id 換成新的雪花 id，並同步所有引用。
 //
 // 交易的範圍刻意是「一張表」而不是「全部表」：過程中會 UPDATE 使用者的資料，
@@ -1584,7 +1660,18 @@ func renumberTable(ctx context.Context, conn *sql.Conn, table snowflakeIDTable) 
 		// parent_id 還是舊值，而 id 已經是新的，兩者不會互相干擾。
 		query := "UPDATE " + ref.table + " t JOIN _snowflake_id_map m ON "
 		if ref.text {
-			query += "t." + ref.column + " = CAST(m.old_id AS CHAR) SET t." + ref.column + " = CAST(m.new_id AS CHAR)"
+			// 文字欄位的比對必須兩側同一 collation（見 columnCollation）：
+			// CAST 帶著連線的 collation，欄位帶著自己的，MySQL 8 對這種組合回 1267。
+			collation, charset, err := columnCollation(ctx, tx, ref.table, ref.column)
+			if err != nil {
+				return err
+			}
+			oldID := "CAST(m.old_id AS CHAR)"
+			if collation != "" {
+				oldID = fmt.Sprintf("CONVERT(%s USING %s) COLLATE %s", oldID, charset, collation)
+			}
+			// SET 側不強制 collation：寫入是轉換，不是比對，沒有 1267 的問題。
+			query += "t." + ref.column + " = " + oldID + " SET t." + ref.column + " = CAST(m.new_id AS CHAR)"
 		} else {
 			query += "t." + ref.column + " = m.old_id SET t." + ref.column + " = m.new_id"
 		}

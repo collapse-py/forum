@@ -368,7 +368,7 @@ func TestMigrateMySQLOnExistingDatabaseWithData(t *testing.T) {
 	// 而後者還會牽涉預設值的語意）。
 	for table, columns := range map[string][]string{
 		"forum_posts":    {"image_url", "updated_at", "deleted_at"},
-		"forum_profiles": {"bio", "public_key", "avatar_url"},
+		"forum_profiles": {"bio", "public_key", "public_key_hmac", "avatar_url"},
 	} {
 		for _, column := range columns {
 			if !columnExists(t, db, table, column) {
@@ -376,6 +376,33 @@ func TestMigrateMySQLOnExistingDatabaseWithData(t *testing.T) {
 			}
 		}
 	}
+
+	// 兩把公開識別碼都要有索引。解析貼文作者是走
+	// `WHERE public_key_hmac = ? OR public_key = ?` 查的，缺任何一欄的索引
+	// 都會讓那個查詢變成對 forum_profiles 的全表掃描 —— 而它是每一次
+	// 貼文列表都要做的查詢（見 forum_handlers.go 的 forumAuthorKey）。
+	for _, index := range []string{"idx_forum_profiles_public_key", "idx_forum_profiles_public_key_hmac"} {
+		if !indexExists(t, db, "forum_profiles", index) {
+			t.Errorf("forum_profiles 沒有補上索引 %s（升級路徑就是它第一次被建立的地方）", index)
+		}
+	}
+}
+
+// indexExists 查詢某個索引是否存在。
+//
+// 名稱用「完全相等」而不是子字串：idx_forum_profiles_public_key 是
+// idx_forum_profiles_public_key_hmac 的前綴，比對用 LIKE 或 Go 的子字串
+// 會讓一把索引被看成兩把。
+func indexExists(t *testing.T, db *sql.DB, table, index string) bool {
+	t.Helper()
+	var n int
+	err := db.QueryRow(
+		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
+		table, index).Scan(&n)
+	if err != nil {
+		t.Fatalf("查詢 information_schema.STATISTICS 失敗: %v", err)
+	}
+	return n > 0
 }
 
 // TestMigrateMySQLRenumbersLegacyIDs 驗證「既有自增資料改成雪花 id」這條
@@ -526,6 +553,74 @@ func TestMigrateMySQLRenumbersLegacyIDs(t *testing.T) {
 	}
 	if oldRows != 0 {
 		t.Errorf("舊 id %d 仍然存在", oldPost)
+	}
+}
+
+// TestMigrateMySQLRenumbersLegacyIDsWithForeignCollation 驗證「文字參考的欄位
+// 帶著一個跟連線不同的 collation」時，重新編號仍然完成。
+//
+// 為什麼要自己造一個不同的 collation：CI 的 mysql:8.0.29 上，
+// 「DEFAULT CHARSET=utf8mb4 但沒寫 COLLATE」的表拿到的是 **charset 的預設 collation**
+//（utf8mb4_0900_ai_ci），不是資料庫的 collation，而連線的 collation 是
+// utf8mb4_general_ci。兩邊都是 IMPLICIT，MySQL 找不到共同 collation，因此
+// `t.target_id = CAST(m.old_id AS CHAR)` 回
+// Error 1267 (HY000): Illegal mix of collations。本機的開發資料庫是 MariaDB，
+// 那裡 utf8mb4 的預設 collation 正好就是 utf8mb4_general_ci，兩者相同，
+// 所以這個錯誤在本機永遠出不來 —— 2026-10-28，這個 job 第一次真正執行時才現身。
+//
+// 它為什麼值得單獨一支測試：1267 不是「某欄位沒更新」那麼溫和的失敗，它讓整批
+// 重新編號中止，而 MigrateMySQL 在啟動時被呼叫，所以症狀是「每個實例都起不來」。
+// 而這個 collation 只能在真實的 MySQL 8 上重現，假驅動看不見它。
+func TestMigrateMySQLRenumbersLegacyIDsWithForeignCollation(t *testing.T) {
+	t.Parallel()
+	db, name := tempDatabase(t)
+	if err := MigrateMySQL(db); err != nil {
+		t.Fatalf("建立新 schema 失敗: %v", err)
+	}
+
+	// 把稽核表換回「舊形狀」：AUTO_INCREMENT 的 id，加上一個 collation 與連線不同的
+	// target_id。utf8mb4_unicode_ci 在 MySQL 8 與 MariaDB 都存在，因此這支測試
+	// 在兩種伺服器上都能重現那個錯（而它的資料與 TestMigrateMySQLRenumbersLegacyIDs
+	// 刻意分開：兩支測試撞在同一張表上時，修好的那個會替壞的那個擋下錯誤）。
+	//
+	// forum_posts 也要換回自增：CI 的失敗就是「forum_posts 重新編號時更新
+	// forum_admin_actions.target_id」那一句，被引用的表先編號才走得到那條路。
+	mustExec(t, db, "ALTER TABLE forum_posts MODIFY id BIGINT NOT NULL AUTO_INCREMENT")
+	mustExec(t, db, "ALTER TABLE forum_admin_actions MODIFY id BIGINT NOT NULL AUTO_INCREMENT")
+	mustExec(t, db, "ALTER TABLE forum_admin_actions MODIFY target_id VARCHAR(320) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL")
+
+	res, err := db.Exec(`INSERT INTO forum_posts (author_email, content, image_url, created_at) VALUES ('collation@example.com', '舊貼文', '', NOW())`)
+	if err != nil {
+		t.Fatalf("插入舊貼文失敗（%s）: %v", name, err)
+	}
+	oldPost, _ := res.LastInsertId()
+
+	mustExec(t, db, `INSERT INTO forum_admin_actions (actor_email, action, target_type, target_id, target_label, changes, ip, request_id, created_at) VALUES ('admin@example.com', 'post.delete', 'post', ?, '', NULL, '', '', NOW())`, strconv.FormatInt(oldPost, 10))
+
+	if err := MigrateMySQL(db); err != nil {
+		t.Fatalf("collation 不同的舊資料庫重新編號失敗: %v（資料庫 %s）", err, name)
+	}
+
+	// 稽核紀錄必須指向新的 id。
+	newPost := mustScanInt64(t, db, `SELECT id FROM forum_posts WHERE author_email = 'collation@example.com'`)
+	var auditTarget string
+	if err := db.QueryRow(`SELECT target_id FROM forum_admin_actions WHERE actor_email = 'admin@example.com' AND action = 'post.delete'`).Scan(&auditTarget); err != nil {
+		t.Fatalf("讀取稽核 target_id 失敗: %v", err)
+	}
+	if want := strconv.FormatInt(newPost, 10); auditTarget != want {
+		t.Errorf("稽核 target_id = %q，want %q（重新編號沒有跟著改）", auditTarget, want)
+	}
+
+	// 欄位的 collation 必須保持原樣：這支測試修的是「比對」，不是「把使用者的表
+	// 改寫成我們的 collation」。後者是 DDL，會改變那個欄位的排序與大小寫語意，
+	// 而且沒有回滾路徑。
+	var collation string
+	if err := db.QueryRow(`SELECT COLLATION_NAME FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'forum_admin_actions' AND COLUMN_NAME = 'target_id'`).Scan(&collation); err != nil {
+		t.Fatalf("讀取 target_id 的 collation 失敗: %v", err)
+	}
+	if collation != "utf8mb4_unicode_ci" {
+		t.Errorf("target_id 的 collation 被遷移改成了 %s，want utf8mb4_unicode_ci", collation)
 	}
 }
 

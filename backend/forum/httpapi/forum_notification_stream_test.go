@@ -718,6 +718,10 @@ func markAllNotificationsRead(t *testing.T, baseURL, token string) {
 		t.Fatalf("建立請求失敗: %v", err)
 	}
 	request.AddCookie(&http.Cookie{Name: "FORUM_test", Value: token})
+	// 帶著 session cookie 的寫入請求必須帶來源（csrf.go：Origin 與 Referer 都不送的
+	// 請求現在以 403 拒絕）。這個端點在正式站上就是同源 fetch，瀏覽器會送 Origin，
+	// 因此這支測試照瀏覽器的行為做，而不是繞過那條防線。
+	request.Header.Set("Origin", baseURL)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	response, err := client.Do(request)

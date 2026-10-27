@@ -578,6 +578,109 @@ func TestCovMigrateMySQLLegacyBranches(t *testing.T) {
 	}
 }
 
+// TestCovRenumberTextReferenceCollation 釘住「文字參考的比對長什麼樣」。
+//
+// 它釘的是對外看到的 SQL：比對那一側帶著被探測到的 collation，而寫入那一側不帶。
+// 真正的 Error 1267 只有真實的 MySQL 8 會回（見 migration_test.go 的 collation 測試），
+// 假驅動看不見那個錯誤，但它能證明兩件會靜默失效的事：
+//   - 探測到的 collation 真的被用進比對（少了它，CI 的 MySQL 8 會 1267，而本機沒事）；
+//   - collation 探測失敗時整個重新編號中止，而不是拼出一句「沒有 collation」的 UPDATE。
+func TestCovRenumberTextReferenceCollation(t *testing.T) {
+	// 探測的 SQL 片段：columnCollation 把表與欄位寫成字面值，因此片段本身就是規格。
+	const probe = "TABLE_NAME = 'forum_admin_actions' AND COLUMN_NAME = 'target_id'"
+
+	for _, tt := range []struct {
+		name       string
+		probe      covDataQueryRule
+		contain    []string
+		notContain []string
+		wantErr    bool
+	}{
+		{
+			name: "MySQL 8 的預設 collation：比對被換成欄位自己的",
+			probe: covDataQueryRule{
+				substr: probe, cols: []string{"COLLATION_NAME"},
+				rows: [][]covDataValue{{"utf8mb4_0900_ai_ci"}},
+			},
+			contain: []string{
+				"CONVERT(CAST(m.old_id AS CHAR) USING utf8mb4) COLLATE utf8mb4_0900_ai_ci",
+				"SET t.target_id = CAST(m.new_id AS CHAR)",
+				"WHERE target_type = 'post'",
+			},
+			// 寫入那一側不需要 CONVERT／COLLATE：寫入是轉換，不是比對。
+			notContain: []string{"CONVERT(CAST(m.new_id"},
+		},
+		{
+			name: "探測回 NULL（沒有 collation 的欄位）：不強制",
+			probe: covDataQueryRule{
+				substr: probe, cols: []string{"COLLATION_NAME"},
+				rows: [][]covDataValue{{nil}},
+			},
+			contain:    []string{"t.target_id = CAST(m.old_id AS CHAR)"},
+			notContain: []string{"COLLATE"},
+		},
+		{
+			name:    "探測失敗：中止",
+			probe:   covDataQueryRule{substr: probe, err: errors.New("information_schema down")},
+			wantErr: true,
+		},
+		{
+			name: "探測不到那一欄：中止",
+			probe: covDataQueryRule{
+				substr: probe, cols: []string{"COLLATION_NAME"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "不尋常的 collation 名稱：中止，而不是拼進 SQL",
+			probe: covDataQueryRule{
+				substr: probe, cols: []string{"COLLATION_NAME"},
+				rows: [][]covDataValue{{"utf8mb4'; DROP TABLE forum_posts; --"}},
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, src := covDataDB(t)
+			// 一批一列、讀完就清空：分批迴圈因此會結束而不會變成無限迴圈。
+			src.addQuery(covDataQueryRule{
+				substr: "SELECT id FROM forum_posts WHERE id > ?",
+				cols:   []string{"id"}, rows: [][]covDataValue{{int64(7)}}, consume: true,
+			})
+			src.addQuery(tt.probe)
+
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatalf("取得連線失敗: %v", err)
+			}
+			defer conn.Close()
+
+			// snowflakeIDTables[1] 是 forum_posts：它引用 forum_admin_actions.target_id，
+			// 而 CI 的失敗正是「forum_posts 重新編號時更新那一欄」那一句。
+			err = renumberTable(context.Background(), conn, snowflakeIDTables[1])
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("應該回錯誤，而不是把沒有 collation 的比對拼出去")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("renumberTable: %v", err)
+			}
+			for _, want := range tt.contain {
+				if !src.saw(want) {
+					t.Errorf("重新編號的 UPDATE 沒有包含 %q", want)
+				}
+			}
+			for _, absent := range tt.notContain {
+				if src.saw(absent) {
+					t.Errorf("重新編號的 UPDATE 不該包含 %q", absent)
+				}
+			}
+		})
+	}
+}
+
 func TestCovMigrateMySQLProbeErrors(t *testing.T) {
 	// 'image_url' 是 addColumnIfNotExists 的探測（其餘三個是第 6/7/8 步的探測）：
 	// 兩種探測都必須在失敗時中止遷移，否則「某個欄位補不補得上」會靜默取決於
