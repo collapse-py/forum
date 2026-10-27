@@ -69,9 +69,23 @@ jobs:
       - name: vet
         run: go vet ./...
 
-      # -race 的測試必須真的跑了東西。coverageprofile 的存在就是為了這一點：
-      # 若某個套件完全沒有測試，它不會出現在 profile 裡，因此下面用
-      # coverage-floor 那個 job 來確保「有測試的套件沒有消失」。
+      # -race 的測試必須真的跑了東西。coverageprofile 的存在就是為了這一點，
+      # 而「有測試的套件沒有消失」由下面那道 --expect-packages 閘門保證。
+      #
+      # 2026-10-28 實測（Go 1.26）：**完全沒有測試的套件會以 0.0% 出現在 profile
+      # 裡** —— go test 會把每個被點名的套件編成一個測試二進位（即使它沒有測試
+      # 檔），並把它的敘述計進檔案。因此 `go test ./...` 讓 backend/tools/avatar
+      # 與 backend/tools/seed（兩個沒有測試的 CLI 工具）以 0% 進場，逐套件地板
+      # （75.0）從 commit 97620e6 起就紅燈（CI run 30、31、32 都掛在這一步）。
+      #
+      # 地板值不動，改的是「哪些套件被量」：只有**同時有 Go 檔與測試檔**的套件
+      # 才是可量的。沒有測試的 CLI 工具不在這裡被要求覆蓋率 —— 它們能編譯由上面
+      # build 與 vet 兩步保證，而「為兩個 main 寫出 75% 的測試」正是 docs 警告的
+      # 那種無行為斷言的測試。
+      #
+      # 這個過濾與下面 --expect-packages 用同一個條件，兩邊必須一致：清單比
+      # profile 寬會誤報「套件消失」，比它窄會讓「某個套件的測試被整包刪掉」無人
+      # 發現。
       #
       # 刻意不寫 -covermode=count：Go 1.26 起 -race 只接受 -covermode=atomic，
       # 指定別的 mode 會讓 go 直接結束（cmd/go/internal/work/init.go：
@@ -84,7 +98,12 @@ jobs:
       # 因此這裡讓 Go 自己選（-race 之下預設就是 atomic）：少一次測試執行，
       # 也少一份要在文件與註解之間同步的數字。
       - name: test -race
-        run: go test ./... -race -coverprofile=coverage.out
+        run: |
+          set -euo pipefail
+          # go list 對被過濾掉的套件會印空行，sed '/^$/d' 把那些空行去掉；
+          # $packages 不加引號是為了讓 bash 按空白分詞成多個參數。
+          packages="$(go list -f '{{if and .GoFiles (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d')"
+          go test $packages -race -coverprofile=coverage.out
 
       # 逐套件的覆蓋率地板（每個套件都要 ≥ 75.0%）。
       #
@@ -100,13 +119,17 @@ jobs:
       # 從 profile 裡消失 —— 因此逐套件地板量不到它，而總覆蓋率甚至會因為
       # 分母變小而上升。`go list` 的輸出就是「應該存在的套件清單」。
       #
-      # `{{if .GoFiles}}` 這個過濾是必要的：只含測試檔的套件（例如
-      # forum/forum/logcaller）沒有任何敘述，因此不會出現在 cover profile 裡
-      # —— 把它算進去會讓這道閘門每次都誤報。
+      # 這個過濾兩邊都要寫。`.GoFiles` 排除只含測試檔的套件（例如
+      # forum/forum/logcaller —— 它沒有敘述，不會出現在 cover profile 裡，把它
+      # 算進去會讓這道閘門每次都誤報）；`or .TestGoFiles .XTestGoFiles` 排除完全
+      # 沒有測試的套件（backend/tools/avatar 與 backend/tools/seed —— 它們以 0%
+      # 進場，那不是「測試被刪掉」的那種退化）。`.XTestGoFiles` 那一邊讓只寫外部
+      # 測試（`package x_test`）的套件仍被算進來 —— 那種測試一樣會覆蓋內部套件的
+      # 敘述。
       - name: 檢查逐套件覆蓋率地板
         run: |
           set -euo pipefail
-          packages="$(go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | paste -sd, -)"
+          packages="$(go list -f '{{if and .GoFiles (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d' | paste -sd, -)"
           go run ./tools/coveragefloor coverage.out 75.0 --per-package --expect-packages "$packages"
 
       - name: 上傳覆蓋率
@@ -145,8 +168,15 @@ jobs:
       #
       # 同樣不寫 -covermode=count：Go 1.26 起 -race 只接受 atomic（理由見
       # backend job 的同一段註解）。
+      #
+      # 過濾條件與 backend job 相同（見那裡 2026-10-28 的實測）。這個模組目前只有
+      # 一個有測試的套件，因此清單與 `go test ./...` 一樣 —— 寫同一個條件是為了
+      # 兩個模組用同一條線，而不是為了改變這裡的結果。
       - name: test -race
-        run: go test ./... -race -coverprofile=coverage.out
+        run: |
+          set -euo pipefail
+          packages="$(go list -f '{{if and .GoFiles (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d')"
+          go test $packages -race -coverprofile=coverage.out
 
       # 逐套件地板與 backend 相同（75.0%）。這個模組只有一個套件，因此這道
       # 閘門與總數是同一件事；它存在的原因是「兩個模組用同一條線」，而不是
@@ -161,7 +191,7 @@ jobs:
         working-directory: backend
         run: |
           set -euo pipefail
-          packages="$(cd ../files_server && go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | paste -sd, -)"
+          packages="$(cd ../files_server && go list -f '{{if and .GoFiles (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d' | paste -sd, -)"
           go run ./tools/coveragefloor ../files_server/coverage.out 75.0 --per-package --expect-packages "$packages"
 
       - name: 上傳覆蓋率
@@ -274,6 +304,12 @@ jobs:
       # 實測值的組成：backend 87.4%（httpapi 87.0%、data 98.6%、purge 93.5%、
       # audit 97.0%、metrics 76.9%、main 78.5%，其餘皆 ≥ 88%）+
       # files_server 91.6%，合併 87.7%。
+      #
+      # 2026-10-28 起兩邊的 profile 都只含「有測試的套件」（沒有測試的 CLI 工具
+      # 不再以 0% 進場，理由見 backend job），因此分母變小、總數變高：本地實測
+      # backend 86.5%（舊的 `go test ./...` 版本是 81.3%）。地板仍是 75.0 ——
+      # 這道閘門量的是「可量的程式碼被覆蓋了多少」，把不可量的工具塞進分母只會
+      # 讓數字更難讀。
       #
       # 這個數字與逐套件的地板（75.0，見 backend 與 files_server 兩個 job）是
       # 兩道不同的閘門：這裡量的是「合併後的總數」，那裡量的是「每個套件
