@@ -116,6 +116,9 @@ func writeCSVHeader(w http.ResponseWriter, filename string) *csv.Writer {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	// 匯出的是使用者可控的內容，讓瀏覽器不要把它當成可執行的文件。
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// CSV 裡是使用者的內容與 email。與 writeJSON 同一個理由：沒有這一行，
+	// 共享快取可能把一份後台匯出存起來並送給下一個請求。
+	w.Header().Set("Cache-Control", "no-store")
 
 	writer := csv.NewWriter(w)
 	// 先寫 BOM。csv.Writer 會在每個 record 前檢查「上一筆是否以引號結尾」，

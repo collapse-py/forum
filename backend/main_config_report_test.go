@@ -50,7 +50,7 @@ func TestCheckConfigReportsProductionRisks(t *testing.T) {
 	})
 
 	wants := []string{
-		"正式環境建議設定 TRUSTED_PROXY_CIDRS", // 空代理白名單 + 正式環境
+		"未設定 TRUSTED_PROXY_CIDRS", // 空代理白名單
 		"有 client id 卻沒有回呼網址",          // GOOGLE_CLIENT_ID 有、REDIRECT 無
 		"正式環境未設定 FILES_SERVER_TOKEN",   // 上傳端點會接受任何來源
 		"正式環境不接受兜底值",                   // Validate 的結論
@@ -78,6 +78,63 @@ func TestCheckConfigReportsProductionRisks(t *testing.T) {
 			t.Errorf("報告洩漏了憑證 %q:\n%s", secret, out)
 		}
 	}
+}
+
+// TestCheckConfigWarnsProxyAndInsecureCookieWithoutProductionFlags 釘住兩條
+// 「跟環境判斷無關」的警告。它們原本都掛在 IsProduction() 上，而那個判斷的依據
+// 是 COOKIE_SECURE 與 PUBLIC_BASE_URL —— 一個實際被代理接到公網、卻把這兩個值
+// 留成開發預設的部署（2026-10-27 線上那份就是這個形狀）會被判成非正式環境，
+// 於是那兩行提示完全不出現，而它們恰恰是那個部署上真正仍在生效的暴露。
+func TestCheckConfigWarnsProxyAndInsecureCookieWithoutProductionFlags(t *testing.T) {
+	t.Setenv("FILES_SERVER_TOKEN", "")
+
+	t.Run("網址寫著 http 也照樣警告代理白名單", func(t *testing.T) {
+		cfgPath := writeConfigFile(t, strings.Join([]string{
+			"COOKIE_SECURE=false",
+			"PUBLIC_BASE_URL=http://forum.internal:8088",
+			"SERVER_PORT=:8088",
+			"MEDIA_TOKEN_TTL_SECONDS=600",
+		}, "\n")+"\n")
+
+		out := captureStdout(t, func() { _ = checkConfig(cfgPath) })
+		if !strings.Contains(out, "未設定 TRUSTED_PROXY_CIDRS") {
+			t.Errorf("非正式環境的報告沒有警告代理白名單:\n%s", out)
+		}
+	})
+
+	t.Run("對外寫著 HTTPS 而 cookie 沒標 Secure → 警告", func(t *testing.T) {
+		cfgPath := writeConfigFile(t, strings.Join([]string{
+			"COOKIE_SECURE=false",
+			"PUBLIC_BASE_URL=https://forum.example.com",
+			"SERVER_PORT=:8088",
+			"MEDIA_TOKEN_TTL_SECONDS=600",
+			"TRUSTED_PROXY_CIDRS=127.0.0.1/32",
+		}, "\n")+"\n")
+
+		out := captureStdout(t, func() { _ = checkConfig(cfgPath) })
+		for _, want := range []string{"COOKIE_SECURE=false", "Strict-Transport-Security"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("報告缺少 %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("代理白名單已設定時不警告", func(t *testing.T) {
+		cfgPath := writeConfigFile(t, strings.Join([]string{
+			"COOKIE_SECURE=true",
+			"PUBLIC_BASE_URL=https://forum.example.com",
+			"TRUSTED_PROXY_CIDRS=192.168.66.7/32",
+			"MEDIA_TOKEN_TTL_SECONDS=600",
+		}, "\n")+"\n")
+
+		out := captureStdout(t, func() { _ = checkConfig(cfgPath) })
+		if strings.Contains(out, "未設定 TRUSTED_PROXY_CIDRS") {
+			t.Errorf("已設定白名單卻仍警告未設定:\n%s", out)
+		}
+		if strings.Contains(out, "不會送 Strict-Transport-Security") {
+			t.Errorf("COOKIE_SECURE=true 時不該警告 HSTS:\n%s", out)
+		}
+	})
 }
 
 // TestCheckConfigReportsRetentionAndRotation 確認報告裡有那些「失效完全

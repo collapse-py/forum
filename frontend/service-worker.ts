@@ -79,23 +79,46 @@ sw.addEventListener('fetch', (event) => {
     return;
   }
 
+  /*
+   * API 與後台的回應**不進快取**。這三個前綴底下的每一份 JSON 都與請求者的
+   * 身分有關（自己的貼文、通知、後台的使用者與稽核紀錄），把它存進 Cache API
+   * 等於把登入者的資料寫在裝置上，並能在離線時重放給同一裝置上的任何頁面。
+   * 後端現在也對所有 JSON 回 `Cache-Control: no-store`，因此這裡的快取嘗試
+   * 本來就會被拒；拿掉它是為了讓意圖在這一層也看得出來，而不是靠一個表頭。
+   */
   if (
     url.pathname.startsWith('/api/') ||
     url.pathname.startsWith('/auth/') ||
-    url.pathname.startsWith('/forum') ||
     url.pathname.startsWith('/admin')
   ) {
-    event.respondWith(networkFirst(request));
+    event.respondWith(networkOnly(request));
     return;
   }
 
-  if (request.destination === 'document') {
+  /*
+   * 論壇頁面（/forum 與其子路徑）走 networkFirst：那些 HTML 殼本身不含使用者
+   * 資料，離線時重放舊殼沒有外洩問題，而「先網路、拿到就更新快取」讓頁面在
+   * 有網路時永遠拿到最新殼。
+   */
+  if (url.pathname.startsWith('/forum') || request.destination === 'document') {
     event.respondWith(networkFirst(request));
     return;
   }
 
   event.respondWith(cacheFirst(request));
 });
+
+/** 只走網路、永遠不儲存。用於帶身分的回應（見上方的前綴判斷）。 */
+async function networkOnly(request: Request): Promise<Response> {
+  try {
+    return await fetch(request)
+  } catch {
+    return new Response(JSON.stringify({ ok: false, error: 'Offline' }), {
+      headers: { 'Content-Type': 'application/json' },
+      status: 503,
+    })
+  }
+}
 
 async function cacheFirst(request: Request): Promise<Response> {
   if (request.method !== 'GET') {

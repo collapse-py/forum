@@ -109,6 +109,17 @@ func NewManager(cookieName string, expire time.Duration, cookieSecure bool, rdb 
 	}
 }
 
+// CookieName 回傳這份 Manager 實際讀寫 cookie 時用的名稱。
+//
+// 存在的理由：授權層需要判斷「這個請求是不是帶著憑證來的」，而那必須用**讀憑證
+// 時同一個名稱**。直接讀設定檔的 COOKIE_NAME 在正式部署上與 Manager 的名稱相同
+// （main.go 把同一個值傳給 NewManager），但兩者的來源不同就可能不同 —— 例如
+// 測試替身給 Manager 一個自己的名稱，而 Server 的設定裡沒有它。以 Manager 為
+// 唯一真實來源，這類不一致不會變成「有 cookie 卻被當成沒有」的靜默判斷錯誤。
+func (m *Manager) CookieName() string {
+	return m.cookieName
+}
+
 // StartCleanup 原本預期啟動一個定期清除過期 session 的背景 goroutine。
 // 現在 session 的生命週期完全交給 Redis 的 key TTL 自動處理，記憶體與磁碟都不
 // 會殘留過期資料，因此不需要任何清理迴圈；簽章保留是為了維持 API 相容性。

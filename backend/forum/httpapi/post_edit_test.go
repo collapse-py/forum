@@ -55,6 +55,12 @@ func newPostEditTestServer(t *testing.T, trustedOrigins ...string) *Server {
 	mini := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
+	if len(trustedOrigins) == 0 {
+		// 不傳參數時給一個可用的來源。空的白名單在 2026-10-27 之後不再是
+		// 「關閉 CSRF 防護」，而是「沒有任何來源可信」：帶 cookie 的寫入請求
+		// 會全部得到 403，這一檔的測試就會變成在驗 CSRF 而不是驗授權與驗證邊界。
+		trustedOrigins = []string{covOrigin}
+	}
 	return &Server{
 		cfg:      config.Config{TrustedOrigins: trustedOrigins},
 		sessions: session.NewManager("FORUM_test", time.Hour, false, client),
@@ -79,6 +85,10 @@ func loggedInRequest(t *testing.T, server *Server, method, path, body string) *h
 		request = httptest.NewRequest(method, path, strings.NewReader(body))
 	}
 	request.AddCookie(&http.Cookie{Name: "FORUM_test", Value: token})
+	// 帶著 cookie 的請求現在必須帶來源訊號才會被信任（見 csrf.go 的分岔）。
+	// 這裡給一個預設值，讓「驗授權／驗驗證邊界」的測試不必每條都自己記得送
+	// Origin；要驗不可信來源的測試照原樣覆寫這個標頭。
+	request.Header.Set("Origin", covOrigin)
 	return request
 }
 

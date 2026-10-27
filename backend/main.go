@@ -771,6 +771,16 @@ func checkConfig(path string) error {
 	if !cfg.IsProduction() {
 		fmt.Fprintf(out, "  注意              : 非正式環境下會採用開發用的兜底值；正式部署必須啟用 HTTPS\n")
 	}
+	// 這一條是 L-02（2026-10-27 稽核）的提示層：站上寫著對外是 HTTPS，而 cookie
+	// 沒有標 Secure 時，那支 cookie 會在明文連線上送出，而 HSTS 也不會送
+	// （見 securityheaders.go：HSTS 的條件就是 CookieSecure）。
+	// 刻意只警告而不讓 Validate 失敗：本機開發走 http 時 COOKIE_SECURE 必須是
+	// false，把 false 當成致命錯誤會讓開發環境起不來。
+	if !cfg.CookieSecure && strings.HasPrefix(strings.ToLower(cfg.PublicBaseURL), "https://") {
+		fmt.Fprintf(out, "  警告              : PUBLIC_BASE_URL 是 HTTPS 但 COOKIE_SECURE=false ——"+
+			"session cookie 會在明文連線上送出，且不會送 Strict-Transport-Security。"+
+			"正式部署請設 COOKIE_SECURE=true\n")
+	}
 	fmt.Fprintln(out)
 
 	// 2. 網路與路由。這一組錯了的症狀最明顯，但也是最常見的打錯字來源。
@@ -783,12 +793,17 @@ func checkConfig(path string) error {
 	}
 	// 代理信任的預設值（空）代表「標頭優先」，而那在真的有一道代理擋在後面時
 	// 會讓限流與 IP 封鎖都可被單一偽造標頭繞過。因此值得單獨一行。
+	//
+	// 警告的條件刻意不再是 IsProduction()：那個判斷的依據是 COOKIE_SECURE 與
+	// PUBLIC_BASE_URL，而一個「沒有標 Secure cookie、網址寫著 http，但實際被
+	// 代理接到公網」的部署（正是 2026-10-27 線上那份的形狀）會被它判成非正式
+	// 環境，於是這一行完全不出現。白名單是「有代理就要設」的東西，跟環境名字
+	// 無關，所以這裡直接對所有未設定的情況警告。
 	if cfg.TrustedProxyCIDRs == "" {
 		fmt.Fprintf(out, "  可信任代理位址段   : （未設定 = 採信 X-Forwarded-For）\n")
-		if cfg.IsProduction() {
-			fmt.Fprintf(out, "  警告              : 正式環境建議設定 TRUSTED_PROXY_CIDRS，"+
-				"否則限流與 IP 封鎖都能用一個偽造標頭繞過\n")
-		}
+		fmt.Fprintf(out, "  警告              : 只要有任何代理或公網入口接在這支服務前面，"+
+			"未設定 TRUSTED_PROXY_CIDRS 就代表限流與 IP 封鎖能用一個偽造的 X-Forwarded-For 繞過；"+
+			"只有「確定沒有任何代理（本機開發直連）」時才可以留空\n")
 	} else {
 		fmt.Fprintf(out, "  可信任代理位址段   : %s\n", cfg.TrustedProxyCIDRs)
 	}

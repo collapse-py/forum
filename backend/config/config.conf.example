@@ -45,6 +45,10 @@ SESSION_EXPIRE_HOURS=72
 
 # 對外以 HTTPS 服務時必須為 true（同時是 HSTS 標頭的送出依據）。
 # 本機開發走 http:// 必須維持 false，否則瀏覽器會丟棄 cookie 而「登不進去」。
+#
+# false 而 PUBLIC_BASE_URL 寫著 https:// 時，`-check` 會明確警告：那代表
+# session cookie 會在明文連線上送出，而且不會送 Strict-Transport-Security。
+# 那是部署層的配置錯誤，不是程式的缺陷，因此它只警告、不阻止啟動。
 COOKIE_SECURE=false
 
 # net/http 的 host:port；以 ":" 開頭代表綁定所有介面。

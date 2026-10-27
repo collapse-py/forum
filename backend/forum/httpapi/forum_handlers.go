@@ -100,7 +100,6 @@ Origin 檢查在 csrf.go。
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
@@ -646,6 +645,21 @@ func forumOffsetParam(w http.ResponseWriter, r *http.Request) (int, bool) {
 	return parsed, true
 }
 
+// forumUploadMaxBytes 是後端這一側對上傳本文的硬性上限。
+//
+// 與 files_server 的 Upload.MaxSize（預設 50MB）對齊：兩邊門檻不一致時，使用者
+// 會看到「檔案伺服器拒絕了圖片」（502）而不是「圖片太大」（413），那是一個把人
+// 導去檢查檔案格式而非尺寸的錯誤訊息。
+const forumUploadMaxBytes = 50 << 20
+
+// forumUploadMemoryThreshold 是 ParseMultipartForm 的記憶體門檻：低於這個值的
+// 檔案留在記憶體，高於它的檔案落到暫存檔。
+//
+// 刻意遠低於 forumUploadMaxBytes。本 handler 接著會把檔案串流轉發（見
+// handleForumImageUpload 的 io.Pipe），把 50MB 留在記憶體對轉發毫無幫助，
+// 只是讓每個並行上傳多佔幾十 MB。
+const forumUploadMemoryThreshold = 4 << 20
+
 // handleForumImageUpload 接收瀏覽器選定的圖片，轉發給獨立的檔案伺服器保存，
 // 然後回傳一個「已附加短效 token」的公開網址給前端。
 //
@@ -680,11 +694,29 @@ func (s *Server) handleForumImageUpload(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusForbidden, "invalid origin")
 		return
 	}
-	// 50<<20 是「記憶體門檻」而非硬性大小上限：超過的內容會被 Go 暫存到
-	// 系統暫存檔而非直接拒絕。真正的硬上限在檔案伺服器端（MaxBytesReader +
-	// 50MB 上限），這裡只是先擋掉明顯過大的表單，避免在解析階段就吃光記憶體。
-	// 兩邊的門檻刻意對齊，避免使用者等檔案伺服器回 413 才知道圖片太大。
-	if err := r.ParseMultipartForm(50 << 20); err != nil {
+	// 硬性大小上限。原本這裡只有 ParseMultipartForm 的「記憶體門檻」，那是一個
+	// 暫存策略而不是上限：超過門檻的內容會被 Go 寫進系統暫存檔，因此一個超大
+	// 上傳會先被完整落地到磁碟，然後再由本 handler 讀回來轉發。與 F-01 那類
+	// 「輪替 X-Forwarded-For 換掉限流桶」疊加時，上傳額度就變成不限次數，
+	// 磁碟與記憶體都變成攻擊者可放大的維度。
+	//
+	// MaxBytesReader 放在 ParseMultipartForm **之前**（與 files_server 的
+	// uploadHandler 同一個順序）：它讓 net/http 在讀到第 50MB 時就中止，而不是
+	// 先把本文吃進暫存檔。兩邊的門檻刻意對齊，避免使用者等檔案伺服器回 413
+	// 才知道圖片太大。
+	r.Body = http.MaxBytesReader(w, r.Body, forumUploadMaxBytes)
+	// maxMemory 是「多大的檔案留在記憶體、其餘落到暫存檔」的分界，與上面的
+	// 硬上限是兩件事。刻意給一個小值：這裡接著會把檔案**串流**轉發（見下方
+	// io.Pipe），留在記憶體裡對轉發沒有任何幫助，只是讓 50 個並行上傳各吃
+	// 幾 MB。
+	if err := r.ParseMultipartForm(forumUploadMemoryThreshold); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			// 413 而不是 400：這是「太大」，前端與使用者都該看到一個能理解的
+			// 原因，而不是「表單無效」這種把人導去檢查檔案格式的訊息。
+			writeError(w, http.StatusRequestEntityTooLarge, "image too large")
+			return
+		}
 		badRequest(w, "invalid image upload")
 		return
 	}
@@ -693,8 +725,6 @@ func (s *Server) handleForumImageUpload(w http.ResponseWriter, r *http.Request) 
 		badRequest(w, "image file is required")
 		return
 	}
-	// FormFile 回傳的是 multipart.File，必須關閉；底層可能是實體檔案也可能是記憶體。
-	defer file.Close()
 
 	// 把已解析的檔案重新包裝成一份新的 multipart body 再送給檔案伺服器。
 	// 這一步不是多餘：它同時做了三件事——
@@ -702,27 +732,49 @@ func (s *Server) handleForumImageUpload(w http.ResponseWriter, r *http.Request) 
 	//   (2) 檔名以 filepath.Base 正規化，剝掉 ../../etc/passwd 這類路徑片段
 	//       （檔案伺服器正是以檔名作為儲存鍵）；
 	//   (3) 產生新的 boundary 與 Content-Type，避免直接沿用外部請求的邊界。
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("file", filepath.Base(header.Filename))
-	if err != nil {
-		internalError(w, "unable to prepare image upload")
-		return
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		// 讀取失敗代表 client 提前斷線或暫存檔有問題，此時不重試，直接結束。
-		internalError(w, "unable to read image upload")
-		return
-	}
-	// 必須 Close 才會寫出結尾邊界，否則檔案伺服器解析不到表單結尾。
-	if err := writer.Close(); err != nil {
-		internalError(w, "unable to prepare image upload")
-		return
-	}
+	//
+	// 為什麼用 io.Pipe 而不是 bytes.Buffer：bytes.Buffer 會把整份檔案在記憶體裡
+	// 再存一份（原本那份已經在暫存檔或記憶體裡），也就是「50MB 的檔案吃 100MB」
+	// 再加上轉發期間的持有時間。Pipe 讓「寫出新表單」與「送出 HTTP 請求」兩端
+	// 直接相連，峰值記憶體是幾個 32KB 的 chunk 而不是整份檔案。
+	//
+	// 代價是這個形状不能「先組好再送出」：寫表單的 goroutine 必須與請求的讀取
+	// 併行運行，且**一定**要關閉 pipe，否則呼叫端會永遠等在那裡。三個失敗路徑
+	// 都CloseWithError（或 defer 的 Close），而 pipe 的讀端是 http.Client，
+	// 它看到錯誤時會把 Do 回成 error —— 那就是下面那條 500/轉發失敗的分支。
+	pipeReader, pipeWriter := io.Pipe()
+	writer := multipart.NewWriter(pipeWriter)
+	go func() {
+		// file 必須在這裡關閉而不是在呼叫端：FormFile 回傳的檔案是由這個
+		// goroutine 讀完的，呼叫端先返回就先把檔案關掉的話，這裡的 Copy 會讀到
+		// 「use of closed file」。
+		defer file.Close()
+		defer pipeWriter.Close()
+
+		part, err := writer.CreateFormFile("file", filepath.Base(header.Filename))
+		if err != nil {
+			pipeWriter.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			// 讀取失敗代表 client 提前斷線或暫存檔有問題。這個錯誤會讓上面的
+			// http.Client.Do 回 error，因此不需要另開一個錯誤通道。
+			pipeWriter.CloseWithError(err)
+			return
+		}
+		// 必須 Close 才會寫出結尾邊界，否則檔案伺服器解析不到表單結尾。
+		// defer 的 Close 會把「已正常結尾」變成 ErrClosed 之前的結尾邊界已經寫出，
+		// 因此這裡的 Close 必須在 defer 之前完成；CloseWithError 之後 defer 的
+		// Close 只是重複關閉，對讀端沒有影響。
+		if err := writer.Close(); err != nil {
+			pipeWriter.CloseWithError(err)
+			return
+		}
+	}()
 
 	// FilesServerURL 是內網位址（例：192.168.66.5:7070），瀏覽器無法直接連線，
 	// 這正是論壇服務充當轉發點的原因。TrimRight 避免設定值尾斜線造成 //upload。
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(s.cfg.FilesServerURL, "/")+"/upload", &body)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(s.cfg.FilesServerURL, "/")+"/upload", pipeReader)
 	if err != nil {
 		internalError(w, "unable to create image upload request")
 		return

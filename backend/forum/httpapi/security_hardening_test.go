@@ -1,0 +1,657 @@
+/*
+security_hardening_test.go 釘住 2026-10-27 那一輪安全收尾的行為界線。
+
+每一組測試對應一條當時仍在線上生效的暴露（audit-workspace/reports/audit-report.md）：
+
+  - 目錄清單（F-05）：/assets/、/asset/ 與 catch-all 都不該把目錄列出來。
+  - 後台 HTML 殼（F-04）：頁面路由要管理員，而 raw 檔名（/admin.html）要 404。
+  - 備檔與依賴目錄（L-07）：.bak / .env / .git 這類路徑不該從靜態根出去。
+  - /healthz 的錯誤文字（L-06）：回應只有固定值，錯誤留在日誌。
+  - JSON 回應可被快取（L-08）：每一份 JSON 都標 no-store。
+
+刻意只斷言「對外看到什麼」，不斷言內部實作：這些條的價值就在於回應本身。
+*/
+
+package httpapi
+
+import (
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+/* ==========================================================================
+   L-07：黑名單的覆蓋面
+   ========================================================================== */
+
+func TestHardeningStaticBlacklistCoversBackupAndAdminShells(t *testing.T) {
+	blocked := map[string]bool{
+		// 原本就擋住的（確認新增條目沒有把既有規則弄壞）。
+		"/config.conf":         true,
+		"/package.json":        true,
+		"/service-worker.js":   false,
+		"/forum-manifest.json": false,
+		"/app.js":              false,
+		"/logo.png":            false,
+
+		// 新增：備檔與暫存檔。
+		"/config.conf.bak": true,
+		"/config.old":      true,
+		"/secret.tmp":      true,
+		"/.env":            true,
+		"/backup.env":      true,
+		"/server.log":      true,
+		"/notes.md.bak":    true,
+		"/run.sh":          true,
+		"/deploy.ps1":      true,
+		"/schema.yml":      true,
+		"/users.csv":       true,
+		"/forum.db":        true,
+
+		// 新增：版控與依賴目錄。
+		"/.git/HEAD":              true,
+		"/.git/config":            true,
+		"/node_modules/foo/x.js":  true,
+		"/node_modules/foo/x.png": true,
+
+		// 新增：後台 HTML 殼（副檔名清單沒有 .html，因此必須逐筆指名）。
+		"/admin.html":         true,
+		"/forum-admin.html":   true,
+		"/forum-report.html":  true,
+		"/forum-monitor.html": true,
+		"/audit-log.html":     true,
+		"/forum-stats.html":   true,
+		"/export.html":        true,
+		"/sessions.html":      true,
+		"/blocks.html":        true,
+		"/announcements.html": true,
+		"/admin/monitor":      true,
+
+		// 使用者頁面與一般 HTML 不受影響：它們是入口檔，不是後台殼。
+		"/forum.html":         false,
+		"/forum-post.html":    false,
+		"/index.html":         false,
+		"/forum-login.html":   false,
+		"/forum/post/1":        true,
+		"/forum/not-a-block":   true, // /forum/ 是目錄級封鎖，子路徑一律 404
+		"/src/App.tsx":         true,
+		"/範例/logo.png":         true,
+		"/admin-notes.txt":     false, // 不是 /admin/ 前綴，也不是後台殼
+	}
+	for path, want := range blocked {
+		if got := isBlockedStaticPath(path); got != want {
+			t.Errorf("isBlockedStaticPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestHardeningAssetBlacklistKeepsManifestWhileBlockingSource(t *testing.T) {
+	// /assets/ 是建置產物目錄，那裡必須公開 .json（PWA manifest），因此它用
+	// 另一份清單。這條測試釘的就是「兩份清單的差別只有一個 .json」。
+	blocked := map[string]bool{
+		"/assets/forum-manifest-abc123.json": false,
+		"/assets/index-abc123.js":            false,
+		"/assets/style-abc123.css":           false,
+		"/asset/logo.png":                    false,
+
+		"/assets/package.json":      false, // .json 在/dist 裡是 manifest，必須公開 —— 這正是另開清單的理由
+		"/assets/App.tsx":           true,
+		"/assets/main.go":           true,
+		"/assets/config.conf":       true,
+		"/assets/config.conf.bak":   true,
+		"/assets/.env":              true,
+		"/assets/schema.sql":        true,
+		"/assets/x.yaml":            true,
+		"/asset/notes.log":          true,
+		"/asset/build.sh":           true,
+		"/":                         false,
+		"/assets/":                  false, // 目錄由 staticPathIsDirectory 處理，不是副檔名規則
+	}
+	for path, want := range blocked {
+		if got := isBlockedAssetPath(path); got != want {
+			t.Errorf("isBlockedAssetPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+/* ==========================================================================
+   F-05：目錄清單
+   ========================================================================== */
+
+// hardeningAssetTree 建立一個「有 assets/ 與同層 asset/，沒有 index.html」的
+// 前端目錄，正是 dist 的實際形狀。
+func hardeningAssetTree(t *testing.T) string {
+	t.Helper()
+	parent := t.TempDir()
+	frontendDir := filepath.Join(parent, "dist")
+	if err := os.MkdirAll(filepath.Join(frontendDir, "assets"), 0o755); err != nil {
+		t.Fatalf("建立 assets 目錄失敗: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(frontendDir, "assets", "index-abc.js"), []byte("js"), 0o644); err != nil {
+		t.Fatalf("寫入建置資產失敗: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(frontendDir, "assets", "forum-manifest-abc.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("寫入 manifest 失敗: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(parent, "asset"), 0o755); err != nil {
+		t.Fatalf("建立一手素材目錄失敗: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "asset", "logo.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("寫入 logo 失敗: %v", err)
+	}
+	return filepath.Join(parent, "dist")
+}
+
+func TestHardeningAssetHandlersRejectDirectoryListings(t *testing.T) {
+	frontendDir := hardeningAssetTree(t)
+
+	t.Run("/assets/ 根目錄不列清單", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		hashedAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/", nil))
+		// FileServer 的原始行為是「先 301 到尾斜線、再回 HTML 清單」。
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("GET /assets/ = %d, want %d（body = %s）", recorder.Code, http.StatusNotFound, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), "index-abc.js") {
+			t.Errorf("回應裡出現了資產檔名，代表這是一份目錄清單：\n%s", recorder.Body.String())
+		}
+	})
+
+	t.Run("/assets/ 子目錄不列清單", func(t *testing.T) {
+		if err := os.MkdirAll(filepath.Join(frontendDir, "assets", "fonts"), 0o755); err != nil {
+			t.Fatalf("建立子目錄失敗: %v", err)
+		}
+		recorder := httptest.NewRecorder()
+		hashedAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/fonts/", nil))
+		covWantStatus(t, recorder, http.StatusNotFound)
+	})
+
+	t.Run("/assets/ 的檔案照舊送出，manifest 不被副檔名規則擋掉", func(t *testing.T) {
+		for _, path := range []string{"/assets/index-abc.js", "/assets/forum-manifest-abc.json"} {
+			recorder := httptest.NewRecorder()
+			hashedAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want %d", path, recorder.Code, http.StatusOK)
+			}
+			if got := recorder.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+				t.Errorf("%s 的 Cache-Control = %q，want immutable 一年", path, got)
+			}
+		}
+	})
+
+	t.Run("/asset/ 根目錄不列清單", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		sourceAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/asset/", nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("GET /asset/ = %d, want %d（body = %s）", recorder.Code, http.StatusNotFound, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), "logo.png") {
+			t.Errorf("回應裡出現了素材檔名，代表這是一份目錄清單：\n%s", recorder.Body.String())
+		}
+	})
+
+	t.Run("/asset/ 的檔案照舊送出", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		sourceAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/asset/logo.png", nil))
+		covWantStatus(t, recorder, http.StatusOK)
+	})
+
+	t.Run("/asset/ 底下的備檔不送出", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(frontendDir), "asset", "config.conf.bak"), []byte("secret=1"), 0o644); err != nil {
+			t.Fatalf("寫入備檔失敗: %v", err)
+		}
+		recorder := httptest.NewRecorder()
+		sourceAssetHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/asset/config.conf.bak", nil))
+		covWantStatus(t, recorder, http.StatusNotFound)
+	})
+}
+
+func TestHardeningStaticRootBlocksListingsButKeepsIndex(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<html>首頁</html>"), 0o644); err != nil {
+		t.Fatalf("寫入 index.html 失敗: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "uploads"), 0o755); err != nil {
+		t.Fatalf("建立 uploads 目錄失敗: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "uploads", "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("寫入檔案失敗: %v", err)
+	}
+
+	handler := safeStaticFileServer(root)
+
+	t.Run("沒有 index 的目錄回 404 而不是清單", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/uploads/", nil))
+		covWantStatus(t, recorder, http.StatusNotFound)
+		if strings.Contains(recorder.Body.String(), "a.txt") {
+			t.Errorf("回應列出了目錄內容：\n%s", recorder.Body.String())
+		}
+	})
+
+	t.Run("有 index.html 的目錄照舊送出 index（首頁依賴這個行為）", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+		covWantStatus(t, recorder, http.StatusOK)
+		if !strings.Contains(recorder.Body.String(), "首頁") {
+			t.Errorf("首頁沒有送出 index.html：%s", recorder.Body.String())
+		}
+	})
+}
+
+/* ==========================================================================
+   F-04：後台頁面要管理員，且不能當成純檔案取得
+   ========================================================================== */
+
+func TestHardeningRequireAdminPageOnlyLetsAdminsThrough(t *testing.T) {
+	h := newCovHarness(t)
+	passed := false
+	handler := h.srv.requireAdminPage(func(http.ResponseWriter, *http.Request) { passed = true })
+
+	t.Run("沒有 session → 303 導向登入頁並帶 return", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		handler(recorder, httptest.NewRequest(http.MethodGet, "/admin/monitor?window=1h", nil))
+		covWantStatus(t, recorder, http.StatusSeeOther)
+		want := "/forum/login?return=" + url.QueryEscape("/admin/monitor?window=1h")
+		if got := recorder.Header().Get("Location"); got != want {
+			t.Errorf("Location = %q, want %q", got, want)
+		}
+		if passed {
+			t.Error("未登入卻進入了受保護的 handler")
+		}
+	})
+
+	t.Run("已登入但不是管理員 → 同樣導向登入頁", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/admin/monitor", nil)
+		req.AddCookie(h.login("user@example.com", false))
+		handler(recorder, req)
+		covWantStatus(t, recorder, http.StatusSeeOther)
+		if passed {
+			t.Error("非管理員卻進入了受保護的 handler")
+		}
+	})
+
+	t.Run("管理員 → 通過", func(t *testing.T) {
+		passed = false
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/admin/monitor", nil)
+		req.AddCookie(h.login("admin@example.com", true))
+		handler(recorder, req)
+		if !passed {
+			t.Error("管理員被擋在中介層外面")
+		}
+		if recorder.Code != http.StatusOK {
+			t.Errorf("中介層不該自己寫狀態碼，got %d", recorder.Code)
+		}
+	})
+}
+
+func TestHardeningAdminShellRoutesAndRawFiles(t *testing.T) {
+	h := newCovHarness(t)
+	handler := h.srv.Handler()
+
+	// Handler() 在前端沒有 dist 時會得到一個不存在的路徑，因此管理員那條路徑
+	// 「通過授權但拿不到檔案」（404）。這正是要斷言的分工：授權判斷在檔案之前。
+	t.Run("匿名造訪 /admin → 導向登入頁，不是 HTML", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin", nil))
+		covWantStatus(t, recorder, http.StatusSeeOther)
+		if !strings.HasPrefix(recorder.Header().Get("Location"), "/forum/login") {
+			t.Errorf("Location = %q，沒有導向登入頁", recorder.Header().Get("Location"))
+		}
+	})
+
+	t.Run("已登入的非管理員造訪後台頁面 → 導向登入頁", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/admin/sessions", nil)
+		req.AddCookie(h.login("user@example.com", false))
+		handler.ServeHTTP(recorder, req)
+		covWantStatus(t, recorder, http.StatusSeeOther)
+	})
+
+	t.Run("管理員造訪後台頁面 → 已經不在授權層被擋（拿到 404 而非 303）", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/admin/monitor", nil)
+		req.AddCookie(h.login("admin@example.com", true))
+		handler.ServeHTTP(recorder, req)
+		if recorder.Code == http.StatusSeeOther {
+			t.Fatal("管理員被導去登入頁，授權判斷錯了")
+		}
+	})
+
+	// 殼檔的 raw 路徑：那十個 HTML 檔案是 catch-all 看得到的檔案，而路由上的
+	// 判斷對它們完全不起作用 —— 所以黑名單必須自己蓋住這一路徑。
+	t.Run("GET /admin.html 這類 raw 路徑 → 404", func(t *testing.T) {
+		for _, path := range []string{
+			"/admin.html", "/forum-admin.html", "/forum-report.html", "/forum-monitor.html",
+			"/audit-log.html", "/forum-stats.html", "/export.html", "/sessions.html",
+			"/blocks.html", "/announcements.html",
+		} {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+			if recorder.Code != http.StatusNotFound {
+				t.Errorf("GET %s = %d, want %d（raw 檔案路徑不該送出後台殼）", path, recorder.Code, http.StatusNotFound)
+			}
+			// 就算前端目錄裡真的有這個檔案（正式部署會），也不能送出。
+			if strings.Contains(recorder.Body.String(), "<html") {
+				t.Errorf("GET %s 送出了 HTML：\n%s", path, recorder.Body.String())
+			}
+		}
+	})
+
+	t.Run("前端目錄裡真的有這些殼檔時，靜態根仍然不送出", func(t *testing.T) {
+		// 上面那條在「前端沒建置」的開發環境裡會是 404，但那個 404 可能只是
+		// 檔案不存在。這一條把檔案放進去，證明 404 來自黑名單而不是缺檔。
+		root := t.TempDir()
+		shells := []string{"admin.html", "forum-admin.html", "sessions.html", "forum-monitor.html", "audit-log.html"}
+		for _, name := range shells {
+			if err := os.WriteFile(filepath.Join(root, name), []byte("<html>後台內容</html>"), 0o644); err != nil {
+				t.Fatalf("寫入 %s 失敗: %v", name, err)
+			}
+		}
+		static := safeStaticFileServer(root)
+		for _, name := range shells {
+			recorder := httptest.NewRecorder()
+			static.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+name, nil))
+			if recorder.Code != http.StatusNotFound {
+				t.Errorf("GET /%s = %d, want %d", name, recorder.Code, http.StatusNotFound)
+			}
+			if strings.Contains(recorder.Body.String(), "後台內容") {
+				t.Errorf("GET /%s 送出了後台殼檔：%s", name, recorder.Body.String())
+			}
+		}
+	})
+
+	t.Run("管理員也讀不到 raw 路徑 —— 那條路徑不存在，不是「被擋住」", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/admin.html", nil)
+		req.AddCookie(h.login("admin@example.com", true))
+		handler.ServeHTTP(recorder, req)
+		covWantStatus(t, recorder, http.StatusNotFound)
+	})
+}
+
+/* ==========================================================================
+   L-06：/healthz 不帶依賴的錯誤文字
+   ========================================================================== */
+
+func TestHardeningHealthDoesNotExposeDependencyErrors(t *testing.T) {
+	h := newCovHarness(t)
+	covAdminUserCloseDB(t, h)
+	recorder := h.do(h.srv.handleHealth, http.MethodGet, "/healthz", "", "", false)
+
+	covWantStatus(t, recorder, http.StatusServiceUnavailable)
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"mysql":"error"`) {
+		t.Errorf("body 缺少固定的 error 值：%s", body)
+	}
+	// 驅動與客戶端的錯誤文字（「sql: database is closed」、dial 的位址、
+	// Redis 的 AUTH 措辭）都不該出現在免登入的回應裡。
+	for _, forbidden := range []string{"sql:", "closed", "dial", "connect", " refused", "127.0.0.1"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Errorf("body 洩露了依賴的錯誤文字（含 %q）：%s", forbidden, body)
+		}
+	}
+}
+
+/* ==========================================================================
+   L-09：上傳的硬性上限與串流轉發
+   ========================================================================== */
+
+// hardeningInfinite 是不斷產生 chunk 的來源，讓「過大的上傳」不需要在記憶體裡
+// 存一份 50MB 的副本 —— 上限是由 MaxBytesReader 在讀到第 50MB 時中止的，因此
+// 測試只需要讓來源「永遠讀不完」，而不是真的準備一個超大檔案。
+type hardeningInfinite struct{ chunk []byte }
+
+func (r *hardeningInfinite) Read(p []byte) (int, error) {
+	n := copy(p, r.chunk)
+	return n, nil
+}
+
+func TestHardeningUploadRejectsOverSizeBody(t *testing.T) {
+	h := newCovHarness(t)
+	covProfileConfigureMedia(h)
+
+	// 假檔案伺服器：如果它被呼叫到，代表上限沒有在後端這一側生效。
+	var called bool
+	files := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"url":"/files/late.png"}`))
+	}))
+	t.Cleanup(files.Close)
+	h.srv.cfg.FilesServerURL = files.URL
+
+	body, contentType := hardeningOversizeMultipart(t, forumUploadMaxBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/forum/images", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Origin", covOrigin)
+	req.AddCookie(h.login(covProfileEmail, false))
+
+	recorder := httptest.NewRecorder()
+	h.srv.handleForumImageUpload(recorder, req)
+	covWantStatus(t, recorder, http.StatusRequestEntityTooLarge)
+	if !strings.Contains(recorder.Body.String(), "too large") {
+		t.Errorf("413 的訊息應該說明「太大」而不是其他原因：%s", recorder.Body.String())
+	}
+	if called {
+		t.Error("過大的上傳被轉發給檔案伺服器了 —— 上限沒有在後端生效")
+	}
+	if h.sawQuery("INSERT INTO forum_media") {
+		t.Error("過大的上傳寫入了所有權紀錄")
+	}
+}
+
+// hardeningOversizeMultipart 產生一份「比上限還大」的 multipart 本文，以串流
+// 的方式送出來（而不是先在記憶體裡組好）。
+func hardeningOversizeMultipart(t *testing.T, size int64) (io.Reader, string) {
+	t.Helper()
+	reader, writer := io.Pipe()
+	mw := multipart.NewWriter(writer)
+	t.Cleanup(func() { _ = reader.Close() })
+	go func() {
+		part, err := mw.CreateFormFile("file", "huge.png")
+		if err != nil {
+			writer.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(part, io.LimitReader(&hardeningInfinite{chunk: make([]byte, 1<<20)}, size)); err != nil {
+			writer.CloseWithError(err)
+			return
+		}
+		if err := mw.Close(); err != nil {
+			writer.CloseWithError(err)
+			return
+		}
+		writer.Close()
+	}()
+	return reader, mw.FormDataContentType()
+}
+
+func TestHardeningUploadForwardsOnlyTheFileField(t *testing.T) {
+	h := newCovHarness(t)
+	covProfileConfigureMedia(h)
+
+	// 攻擊者可以在表單裡夾帶任意欄位。轉發層必須只送出 "file" —— 否則那些欄位
+	// 會帶著攻擊者的內容進到內網的檔案伺服器。
+	var fields []string
+	var fileContent string
+	files := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("轉發的表單解析失敗: %v", err)
+			return
+		}
+		for name := range r.Form {
+			fields = append(fields, name)
+		}
+		f, _, err := r.FormFile("file")
+		if err != nil {
+			t.Errorf("轉發的表單裡沒有 file 欄位: %v", err)
+			return
+		}
+		defer f.Close()
+		buf := new(strings.Builder)
+		_, _ = io.Copy(buf, f)
+		fileContent = buf.String()
+		_, _ = w.Write([]byte(`{"url":"/files/ok.png"}`))
+	}))
+	t.Cleanup(files.Close)
+	h.srv.cfg.FilesServerURL = files.URL
+
+	body, contentType := hardeningMultipartWithExtraField(t, "注入的內容", "photo.png", []byte("PNGDATA"))
+	req := httptest.NewRequest(http.MethodPost, "/api/forum/images", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Origin", covOrigin)
+	req.AddCookie(h.login(covProfileEmail, false))
+
+	recorder := httptest.NewRecorder()
+	h.srv.handleForumImageUpload(recorder, req)
+	covWantStatus(t, recorder, http.StatusCreated)
+	if fileContent != "PNGDATA" {
+		t.Errorf("轉發的檔案內容 = %q, want PNGDATA（串流轉發不能截斷或重複內容）", fileContent)
+	}
+	for _, name := range fields {
+		if name != "file" {
+			t.Errorf("轉發了額外的表單欄位 %q（應該只轉 file）", name)
+		}
+	}
+}
+
+func hardeningMultipartWithExtraField(t *testing.T, extraValue, filename string, content []byte) (io.Reader, string) {
+	t.Helper()
+	body, writer := io.Pipe()
+	mw := multipart.NewWriter(writer)
+	t.Cleanup(func() { _ = body.Close() })
+	go func() {
+		_ = mw.WriteField("note", extraValue)
+		part, err := mw.CreateFormFile("file", filename)
+		if err != nil {
+			writer.CloseWithError(err)
+			return
+		}
+		if _, err := part.Write(content); err != nil {
+			writer.CloseWithError(err)
+			return
+		}
+		if err := mw.Close(); err != nil {
+			writer.CloseWithError(err)
+			return
+		}
+		writer.Close()
+	}()
+	return body, mw.FormDataContentType()
+}
+
+/* ==========================================================================
+   L-10：兩個來源表頭都缺席時看「有沒有帶憑證」
+   ========================================================================== */
+
+func TestHardeningCSRFRequiresOriginWhenCookiePresent(t *testing.T) {
+	h := newCovHarness(t)
+	cookie := h.login("victim@example.com", false)
+
+	t.Run("帶 cookie、兩個表頭都沒有 → 不受信任", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		if h.srv.isTrustedOrigin(req) {
+			t.Error("帶著 cookie 卻沒有來源訊號的請求被放行了 —— 那是跨站偽造請求的形狀")
+		}
+	})
+
+	t.Run("不帶 cookie、兩個表頭都沒有 → 放行（curl／探測／tools/seed）", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader("{}"))
+		if !h.srv.isTrustedOrigin(req) {
+			t.Error("不帶憑證的呼叫不該被來源檢查擋掉")
+		}
+	})
+
+	t.Run("空值的 cookie 不算帶憑證", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader("{}"))
+		req.AddCookie(&http.Cookie{Name: h.srv.sessionCookieName(), Value: ""})
+		if !h.srv.isTrustedOrigin(req) {
+			t.Error("空 cookie 被當成有憑證了")
+		}
+	})
+
+	t.Run("帶 cookie + 可信 Origin → 通過", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader("{}"))
+		req.AddCookie(cookie)
+		req.Header.Set("Origin", covOrigin)
+		if !h.srv.isTrustedOrigin(req) {
+			t.Error("正常的同站寫入請求被擋掉了")
+		}
+	})
+
+	t.Run("帶 cookie + 可信 Referer（Origin 缺席）→ 通過", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader("{}"))
+		req.AddCookie(cookie)
+		req.Header.Set("Referer", covOrigin+"/forum/new")
+		if !h.srv.isTrustedOrigin(req) {
+			t.Error("只有 Referer 的合法請求被擋掉了")
+		}
+	})
+
+	t.Run("帶 cookie + 不可信 Origin／不可信 Referer → 拒絕", func(t *testing.T) {
+		for _, tc := range []struct{ name, origin, referer string }{
+			{"攻擊者的 Origin", "https://evil.example", ""},
+			{"攻擊者的 Referer", "", "https://evil.example/attack.html"},
+			{"解析不了的 Referer", "", "not-a-url"},
+		} {
+			req := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader("{}"))
+			req.AddCookie(cookie)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.referer != "" {
+				req.Header.Set("Referer", tc.referer)
+			}
+			if h.srv.isTrustedOrigin(req) {
+				t.Errorf("%s 被當成可信來源", tc.name)
+			}
+		}
+	})
+
+	t.Run("中介層端點也一樣：帶 cookie 無 Origin → 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/check", nil)
+		req.AddCookie(cookie)
+		recorder := httptest.NewRecorder()
+		h.srv.requireTrustedOrigin(func(http.ResponseWriter, *http.Request) {
+			t.Error("來源不受信任卻進入了 next")
+		})(recorder, req)
+		covWantStatus(t, recorder, http.StatusForbidden)
+	})
+}
+
+/* ==========================================================================
+   L-08：JSON 回應不可被快取
+   ========================================================================== */
+
+func TestHardeningJSONResponsesAreNotCacheable(t *testing.T) {
+	h := newCovHarness(t)
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		email  string
+		admin  bool
+	}{
+		{"健康檢查", http.MethodGet, "/healthz", "", "", false},
+		{"未授權的後台呼叫", http.MethodGet, "/api/admin/forum/posts", "", "", false},
+		{"身分檢查", http.MethodGet, "/api/check", "", "", false},
+		{"不存在的標籤查詢", http.MethodGet, "/api/admin/tags", "", "", false},
+	} {
+		recorder := h.do(h.srv.Handler().ServeHTTP, tc.method, tc.path, tc.body, tc.email, tc.admin)
+		if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s 的 Cache-Control = %q，want no-store", tc.name, got)
+		}
+	}
+}

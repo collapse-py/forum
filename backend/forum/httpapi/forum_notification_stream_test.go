@@ -440,6 +440,16 @@ func TestForumNotificationStreamAgainstRealServer(t *testing.T) {
 	header.Set("Cookie", "FORUM_test="+token)
 	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/forum/notifications/ws"
 
+	/*
+	 * 這支測試的 Server 是手建工況（不是 config.Load 的產物），因此 TRUSTED_ORIGINS
+	 * 是空的，而 2026-10-27 起「帶著 cookie 卻沒有來源訊號」的請求一律不被信任
+	 * （見 csrf.go 的分岔說明）。瀏覽器在 WebSocket 握手送上 Origin，所以這裡照
+	 * 同一個行為送 —— 不送的話這條連線會被 CSRF 層擋掉，三個子測試就變成在驗
+	 * 「 handshake 被拒」而不是驗推播路徑。
+	 */
+	server.cfg.TrustedOrigins = []string{httpServer.URL}
+	header.Set("Origin", httpServer.URL)
+
 	dial := func(t *testing.T) *websocket.Conn {
 		t.Helper()
 		conn, response, err := websocket.DefaultDialer.Dial(url, header)
@@ -566,11 +576,16 @@ func TestForumNotificationStreamMySQL(t *testing.T) {
 		t.Fatalf("建立 session 失敗: %v", err)
 	}
 
+	// 同 TestForumNotificationStreamAgainstRealServer：這支 Server 也是手建的，
+	// 而帶 cookie 的握手現在需要來源訊號（見 csrf.go）。
+	server.cfg.TrustedOrigins = []string{httpServer.URL}
+
 	dial := func(t *testing.T) *websocket.Conn {
 		t.Helper()
 		url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/forum/notifications/ws"
 		header := http.Header{}
 		header.Set("Cookie", "FORUM_test="+token)
+		header.Set("Origin", httpServer.URL)
 		conn, _, err := websocket.DefaultDialer.Dial(url, header)
 		if err != nil {
 			t.Fatalf("WebSocket 連線失敗: %v", err)

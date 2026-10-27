@@ -41,6 +41,7 @@ func adminRequest(t *testing.T, server *Server, method, path, body string) *http
 		request = httptest.NewRequest(method, path, strings.NewReader(body))
 	}
 	request.AddCookie(&http.Cookie{Name: "FORUM_test", Value: token})
+	request.Header.Set("Origin", covOrigin)
 	return request
 }
 
@@ -323,7 +324,5 @@ func TestAdminAnnouncementPublishAndExpireMySQL(t *testing.T) {
 	}
 }
 
-// 確認測試用的 cfg 形態（避免 unused import：config 在 newCoreForumServer 用到，
-// 這裡順便釘住「後台不需要 CSRF 白名單也能運作」的前提 —— 空 TrustedOrigins
-// 等於關閉 CSRF 防護，是既有文件記錄過的語意）。
+// 確認測試用的 cfg 形態（避免 unused import：config 在 newCoreForumServer 用到）。
 var _ = config.Config{}

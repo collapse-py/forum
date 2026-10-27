@@ -48,7 +48,11 @@ func newCoreForumServer(t *testing.T, db *sql.DB) *Server {
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 	return &Server{
-		cfg:        config.Config{},
+		// 2026-10-27 起，帶著 session cookie 的寫入請求必須帶來源訊號（見
+		// csrf.go 的分岔）。這一支 Server 是手建工況，所以白名單要手動給一個值：
+		// 留空代表「沒有任何可信來源」，那些帶 cookie 的請求會全部得到 403，
+		// 而這一整批測試驗的是 CRUD 本身。
+		cfg:        config.Config{TrustedOrigins: []string{covOrigin}},
 		db:         db,
 		sessions:   session.NewManager("FORUM_test", time.Hour, false, client),
 		mediaRedis: client,
@@ -384,6 +388,7 @@ func TestMyPostsReturnsOnlyOwnPostsMySQL(t *testing.T) {
 	}
 	otherReq := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader(`{"content":"別人的"}`))
 	otherReq.AddCookie(&http.Cookie{Name: "FORUM_test", Value: otherToken})
+	otherReq.Header.Set("Origin", covOrigin)
 	otherRecorder := httptest.NewRecorder()
 	server.handleForumPosts(otherRecorder, otherReq)
 	if otherRecorder.Code != http.StatusCreated {

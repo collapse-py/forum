@@ -27,12 +27,20 @@ package httpapi
 
 import (
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
 // blockedExactPaths 為逐筆比對的禁止清單，比對的是清理過的絕對路徑。
 // 這些檔案即使被放進前端目錄也不外洩。
+//
+// 後台的 HTML 殼檔列在這裡：那十個 /admin/* 頁面各自有專屬路由（server.go），
+// 且已改成必須是管理員才取得得到。但它們同樣是 catch-all 看得到的「純檔案」，
+// 而副檔名清單裡沒有 .html（HTML 是入口檔型別，不能整類擋掉），因此必須逐筆
+// 指名。少了這層，GET /admin.html 會繞過路由上的管理員判斷，把後台的介面結構
+// 送給任何匿名訪客。
 var blockedExactPaths = map[string]struct{}{
 	"/config.conf": {},
 	"/go.mod":      {},
@@ -40,6 +48,18 @@ var blockedExactPaths = map[string]struct{}{
 	"/main.go":     {},
 	"/main.py":     {},
 	"/server.log":  {},
+	"/.env":        {},
+
+	"/admin.html":         {},
+	"/forum-admin.html":   {},
+	"/forum-report.html":  {},
+	"/forum-monitor.html": {},
+	"/audit-log.html":     {},
+	"/forum-stats.html":   {},
+	"/export.html":        {},
+	"/sessions.html":      {},
+	"/blocks.html":        {},
+	"/announcements.html": {},
 }
 
 // allowedExactPaths 為明確放行的例外。放在比對順序的最前面，因為它必須優先於
@@ -64,6 +84,13 @@ var blockedPrefixes = []string{
 	"/forum/",
 	"/src/",
 	"/範例/",
+	// /admin/ 底下的任何檔案都不該以純檔案形式送出：那十個後台頁面有專屬路由
+	// 並已掛上管理員判斷，而這個目錄本身不該存在任何公開檔案。
+	"/admin/",
+	// 版控與依賴目錄：一旦它們被複製進前端根目錄（例如 dist 旁邊留了 checkout），
+	// .git 底下能讀出完整的 repository 與 commit 歷史。
+	"/.git/",
+	"/node_modules/",
 }
 
 // blockedSuffixes 為副檔名封鎖清單。保留 .json 在其中是為了擋下前端 web 目錄
@@ -87,6 +114,102 @@ var blockedSuffixes = []string{
 	".ts",
 	".tsx",
 	".jsx",
+	// 備檔與暫存檔。這一組是針對「檔案落在靜態根內」的補強：.bak / .old / .tmp
+	// 是人工改設定時最常見的副檔名（改完留一份舊檔），而它們恰恰帶著完整的憑證
+	// —— .conf 擋住了 config.conf，但改設定留下的 config.conf.bak 原本是漏網的。
+	// .env 同理：專案根目錄就有 .env，而靜態根是前端目錄，一旦有人把整棵
+	// repository 複製進 dist，它就看得得到。
+	".bak",
+	".old",
+	".tmp",
+	".env",
+	".log",
+	// 其他原始碼與組態型別：這裡不存在任何需要公開的這種檔案。
+	".sh",
+	".ps1",
+	".py",
+	".ini",
+	".yaml",
+	".yml",
+	".toml",
+	".csv",
+	".db",
+	".sqlite",
+}
+
+// blockedAssetSuffixes 是 /assets/ 與 /asset/ 那兩條路由用的封鎖清單。
+//
+// 為什麼要另開一份而不是重用 blockedSuffixes：那兩條路由指向的是「建置產物」
+// 與「一手素材」目錄，而 Vite 會把 PWA manifest 產成
+// /assets/forum-manifest-<hash>.json —— 它必須公開。blockedSuffixes 裡的
+// ".json" 是為了擋 frontend/web 根層的 package.json 與 package-lock.json，
+// 直接套用到 /assets/ 會讓清單變成「擋掉一個必須公開的檔案」。
+//
+// 這份清單保留了原始碼與組態型別（.ts/.tsx/.go/.conf 等）與上方的備檔型別：
+// 那兩目錄的檔案都是 .js/.css/圖片/manifest，沒有任何一條需要公開原始碼。
+var blockedAssetSuffixes = []string{
+	".go",
+	".conf",
+	".sql",
+	".mod",
+	".sum",
+	".ts",
+	".tsx",
+	".jsx",
+	".bak",
+	".old",
+	".tmp",
+	".env",
+	".log",
+	".sh",
+	".ps1",
+	".py",
+	".ini",
+	".yaml",
+	".yml",
+	".toml",
+	".db",
+	".sqlite",
+}
+
+// isBlockedAssetPath 判斷 /assets/ 或 /asset/ 下的某個路徑是否禁止送出。
+// 比對的是完整 URL 路徑（含 /assets/ 前綴），讓呼叫端可以直接傳 r.URL.Path。
+// 回傳 true 時一樣回 404 而非 403，理由同 isBlockedStaticPath。
+func isBlockedAssetPath(urlPath string) bool {
+	clean := path.Clean(urlPath)
+	if clean == "." {
+		clean = "/"
+	}
+	lower := strings.ToLower(clean)
+	for _, suffix := range blockedAssetSuffixes {
+		if strings.HasSuffix(lower, suffix) && clean != "/" {
+			return true
+		}
+	}
+	return false
+}
+
+// staticPathIsDirectory 判斷某個靜態請求對應到的是目錄而非檔案。
+//
+// 存在的理由：http.FileServer 對「目錄且沒有 index.html」會回應一份 HTML 的
+// 目錄清單，把檔名、大小與修改時間列出來。建置產物的檔名帶內容 hash，因此那份
+// 清單等於對外公開「這個站建置了哪些模組」；一手素材目錄則會列出 PWA 圖示之外的
+// 所有檔案。沒有任何使用者需要那份清單 —— 前端載入的是明確的檔名。
+//
+// index.html 的例外：FileServer 對目錄的預設行為是「先找 index.html，找到就送它，
+// 找不到才列清單」。root 目錄（首頁）正是靠這個行為送 index.html，因此那個例外
+// 必須保留，否則首頁會變成 404。
+func staticPathIsDirectory(root, urlPath string) bool {
+	clean := path.Clean(urlPath)
+	if clean == "." {
+		clean = "/"
+	}
+	fi, err := os.Stat(filepath.Join(root, strings.TrimPrefix(clean, "/")))
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(root, strings.TrimPrefix(clean, "/"), "index.html"))
+	return err != nil
 }
 
 // isBlockedStaticPath 判斷某個 URL 路徑是否禁止以靜態檔案形式提供。
@@ -145,8 +268,17 @@ func setPublicCacheControl(w http.ResponseWriter, value string) {
 // 檔名帶內容 hash，內容變了檔名就變，因此可以宣告一年 immutable；但正因為
 // 它是 public，回應上的 Set-Cookie 必須拿掉（見 setPublicCacheControl）。
 func hashedAssetHandler(frontendDir string) http.Handler {
-	fs := http.FileServer(http.Dir(frontendAssetsRoot(frontendDir)))
+	root := frontendAssetsRoot(frontendDir)
+	fs := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 目錄清單與原始碼型別都不該從這條路由出去（見 staticPathIsDirectory
+		// 與 blockedAssetSuffixes）。黑名單比對的是完整 URL 路徑，而目錄判斷要比
+		// StripPrefix 之後的相對路徑 —— 那個 root 本身就是 assets 目錄。
+		rel := strings.TrimPrefix(path.Clean(r.URL.Path), "/assets")
+		if isBlockedAssetPath(r.URL.Path) || staticPathIsDirectory(root, rel) {
+			http.NotFound(w, r)
+			return
+		}
 		// 僅 GET 掛 immutable：非 GET 請求不該帶著這份快取指示。
 		if r.Method == http.MethodGet {
 			setPublicCacheControl(w, "public, max-age=31536000, immutable")
@@ -162,8 +294,13 @@ func hashedAssetHandler(frontendDir string) http.Handler {
 // http.FileServer 會帶 Last-Modified，共享快取仍可能依啟發式規則暫存；因此
 // GET 回應一樣移除 Set-Cookie。真正的快取策略留給反向代理設定。
 func sourceAssetHandler(frontendDir string) http.Handler {
-	fs := http.StripPrefix("/asset/", http.FileServer(http.Dir(frontendAssetRoot(frontendDir))))
+	root := frontendAssetRoot(frontendDir)
+	fs := http.StripPrefix("/asset/", http.FileServer(http.Dir(root)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isBlockedAssetPath(r.URL.Path) || staticPathIsDirectory(root, strings.TrimPrefix(r.URL.Path, "/asset/")) {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Del("Set-Cookie")
 		}
@@ -181,6 +318,13 @@ func safeStaticFileServer(root string) http.Handler {
 	fs := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isBlockedStaticPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		// 目錄且沒有 index.html 時回 404，而不是讓 FileServer 列出清單。
+		// 有 index.html 的目錄（root 本身）照原樣交給 FileServer，那是首頁的
+		// 送出方式，不是清單。
+		if staticPathIsDirectory(root, r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}

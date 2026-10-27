@@ -40,13 +40,19 @@ package httpapi
   - 跨站表單送出、fetch/XHR、img 與 iframe 觸發的狀態變更請求：瀏覽器會
     附上攻擊者站點的 Origin（或其網頁的 Referer），比對失敗即以 403 拒絕。
   - 被注入惡意 Referer 值的請求（Referer 內容可由攻擊者頁面的 URL 決定）。
+  - **帶著 cookie 卻兩個表頭都不送的請求**。這一條是 2026-10-27 補上的：
+    原本「兩者皆缺席」是放行的（為了讓 curl、探測與後端對後端的呼叫能用），
+    而那恰恰也是「跨站請求被代理或隱私設定抹掉來源標頭」時的形狀 —— 帶著
+    victim 的 cookie、沒有來源訊號，本層就完全看不出來。現在帶憑證的請求必須
+    帶來源，不帶憑證的請求仍然免檢查（見 isTrustedOrigin 的分岔說明）。
 
 擋不住什麼
   - 與本站同源（same-origin）的 XSS：XSS 發出的請求其 Origin 就是本站，
     會直接通過。這類攻擊必須靠 CSP、輸出跳脫與 HttpOnly cookie 阻擋。
   - 同一個 TrustedOrigins 內部的子網域被入侵後發出的請求。
   - 不帶 cookie 的請求；本機的 curl 與後端對後端的呼叫需要能直接使用，
-    因此不能要求每個請求都帶 Origin。
+    因此不能要求每個請求都帶 Origin。那類請求也沒有 victim 的憑證可用，
+    不在這個威脅模型裡。
 
 實務限制
   - 比對採整串完全相符（僅忽略大小寫），不支援萬用字元或前綴比對；
@@ -80,8 +86,18 @@ func (s *Server) requireTrustedOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// sessionCookieName 回傳「這個請求若帶著憑證，憑證存在哪個 cookie 名稱裡」。
+// 以 session.Manager 為來源（見它的 CookieName 說明），s.cfg.CookieName 只在
+// Manager 未注入時當兜底值。
+func (s *Server) sessionCookieName() string {
+	if s.sessions == nil {
+		return s.cfg.CookieName
+	}
+	return s.sessions.CookieName()
+}
+
 // isTrustedOrigin 判斷請求的來源是否可信，判斷順序為 Origin → Referer →
-// 兩者皆無則放行。
+// 兩者皆無時看「有沒有帶憑證」（帶憑證則拒絕，見下方的說明）。
 // 這是純比對函式，不做 I/O、不寫回應。
 func (s *Server) isTrustedOrigin(r *http.Request) bool {
 	// 空白用字元可能被中介設備補上，先 Trim 再判斷是否為空字串。
@@ -95,11 +111,24 @@ func (s *Server) isTrustedOrigin(r *http.Request) bool {
 	if origin == "" {
 		referer := strings.TrimSpace(r.Header.Get("Referer"))
 		if referer == "" {
-			// 兩者都沒有就放行。理由：像 curl、伺服器對伺服器的呼叫、瀏覽器
-			// 擴充套件等合法客戶端可能一個都不送，擋下它們會讓功能壞掉；
-			// 而且這些呼叫並不是「瀏覽器自動附帶 cookie」的威脅模型。
-			// 殘餘風險：刻意移除兩個表頭的隱私設定或代理會讓跨站請求也通過，
-			// 這時本防護失效，必須仰賴 SameSite cookie 與後端的身分檢查。
+			// 兩者都缺席時的分岔：這個專案裡「沒送表頭」有兩種完全不同的客戶端，
+			// 而它們的威脅等級相反，因此不能用同一個答案。
+			//
+			//   1. 帶 session cookie 的請求 —— 這一定是瀏覽器（cookie 是瀏覽器
+			//      在自動附帶的），而瀏覽器在「同源的寫入請求」上必然送 Origin。
+			//      一個帶著 cookie 卻兩個表頭都不送的請求，代表它刻意被抹掉了
+			//      來源（跨站內容透過代理、或刻意移除 Referer 的隱私設定），
+			//      正是 CSRF 的形狀。因此這種請求一律拒絕（fail closed）。
+			//   2. 不帶 cookie 的請求 —— curl、後台工具、tools/seed、監控探測與
+			//      伺服器對伺服器的呼叫都在這一路，它們不需要 Origin 也不該被擋。
+			//
+			// 這一道補掉了原本「兩者都沒有就放行」的殘餘風險（docs/SECURITY.md 寫過
+			// 的那個）：SameSite=Lax 只擋「跨站的 POST 帶 cookie」在瀏覽器層的行為，
+			// 而一個被代理改寫的請求可以繞過它；以「有 cookie 就必須有來源」作判據
+			// 之後，那條路徑不再依賴表頭是否被送出來。
+			if cookie, err := r.Cookie(s.sessionCookieName()); err == nil && strings.TrimSpace(cookie.Value) != "" {
+				return false
+			}
 			return true
 		}
 		// 解析失敗一律拒絕（fail closed）：合法瀏覽器送出的 Referer 不可能

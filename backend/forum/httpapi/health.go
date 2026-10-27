@@ -29,13 +29,16 @@ package httpapi
     讓一次探測就能看到完整的依賴狀態，而不必來回重試。
   - 逾時刻意設為 3 秒：探測端點本身不該被慢速的依賴拖住，否則
     基礎設施的探測逾時會先發生，得到的失敗原因反而不可辨。
-  - 回應不含任何憑證或連線字串，只有依賴名稱與錯誤訊息。
+  - 回應不含任何憑證、連線字串，也不含依賴的錯誤文字：只有依賴名稱與
+    "ok" / "error" / "disabled" 三種固定結果。完整錯誤在日誌裡。
 */
 
 import (
 	"context"
 	"net/http"
 	"time"
+
+	"forum/forum/logger"
 )
 
 // handleHealth 探測 MySQL 與 Redis 的連線狀態並回傳 JSON。
@@ -50,8 +53,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 先預設為 200 與全部 "ok"，讓 checks 一定包含每個依賴的欄位；
-	// 探測失敗時再覆寫該欄位為實際錯誤訊息。同一個 map 同時負責
-	// 「有沒有問題」與「問題是什麼」兩件事。
+	// 探測失敗時把該欄位覆寫成固定的 "error"，而**原始錯誤只寫進日誌**。
+	// 同一個 map 同時負責「有沒有問題」與「問題是什麼」兩件事。
 	// es 固定出現（即使未設定），理由是「查得到但其實是降級模式」與
 	// 「壓根沒設定」是兩種維運上要區分的情況，欄位缺席就看不出來。
 	status := http.StatusOK
@@ -69,16 +72,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// PingContext 是最輕量的存活確認：只驗證連線可取得並回應，不查詢資料表。
 	if err := s.db.PingContext(ctx); err != nil {
-		checks["mysql"] = err.Error()
+		checks["mysql"] = "error"
 		status = http.StatusServiceUnavailable
+		logger.WarnfContext(ctx, "[HTTP] health: mysql unreachable: %v", err)
 	}
 
 	// mediaRedis 為 nil 代表建構時沒有注入（媒體功能未啟用），與「連不上」是
 	// 不同狀況：前者不應讓整個服務被判為不就緒。
 	if s.mediaRedis != nil {
 		if err := s.mediaRedis.Ping(ctx).Err(); err != nil {
-			checks["redis"] = err.Error()
+			checks["redis"] = "error"
 			status = http.StatusServiceUnavailable
+			logger.WarnfContext(ctx, "[HTTP] health: redis unreachable: %v", err)
 		}
 	}
 
@@ -87,11 +92,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !s.esEnabled() {
 		checks["es"] = "disabled"
 	} else if err := s.es.Ping(ctx); err != nil {
-		checks["es"] = err.Error()
+		checks["es"] = "error"
+		logger.WarnfContext(ctx, "[HTTP] health: elasticsearch unreachable: %v", err)
 	}
 
-	// ok 欄位與狀態碼保持一致，讓只解析 body 的前端也能判斷結果；
-	// checks 保留原始錯誤訊息供維運排查（不含連線字串等敏感資訊）。
+	// ok 欄位與狀態碼保持一致，讓只解析 body 的前端也能判斷結果。
+	// checks 只有 "ok" / "error" / "disabled" 三種固定值：這個端點是免登入的，
+	// 而驅動與客戶端的錯誤文字帶著 topology（位址、端口、/authentication 的措辭），
+	// 那是攻擊者免費的內部結構情報。真正的診斷在日誌裡，那裡本來就有完整錯誤。
 	writeJSON(w, status, map[string]interface{}{
 		"ok":     status == http.StatusOK,
 		"checks": checks,

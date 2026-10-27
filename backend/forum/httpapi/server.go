@@ -355,6 +355,28 @@ func (s *Server) rateLimitRead(limiter *RateLimiter, next http.HandlerFunc) http
 	})
 }
 
+// requireAdminPage 只讓管理員取得後台的 HTML 殼頁，其他人導向登入頁。
+//
+// 為什麼頁面也要這一層：資料端點早就由 requireAdminForum 把關，所以未登入者
+// 拿到 HTML 殼也讀不到任何內容。但那份殼是一份**結構宣告** —— 它寫出後台有哪
+// 些頁面、各頁載入哪個入口腳本、界面有哪些區塊。對一個正在探測這個站的攻擊者
+// 來說那是免費的地圖，而且不會留下任何稽核紀錄（HTML 不是寫入操作）。
+//
+// 未通過時回 303 導向登入頁而不是 401 JSON：這是一個人類直接造訪的頁面，
+// 與 requireLogin 同一個行為；已登入但不是管理員的人同樣被導去登入頁
+// （他換一個帳號即可，不需要看到「你沒有權限」這種洩露身分判斷的訊息）。
+func (s *Server) requireAdminPage(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.sessions.IsAdmin(r) {
+			location := "/forum/login?return=" + url.QueryEscape(r.RequestURI)
+			w.Header().Set("Location", location)
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // requireLogin 驗證「請求者是否為有效會話」，不通過時導向登入頁並附上
 // return 參數，讓登入完成後能回到原本想造訪的頁面。
 //
@@ -819,7 +841,7 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Service-Worker-Allowed", "/")
 		http.ServeFile(w, r, filepath.Join(frontendDir, "service-worker.js"))
 	})
-	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 這個比對在目前的註冊方式下其實不會命中："/admin" 是完全比對樣式，
 		// "/admin/" 根本不會進來（實測會落到最後的 catch-all）。保留它是防禦性
 		// 寫法 —— 若日後有人把樣式改成子樹比對，未定義的子路徑仍會被擋成 404。
@@ -828,8 +850,8 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "admin.html"))
-	})
-	mux.HandleFunc("/admin/forum", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/forum", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 論壇管理後台。同樣是防禦性比對；這三個 /admin 樣式彼此不前綴重疊
 		// （/admin/forum 與 /admin/forum-report 都是完全比對），不會互相吃掉。
 		if r.URL.Path != "/admin/forum" && r.URL.Path != "/admin/forum/" {
@@ -837,16 +859,16 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-admin.html"))
-	})
-	mux.HandleFunc("/admin/forum-report", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/forum-report", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 檢舉管理頁。
 		if r.URL.Path != "/admin/forum-report" && r.URL.Path != "/admin/forum-report/" {
 			http.NotFound(w, r)
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-report.html"))
-	})
-	mux.HandleFunc("/admin/monitor", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/monitor", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 監控儀表板。防禦性比對與另外兩個 /admin 樣式相同：這些樣式是
 		// 「完全比對」，/admin/monitor/ 不會進來（會落到 catch-all 的靜態
 		// 檔處理而拿到 404），保留比對是為了日後有人改成子樹比對時，未定義
@@ -856,24 +878,24 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-monitor.html"))
-	})
-	mux.HandleFunc("/admin/log", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/log", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 管理員操作稽核紀錄頁。防禦性比對同 /admin/monitor。
 		if r.URL.Path != "/admin/log" && r.URL.Path != "/admin/log/" {
 			http.NotFound(w, r)
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "audit-log.html"))
-	})
-	mux.HandleFunc("/admin/stats", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/stats", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 內容趨勢統計頁。防禦性比對同 /admin/monitor。
 		if r.URL.Path != "/admin/stats" && r.URL.Path != "/admin/stats/" {
 			http.NotFound(w, r)
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "forum-stats.html"))
-	})
-	mux.HandleFunc("/admin/export", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/export", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 匯出與批次操作頁。防禦性比對同 /admin/monitor。
 		// 路由名刻意不含「csv」：/admin/export 是頁面，而 /api/admin/export/*.csv
 		// 是下載。兩者若同名，ServeMux 的最長前綴比對會讓頁面路由吃掉下載
@@ -883,31 +905,31 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "export.html"))
-	})
-	mux.HandleFunc("/admin/sessions", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/sessions", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 登入與 Session 管理頁。防禦性比對同 /admin/monitor。
 		if r.URL.Path != "/admin/sessions" && r.URL.Path != "/admin/sessions/" {
 			http.NotFound(w, r)
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "sessions.html"))
-	})
-	mux.HandleFunc("/admin/blocks", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/blocks", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// IP 封鎖名單頁。防禦性比對同 /admin/monitor。
 		if r.URL.Path != "/admin/blocks" && r.URL.Path != "/admin/blocks/" {
 			http.NotFound(w, r)
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "blocks.html"))
-	})
-	mux.HandleFunc("/admin/announcements", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/announcements", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 站內公告管理頁。防禦性比對同 /admin/monitor。
 		if r.URL.Path != "/admin/announcements" && r.URL.Path != "/admin/announcements/" {
 			http.NotFound(w, r)
 			return
 		}
 		s.serveHTMLFile(w, r, filepath.Join(frontendDir, "announcements.html"))
-	})
+	}))
 	mux.Handle("/assets/", hashedAssetHandler(frontendDir))
 	// 登入頁同時註冊帶尾斜線與不帶兩個樣式：前者的子樹比對讓 "/forum/login/"
 	// 進得來，handleForumLoginPage 內的列舉再把未定義的子路徑擋成 404。
