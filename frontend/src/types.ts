@@ -673,8 +673,10 @@ export interface AdminActionChange {
 
 /**
  * 公開頁的貼文。欄位刻意比 AdminPost 少：公開 API 不回 authorEmail，
- * 只回 publicForumAuthor 產生的化名與 publicForumKey 產生的金鑰。
- * 兩者都不可用來還原 email —— 前端不該、也做不到拿 email 當識別依據。
+ * 只回 publicForumAuthor 產生的化名與後端的作者識別碼（forumAuthorKey）。
+ * 設了 `AUTHOR_KEY_SECRET` 的部署上那個識別碼是 HMAC，攻擊者沒有那把秘密就
+ * 還原不出 email；未設的部署上它是 SHA-256(email)，仍可被離線枚舉還原
+ * （見 docs/SECURITY.md 的「匿名性的邊界」）。前端不該、也無法拿 email 當識別依據。
  */
 export interface ForumPost {
   id: number;
@@ -803,8 +805,8 @@ export interface ForumProfile {
 /**
  * GET /api/forum/follows 的單一對象。
  *
- * Key 是被追蹤者的 publicForumKey（email 的 SHA-256），也是 PostCard 上
- * authorKey 的同一個值，因此兩處可以用字串直接比對，不需要任何對照表。
+ * Key 是被追蹤者的作者識別碼（後端 forumAuthorKey 現算，未設秘密時是 SHA-256），
+ * 也是 PostCard 上 authorKey 的同一個值，因此兩處可以用字串直接比對，不需要任何對照表。
  * Nickname 可能是空字串（對方從未設定暱稱），此時顯示 publicProfile.anonymous；
  * 後端刻意不代填匿名代號，因為那會在每次重新載入時換一個名字。
  */
@@ -875,8 +877,9 @@ export interface CommentResponse {
  * GET /api/forum/notifications 的單一通知。
  *
  * 與 ForumPost 同一個隱私契約：actorEmail 從不離開後端，前端拿到的身分只有
- * actor（顯示名稱）與 actorKey（publicKey）。Actor 由後端算好（暱稱或匿名代號），
- * 因此它一定是可直接顯示的字串，不像 FollowTarget.nickname 可能為空。
+ * actor（顯示名稱）與 actorKey（作者識別碼，與 ForumPost.authorKey 同一種形態 ——
+ * 同一支後端函式算出來的，因此連結到那個人的公開個人頁不會查不到人）。
+ * Actor 由後端算好（暱稱或匿名代號），因此它一定是可直接顯示的字串，不像 FollowTarget.nickname 可能為空。
  */
 export interface ForumNotificationItem {
   id: number;

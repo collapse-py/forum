@@ -332,6 +332,31 @@ DELETE」，不包含「那筆檢舉被裁定為成立」還是「被刪掉的�
 
 ---
 
+## 對外作者識別碼
+
+公開 API 不能回傳 email（那等於個人資料，散落在每則貼文的 JSON 裡），但前端需要一個
+穩定的識別碼當 React/Vue 的 key、並用它呼叫 `/api/forum/public-profile`。因此：
+
+```
+httpapi.DeriveAuthorKey(secret, email)   ← 唯一產生點
+  有 AUTHOR_KEY_SECRET：HMAC-SHA256(secret, email) 的小寫十六進位
+  沒有：SHA-256(email)（舊形態）
+Server.forumAuthorKey(email)             ← 呼叫端唯一入口（讀 s.cfg.AuthorKeySecret）
+```
+
+「呼叫端一律走 `forumAuthorKey`」是刻意不變的：貼文卡、留言、追蹤清單、搜尋結果、通知
+都必須用同一種 key，否則前端從某一個端點連出去的個人頁會在另一個端點的部署上查不到人 ——
+那種漂移的症狀是「某些連結 404」而不是錯誤訊息。
+
+兩個欄位都寫進 `forum_profiles`（`public_key` 舊形態、`public_key_hmac` 目前形態），解析
+用 `WHERE public_key_hmac = ? OR public_key = ?`，因此舊連結仍可用。值**不在 SQL 裡算**：
+SQL 文字會進 MySQL 的 general log 與日誌，而秘密就在那裡洩漏。因此第 39 步只加欄位，
+值由啟動時 `data.BackfillProfileAuthorKeys` 在應用層逐批回填。
+
+見 [`SECURITY.md`](SECURITY.md#匿名性的邊界) 與 [`DATABASE.md`](DATABASE.md#作者識別碼的回填第-39-步)。
+
+---
+
 ## 媒體存取權杖
 
 上傳時後端在 Redis 建一個短 TTL 的 token（`createMediaToken`），檔案服務驗證它之後才

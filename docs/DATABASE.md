@@ -20,7 +20,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 | `forum_media` | 上傳檔案的所有權 | 主鍵是**檔名**（檔案伺服器以此為鍵）；`owner_email` 是上傳者，刪圖端點靠它回答「這是不是我的」。只記錄這個功能上線**之後**上傳的檔案 —— 更早的檔案沒有列，見 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#這次改動之前留下的孤兒檔無法清除) |
 | `forum_media_deletions` | 待刪除的圖片檔名佇列 | 主鍵 `filename`；與貼文硬刪**同一個交易**寫入，`purge.Prune` 成功刪檔或確認仍被引用後才移除。詳見 [`ARCHITECTURE.md`](ARCHITECTURE.md#清理機制) |
 | `forum_reports` | 檢舉 | `target_type`（`post`/`comment`）+ `target_id` 的多型參照，無外鍵 |
-| `forum_profiles` | 公開資料 | `public_key` = `SHA2(author_email, 256)`；`nickname` 唯一；`avatar_url` 只存**檔名**（讀取時組網址，語意指 `forum_posts.image_url`） |
+| `forum_profiles` | 公開資料 | **兩把**對外識別碼：`public_key_hmac` = `HMAC-SHA256(AUTHOR_KEY_SECRET, email)`（第 39 步，有索引；未設秘密時恆為空字串）、`public_key` = `SHA2(author_email, 256)`（第 16 步，有索引，舊形態）；值都在應用層算（`httpapi.DeriveAuthorKey`），不在 SQL 裡算 —— 秘密會進 MySQL 的 general log 與日誌。`nickname` 唯一；`avatar_url` 只存**檔名**（讀取時組網址，語意指 `forum_posts.image_url`） |
 | `forum_users` | 帳號狀態 | `status` 為 `ACTIVE` / `SUSPENDED`。**沒有 role 欄位** |
 | `forum_user_tags` | 標籤字典 | `name` 唯一 |
 | `forum_user_tag_assignments` | 標籤指派 | 複合 PK `(user_email, tag_id)` |
@@ -57,6 +57,25 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 ## 沒有 session 表
 
 Session 完全存在 Redis 的 `FORUM:session:<token>` hash 裡（欄位 `email` + `is_admin`）。這一點是整個安全模型的關鍵 —— cookie 只是查詢鍵，能讀 Redis 就等於能登入任何人 —— 見 [`SECURITY.md`](SECURITY.md)。Session 模型的設計理由與「為什麼這樣設計」見 [`ARCHITECTURE.md`](ARCHITECTURE.md#session-模型)。
+
+---
+
+## 作者識別碼的回填（第 39 步）
+
+第 39 步只**加** `public_key_hmac` 欄位與索引，值不在 SQL 裡算 —— 派生靠部署秘密，
+而 SQL 文字會進 MySQL 的 general log 與日誌。因此啟動時由 `data.BackfillProfileAuthorKeys`
+在應用層逐批（每批 500 列）補齊 `public_key_hmac = ''` 的列，派生的唯一來源是
+`httpapi.DeriveAuthorKey`（`main.go` 以它組出 `keyFor` 閉包）。
+
+- **未設 `AUTHOR_KEY_SECRET` 時這一步不做任何事**：那種部署的對外識別碼本來就是第 16
+  步的 SHA-256，新欄位保持空字串是正確狀態。
+- **冪等**：只動空字串的列。已回填的列不重算，所以**換秘密不會被這一步靜默覆蓋** ——
+  換秘密時既有對外 key 失效是部署者明示的代價，舊連結仍由 `public_key` 欄位解析。
+- 解析（`/api/forum/public-profile`、`/api/forum/public-posts`、追蹤對象）用
+  `WHERE public_key_hmac = ? OR public_key = ?`，兩欄都有索引；新形態排在前面是
+  刻意讓設了秘密後的請求走第一次命中。
+
+設計與代價見 [`SECURITY.md`](SECURITY.md#匿名性的邊界)。
 
 ---
 

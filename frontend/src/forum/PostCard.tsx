@@ -196,7 +196,7 @@ export function PostCard({ post, canInteract, comments, report, follow, onLike, 
    *
    * 自己的貼文不顯示：後端會以 400 拒絕自我追蹤，讓使用者按一顆注定失敗的
    * 按鈕只會得到一個看不懂的錯誤訊息。判斷用 authorKey（而不是暱稱）——
-   * post.authorKey 是後端 publicForumKey(email) 算出來的，與
+   * post.authorKey 是後端 forumAuthorKey(email) 算出來的，與
    * useFollow.state.selfKey 是同一個函式的輸出，可以直接比字串。
    *
    * 已知取捨：追蹤清單還沒載入完成時（useFollow.isSelf 因 selfKey 為空而回傳
@@ -730,7 +730,7 @@ function CommentBranch({
         report={report}
         /*
           「是不是我的留言」用 follow.isSelf 判斷，與判斷自己的貼文用的是同一個
-          函式 —— 它比對的是後端 publicForumKey(email) 算出來的 authorKey，而這裡的
+          函式 —— 它比對的是後端 forumAuthorKey(email) 算出來的 authorKey，而這裡的
           comment.authorKey 是同一個值。（posts.editable 一類的旗標不存在：公開 API
           不會回「這則留言是你的」，因為那等於把「這個金鑰等於我」送到每一個讀取端點。）
         */

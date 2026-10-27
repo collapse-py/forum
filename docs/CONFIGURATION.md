@@ -57,6 +57,7 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | |
 | `GOOGLE_REDIRECT_URL` | — | 必須與 Google Cloud Console 逐字相符 |
 | `ALLOWED_ADMIN_EMAIL` | 空 | 逗號分隔。載入與比對**雙邊**都做 TrimSpace + ToLower |
+| `AUTHOR_KEY_SECRET` | 空 | 對外作者識別碼的 HMAC 秘密（`HMAC-SHA256(secret, email)`）。留空時識別碼退回舊形態 `SHA-256(email)` —— 仍可被離線枚舉還原，`-check` 會警告但不讓啟動失敗。生成方式見 `backend/config/config.conf.example` |
 | `LOG_LEVEL` / `LOG_FILE` / `LOG_FORMAT` | `INFO` / `server.log` / `text` | 格式可選 `json`；輸出行格式見[日誌輸出格式](#日誌輸出格式) |
 | `MONITOR_RETENTION_HOURS` | `24` | 監控分鐘彙總在資料庫保留幾小時 |
 | `AUDIT_RETENTION_DAYS` | `90` | 稽核紀錄保留幾天 |
@@ -64,10 +65,10 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 | `LOG_MAX_SIZE_MB` | `50` | 日誌檔輪替的大小上限（MB）。`0` = 不輪替 |
 | `LOG_MAX_FILES` | `5` | 保留的輪替檔數（不含目前檔）。至少 1；超過 1000 以 1000 計（避免輪替的 rename 迴圈無界成長） |
 
-### 兩組「設定錯了也不會有症狀」的鍵
+### 三組「設定錯了也不會有症狀」的鍵
 
-`POST_RETENTION_DAYS` 與 `LOG_MAX_SIZE_MB` 的失效**完全沒有症狀**：服務照常啟動、
-照常回應、日誌乾淨、HTTP 狀態碼全對。
+`POST_RETENTION_DAYS`、`LOG_MAX_SIZE_MB` 與 `AUTHOR_KEY_SECRET` 的失效**完全沒有症狀**：
+服務照常啟動、照常回應、日誌乾淨、HTTP 狀態碼全對。
 
 - `POST_RETENTION_DAYS` 是全站唯一會**不可逆地刪掉使用者內容**的設定。設定成 7 與
   設定成 90 的差別，在啟動之後就看不到 —— 只有背景清理排程知道。因此 `forum -check`
@@ -75,6 +76,9 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 - `LOG_MAX_SIZE_MB = 0` 代表「不輪替」，同樣沒有症狀，只是日誌檔會一直長到磁碟滿
   （而磁碟滿之後的失敗模式是「輪替失敗」——那時日誌會退回只寫 stdout，且檔案輸出
   停止；這一條會在 stderr 印一行警告）。
+- `AUTHOR_KEY_SECRET` 留空時**什麼都照常運作**，只是對外的作者識別碼仍是
+  `SHA-256(email)` —— 任何持有候選信箱的人都能離線比對還原作者身分（稽核 F-03）。
+  因此 `-check` 的報告印出這一列的有無，並在未設定時提出警告。
 
 ### 站名
 
@@ -88,6 +92,9 @@ Copy-Item files_server\config.conf.example  files_server\config.conf
 - **刻意「設成 30 天」是允許的** —— 那代表部署者知道自己在做什麼，與「忘記設定」是不同的情況。
 - `MONITOR_RETENTION_HOURS` 決定「寫多少進資料庫」，**不決定監控頁時間軸的長度**（那是 `metrics.Options.WindowMinutes`，目前固定 120 分鐘）。混為一談的後果是設定 retention 的人以為圖會變長。
 - `ALLOWED_ADMIN_EMAIL` 刻意**不**做 Gmail 點號與 `+` 別名的正規化 —— 白名單的重點是「只有這些明確的信箱可以當管理員」，放寬比對只會讓它更容易被誤加。
+- **換 `AUTHOR_KEY_SECRET` 會讓已發布的作者識別碼全部失效。** 回填只動 `public_key_hmac = ''`
+  的列，已回填的列不重算，因此換秘密後舊 key 查不到人（舊連結仍靠第 16 步的 `public_key`
+  欄位解析）。這件事沒有症狀 —— 症狀是「某些個人頁連結開始 404」，而那是部署者自己的決定。
 
 ---
 
@@ -138,6 +145,11 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URL=http://localhost:8088/auth/callback
 ALLOWED_ADMIN_EMAIL=you@example.com
+
+# 對外作者識別碼的 HMAC 秘密。留空＝舊形態（SHA-256(email)，可被離線枚舉還原）。
+# 生成：openssl rand -base64 32。換掉它會讓已發布的識別碼全部失效（舊連結仍靠
+# forum_profiles.public_key 解析），因此這是一把「要換就一次換到底」的機密。
+AUTHOR_KEY_SECRET=
 
 # 檔案服務
 FILES_SERVER_URL=http://localhost:7070

@@ -33,7 +33,7 @@
 Redis**」。
 
 這個設計本身是好的（可立即撤銷、不需要簽章金鑰），但它把後果集中到一個點上：Redis 可達
-就等於全站沦陷。
+就等於全站淪陷。
 
 | 假設被打破時 | 後果 |
 | --- | --- |
@@ -98,6 +98,8 @@ POST /api/forum/posts   （Origin 為站點網域）
 ```
 
 `8d26441d…` = `SHA-256("cllapse.money@gmail.com")`，確認作者就是管理員本人。
+（那時尚未設 `AUTHOR_KEY_SECRET`，所以對外是舊形態；設了秘密後那個值會是 HMAC，
+見下方「匿名性的邊界」。）
 
 **清理**：刪掉 `FORUM:session:<自選 token>` 之後，同一個 cookie 立即回
 `{"isAdmin":false,"ok":false}`。原有的 3 支 session 未受影響。
@@ -190,12 +192,24 @@ Google userinfo → email
 （`user.posts.create`）。但要意識到：**一個管理員 session 被取得，就同時等於一個
 「用任何人的身分說任何話」的原語。** 這讓 Redis 入侵的影響遠大於一般的 session 劫持。
 
-### 移除白名單不會撤銷既有 session
+### 移除白名單不再需要等 session 過期（已修，2026-10-27）
 
-`is_admin` 是登入當下寫死的。要真正撤銷必須呼叫
-`POST /api/admin/sessions/revoke {"email":…}`，或等 72 小時滑動 TTL 到期。
+`is_admin` 是登入當下寫死進 Redis 的一筆快照。原本「把某人移出 `ALLOWED_ADMIN_EMAIL`」
+不會讓他的既有管理員 session 失效 —— 要等到 72 小時滑動 TTL 到期，或有人手動呼叫
+`POST /api/admin/sessions/revoke`。
 
-**後台沒有提供「刪除稽核紀錄」的 API，也沒有「撤銷自己以外所有人」以外的批次撤銷。**
+現在每一條管理員路徑（API 中介層、後台 HTML 殼、`/api/check`、通知推播）都會用
+`cfg.IsAdminEmail(email)` 回查**目前**的白名單（`adminPrivilegeCurrent`）：
+
+- 兩個條件都成立才算管理員：`sessions.IsAdmin`（這支 session 自稱是管理員）**且**
+  `adminPrivilegeCurrent`（這個信箱現在還在白名單裡）。
+- 回查不成立時該 session 被撤銷（`revokeStaleAdminSession`：刪 Redis key **＋** 清 cookie，
+  兩者都要做 —— 只刪 key 時 cookie 還在瀏覽器裡，只清 cookie 時舊 token 仍可重送），
+  API 回 401、HTML 殼導向登入頁，並記一行警告日誌。
+- **白名單為空時不回查**（`is_admin` 仍是權威來源）：那種部署（本機開發、尚未填白名單的
+  部署）沒有可比對的名單，回查會把所有人都判成非管理員。
+
+手動撤銷與批次撤銷仍在後台；沒有「刪除稽核紀錄」的 API。
 
 ---
 
@@ -214,38 +228,51 @@ Google userinfo → email
 
 ### 兩件必須知道的事
 
-**「兩個標頭都沒有」會刻意放行。**
+**「兩個標頭都沒有」時看「這個請求有沒有帶憑證」。**
 
 ```go
 if origin == "" {
     referer := strings.TrimSpace(r.Header.Get("Referer"))
     if referer == "" {
-        // 兩者都沒有就放行…
-        // 殘餘風險：刻意移除兩個標頭的隱私設定或代理會讓跨站請求也通過，
-        // 這時本防護失效，必須仰賴 SameSite cookie 與後端的身分檢查。
+        // 兩者都缺席時的分岔（2026-10-27 補）：帶 session cookie 的請求一律拒絕 ——
+        // 瀏覽器在同源的寫入請求上必然送 Origin，一個「帶 cookie 卻兩個表頭都不送」
+        // 的請求正是被代理或隱私設定抹掉來源的跨站請求。不帶 cookie 的請求仍放行
+        // （curl、探測、tools/seed、後端對後端）。
+        if cookie, err := r.Cookie(s.sessionCookieName()); err == nil && strings.TrimSpace(cookie.Value) != "" {
+            return false
+        }
         return true
     }
 ```
 
-**因此 `403 invalid origin` 不是可靠的閘門** —— curl、腳本、某些 SDK 都不送這兩個標頭，
-會直接跳過這道檢查。真正回答「這個請求有沒有身分」的是後端的身分檢查。
+**因此 `403 invalid origin` 仍不是可靠的閘門（對不帶憑證的請求而言）** —— curl、腳本、
+某些 SDK 都不送這兩個標頭，會直接跳過這道檢查。那類請求也沒有 victim 的憑證可用，
+不在這個威脅模型裡。真正回答「這個請求有沒有身分」的是後端的身分檢查。
 
-**沒有 synchronizer token。** 只靠 `SameSite=Lax` 撐住跨站 POST這一條。這在現代瀏覽器
-上是可接受的，但它意味著 **`SameSite` 屬性是被依賴的，不是可有可無的**。
+**沒有 synchronizer token。** 跨站 POST 靠 `SameSite=Lax` 加上「有 cookie 就必須有來源」
+這兩道。這在現代瀏覽器上是可接受的，但它意味著 **`SameSite` 屬性是被依賴的，不是可有可無的**。
 
 比對是精確 `EqualFold`，**不做預設埠或尾斜線正規化** —— `https://x` 與 `https://x:443`
-是不同的 origin，寫錯會讓全部寫入被擋（或全部通過）。
+是不同的 origin，寫錯會讓全部寫入被擋（或全部通過）。`TRUSTED_ORIGINS` 留空時
+`applyDefaults` 會填入 `PUBLIC_BASE_URL`，因此「來源存在但不在名單內」仍是被拒絕的。
 
-### 登入 CSRF 未被緩解
+### 登入 CSRF（已修，2026-10-27）
 
-OAuth 的 `state` 參數被**重複利用為「登入後要回到哪一頁」**，而不是標準建議的 CSRF
-隨機 nonce，因此 `state` 未綁定發起登入的瀏覽器。
+原本 OAuth 的 `state` 參數被**重複利用為「登入後要回到哪一頁」**，而不是標準建議的
+CSRF 隨機 nonce，因此 `state` 未綁定發起登入的瀏覽器 —— 攻擊者可以讓受害者完成一次
+**攻擊者自己帳號**的登入（login CSRF）。那不是提權，但它是可用的釣魚／信任降級原點。
 
-攻擊者可以讓受害者完成一次**攻擊者自己帳號**的登入（login CSRF）。這**不是提權**，
-但它是可用的釣魚／信任降級原點：受害者之後在這個站上輸入的內容，攻擊者用同一個 OAuth
-token 都讀得到。
+現在的形狀：
 
-唯一的防線是 `isSafeReturnPath` 這道開放轉向檢查（會先解碼、拒絕 `//` 與反斜線）。
+| 項目 | 做法 | 失敗時的症狀 |
+| --- | --- | --- |
+| `state` | 一次性 nonce（Redis，TTL 10 分鐘，`GETDEL` 取完即消失） | 用過一次 / 過期 / Redis 不可用 → 400 或 500，**不會**登入成功 |
+| 綁定瀏覽器 | 另外寫一枚短寿命的 `FORUM_oauth_state` cookie，回呼時比對 | 從別的瀏覽器貼上回呼網址 → 拒絕 |
+| 授權碼綁定 client | PKCE（S256，`code_verifier` 只在 Redis 裡） | 授權碼被別處重放時換不到 token |
+| 回跳路徑 | 存 Redis（跟 nonce 同一筆），不再塞在 `state` 裡 | 沒有可被偽造開放轉向的地方；`isSafeReturnPath` 仍在 |
+
+**Redis 或 OAuth 不可用時 fail closed（500）**：那條路徑原本可以用「沒有 nonce」繼續
+走，現在不會。上線後需要實際 smoke 一次 Google 登入 —— 本機測試用的是假端點。
 
 ---
 
@@ -321,11 +348,22 @@ HTML 內的 `<style>` 區塊在啟動時算 SHA-256 寫進 `style-src` 的 hash 
 
 ## 匿名性的邊界
 
-**email 不出現在任何 URL 與公開頁面**，對外一律用 `public_key = SHA2(author_email, 256)`
-（`publicForumKey`；遷移第 13 步會把既有貼文的作者回填，`public_key` 只存在於
-`forum_profiles`，且有索引）。
+**email 不出現在任何 URL 與公開頁面**，對外一律用「作者識別碼」：
 
-但這個雜湊是**確定性**的，而 email 的取值空間很小，所以：
+| 部署 | 形態 | 在哪裡 |
+| --- | --- | --- |
+| 設了 `AUTHOR_KEY_SECRET` | `HMAC-SHA256(secret, email)`，在應用層現算 | `forum_profiles.public_key_hmac`（第 39 步，有索引） |
+| 未設（本機開發、尚未導入的部署） | `SHA-256(email)` | `forum_profiles.public_key`（第 16 步，有索引） |
+
+唯一的派生來源是 `httpapi.DeriveAuthorKey`（`Server.forumAuthorKey` 包一層），
+所有端點都走它 —— 貼文卡、留言、追蹤清單、搜尋結果、通知都用同一種 key，
+不會出現「貼文用 HMAC、搜尋用 SHA」這種漂移。秘密不進 SQL 文字（SQL 會進
+MySQL 的 general log 與日誌），因此回填是啟動時逐批在應用層算
+（`data.BackfillProfileAuthorKeys`）。
+
+### 舊形態的界限（修掉之前）
+
+未設秘密時那個雜湊是**確定性**的，而 email 的取值空間很小，所以：
 
 > **任何使用者的完整發文紀錄可以被枚舉還原。**
 
@@ -334,14 +372,25 @@ HTML 內的 `<style>` 區塊在啟動時算 SHA-256 寫進 `style-src` 的 hash 
 GET /api/forum/public-posts?user=<SHA-256(email)>
 ```
 
-實測以管理員 email 的雜湊取回該帳號的全部 4 篇貼文。攻擊者枚舉常見信箱、雜湊比對即可。
-`/api/forum/public-profile?key=` 同理（注意參數名與前者不一致：`key` vs `user`）。
+2026-10-27 實測以管理員 email 的雜湊取回該帳號的全部 4 篇貼文。攻擊者枚舉常見
+信箱、雜湊比對即可。`/api/forum/public-profile?key=` 同理（注意參數名與前者不一致：
+`key` vs `user`）。
 
 **這不是授權漏洞**（那些貼文本來就是公開的），但它是**身分隱私的漏洞**：匿名性承諾的是
 「別人不知道那是你的信箱」，而這個承諾在有耐心的攻擊者面前不成立。
 
-要真正修掉需要加 salt 或改成不可逆但不可枚舉的識別方式，兩者都有代價 —— 這是一個產品
-決策，不是實作細節。
+### 現在真正的界限
+
+設了秘密之後，攻擊者手上沒有那把 HMAC 秘密，因此無法離線比對還原 —— 這才是修掉
+那個承諾的地方。代價與邊界要誠實寫下來：
+
+- **換秘密會讓已發布的識別碼全部失效。** 已回填的列不重算（回填只動
+  `public_key_hmac = ''` 的列），所以換秘密時舊 key 查不到人。舊連結仍可解析，
+  靠的是保留下來的 `public_key` 欄位（解析走 `public_key_hmac = ? OR public_key = ?`）。
+- **秘密本身是新的機密。** 它進 `.env`／設定檔，不進版本控制、不進 SQL、不進日誌；
+  洩漏它等於回到可枚舉的形態。
+- 未設秘密的部署仍是舊形態。`Validate` 刻意不拒絕它（本機開發與既有部署都還在舊形態），
+  但 `./forum -check` 會提出警告 —— 那一列是這個暴露唯一被看見的地方。
 
 ---
 
@@ -375,6 +424,12 @@ GET /api/forum/public-posts?user=<SHA-256(email)>
 - [ ] Elasticsearch 若未啟用，`ES_URL` 是留空的
 - [ ] Elasticsearch 若啟用了安全性，`ES_USERNAME`/`ES_PASSWORD` 或 `ES_API_KEY`
       有填（兩者皆空時每個 ES 請求都是 401，而搜尋會安靜退回 MySQL）
+- [ ] `AUTHOR_KEY_SECRET` 已設定 —— 未設時對外的作者識別碼仍是可離線枚舉還原的
+      `SHA-256(email)`（`-check` 會警告，但不讓啟動失敗）。它是一把**新的機密**：
+      不進版本控制、不進 SQL 文字、不進日誌。**換那把秘密會讓已發布的識別碼全部失效**
+      （舊連結仍由 `public_key` 欄位解析，新 key 查不到人）
+- [ ] 上線後實際走一次 Google 登入（nonce、PKCE、綁定 cookie 都靠在 Redis 上；
+      Redis 不可用時登入以 500 結束 —— 那是 fail closed，不是降級）
 
 **設定一致性**
 
@@ -399,8 +454,9 @@ GET /api/forum/public-posts?user=<SHA-256(email)>
 
 ## 已知的低風險問題
 
-這三項是實測確認、但**不需要內網位置或憑證**就能利用的。它們不是管理員提權，但都是
-純網際網路可達的問題。
+這三項在 2026-10-27 的實測裡都確認過，且都**不需要內網位置或憑證**就能利用 —— 它們不是
+管理員提權，但都是純網際網路可達的問題。第 2、3 項已在同一輪修掉（見各小節的標題）；
+第 1 項仍在，因為它是**部署設定**的決定，不是實作缺陷。
 
 ### 1. 限流可被單一偽造標頭繞過
 
@@ -423,13 +479,17 @@ IP 封鎖**不受**此影響（它檢查所有候選位址，命中任何一個�
 
 監控頁的 `clientIpTrust.mode` 顯示 `legacy-headers` 就是沒設定的訊號。
 
-### 2. 任意使用者的發文紀錄可枚舉
+### 2. 任意使用者的發文紀錄可枚舉（已修，靠 `AUTHOR_KEY_SECRET`）
 
-見[匿名性的邊界](#匿名性的邊界)。未登入，`/api/forum/public-posts?user=<hash>`。
+見[匿名性的邊界](#匿名性的邊界)。未登入打 `/api/forum/public-posts?user=<識別碼>` 這條
+路徑還在（那些貼文本來就是公開的），修的是**識別碼本身不再可離線還原**：設了秘密之後
+它是 HMAC，攻擊者手上沒有那把秘密。**沒有設秘密的部署仍是舊形態** —— 那正是 `-check`
+會警告的那一項。
 
-### 3. 登入 CSRF
+### 3. 登入 CSRF（已修，2026-10-27）
 
-見[CSRF](#csrf)那一節。`state` 是返回路徑而非 nonce。
+見[CSRF](#csrf)那一節。`state` 現在是一次性 nonce（Redis、`GETDEL`、TTL 10 分鐘）並綁定
+一枚短寿命 cookie，另加 PKCE；回跳路徑改存 Redis。Redis 或 OAuth 不可用時 fail closed。
 
 ### 順帶：`public-profile` 與 `public-posts` 的參數名不一致
 
