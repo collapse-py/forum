@@ -51,6 +51,7 @@ MySQL，`utf8mb4` / InnoDB。**Schema 在啟動時自動建立**：`data.Migrate
 - 多實例部署時每個實例必須設定不同的 [`SNOWFLAKE_NODE_ID`](CONFIGURATION.md)，否則同一毫秒可能發出相同 id。單一實例維持 `0`。
 - **既有資料會被重新編號**：`MigrateMySQL` 的第 38 步在偵測到 `AUTO_INCREMENT` 時，把七張表的既有列依舊 id 遞增換成雪花 id，並同步所有引用欄位（留言的 `post_id`／`parent_id`、按讚／收藏、檢舉的 `target_id`、通知的 `post_id`／`comment_id`、標籤指派、以及稽核紀錄的 `target_id`）。每張表一個交易、整個步驟在 MySQL named lock 下序列化；可重複執行。
 - 重新編號的已知成本：舊的**分享連結與書籤**（`/forum/post/<id>`）會失效；ES 索引由啟動時的全量重建換成新 id（舊文件由定期對帳清除）；稽核 `changes` 裡歷史 diff 的文字值（例如 `postId`）不會改寫。
+- 稽核的 `target_id` 是 VARCHAR，因此比對它時**兩側必須同一 collation**。MySQL 8 對 `DEFAULT CHARSET=utf8mb4`（沒寫 `COLLATE`）的表用的是 **charset 的預設 collation**（`utf8mb4_0900_ai_ci`），不是資料庫的；而 `CAST(... AS CHAR)` 帶著連線的 collation（`utf8mb4_general_ci`）。兩個 IMPLICIT collation 相撞時 MySQL 回 `Error 1267 (HY000): Illegal mix of collations`，而 `MigrateMySQL` 在啟動時被呼叫 —— 症狀是「每個實例都起不來」。比對因此以**該欄位自己的 collation** 進行（探測 `information_schema.COLUMNS` 的 `COLLATION_NAME`，再 `CONVERT(...) COLLATE`），這樣 `idx_forum_admin_actions_target` 仍能被 JOIN 用到，而欄位的 collation 不被改寫（那是 DDL，沒有降級路徑）。本機的開發資料庫是 MariaDB，utf8mb4 的預設 collation 正好就是 `utf8mb4_general_ci`，因此這個錯誤只在真實 MySQL 8 上現身（`migration_test.go` 自己造一個不同的 collation 來釘住它）。
 
 ---
 
