@@ -129,8 +129,10 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	// 分開呼叫 IsLoggedIn 與 IsAdmin：前者確認 session key 仍存在於 Redis，
 	// 後者只讀 session 裡的欄位。已登入但非管理員是合法狀態，必須一併回報。
+	// isAdmin 併用 adminPrivilegeCurrent 回查白名單：這支 API 是前端決定「要不要
+	// 顯示後台入口」的依據，回一份過期的 true 會讓已經被收回權限的人繼續看到後台。
 	loggedIn := s.sessions.IsLoggedIn(r)
-	isAdmin := s.sessions.IsAdmin(r)
+	isAdmin := s.sessions.IsAdmin(r) && s.adminPrivilegeCurrent(r)
 	writeOK(w, map[string]bool{
 		"ok":      loggedIn,
 		"isAdmin": isAdmin,

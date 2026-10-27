@@ -428,8 +428,12 @@ func (s *Server) handleForumNotificationStream(w http.ResponseWriter, r *http.Re
 	}
 	// 握手當下還讀得到請求時先抄下來（見檔頭第三點）。ResolveUser 與 IsAdmin
 	// 已經各查過一次 Redis，這裡只是多讀兩次同一份標頭。
+	// isAdmin 併用 adminPrivilegeCurrent 回查白名單：這條連線會把後台的活動通知推給它，
+	// 讓一支過期的 admin session 繼續收到管理員通知，等於把權限收回延遲到連線結束。
+	// 刻意不在這裡撤銷 session —— 撤銷會讓下面每輪的 Alive 檢查失敗並關掉連線，而這條
+	// 連線是唯讀的；「收回權限」這件事由寫入端點（requireAdminForum）做。
 	token := s.sessions.Token(r)
-	isAdmin := s.sessions.IsAdmin(r)
+	isAdmin := s.sessions.IsAdmin(r) && s.adminPrivilegeCurrent(r)
 
 	ws, err := notificationStreamUpgrader.Upgrade(w, r, nil)
 	if err != nil {

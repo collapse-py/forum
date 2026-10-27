@@ -130,7 +130,8 @@ func (m *Manager) StartCleanup(interval time.Duration) {
 
 // Create 為已通過身分驗證的使用者建立一筆 session，並回傳要寫進 cookie 的
 // token。email 與 isAdmin 由呼叫端（Google 驗證回呼）決定，後續變更（例如
-// 移出管理員名單）不會回寫到既有 session，必須等其過期或另行撤銷。
+// 移出管理員名單）不會回寫到既有 session —— 那筆快照由授權層在每個需要管理員的
+// 請求上回查白名單（httpapi.adminPrivilegeCurrent），不符時當場撤銷。
 // 錯誤情況：隨機數產生失敗（僅在作業系統亂數來源失效時）會直接回傳，
 // 絕不回傳弱隨機 token；Redis 寫入失敗則代表無法建立 session，呼叫端應
 // 視為登入失敗而非降級成免驗證。
@@ -292,6 +293,11 @@ func (m *Manager) ResolveUser(r *http.Request) string {
 // cookie 取得管理權限。
 // 與 ResolveUser 相同，任何 Redis 錯誤都視為「非管理員」（fail closed）。
 // 注意此方法不做「非管理員的停權檢查」，那是 httpapi.requireLogin 的責任。
+//
+// 它回答的是「這支 session 自稱是管理員嗎」，不是「這個信箱現在還在白名單裡嗎」：
+// is_admin 是登入當下的快照，人離開白名單後它仍為 true。授權層（httpapi 的
+// adminPrivilegeCurrent）會回查白名單並撤掉那支 session，因此呼叫 IsAdmin 的
+// 地方若同時需要「現在的白名單」，請一併查它。
 func (m *Manager) IsAdmin(r *http.Request) bool {
 	cookie, err := r.Cookie(m.cookieName)
 	if err != nil {

@@ -235,17 +235,19 @@ type adminForumReportRequest struct {
 requireAdminForum 檢查目前請求是否帶有管理員 session，若不是就立即回應 401。
 回傳 true 代表後續程式碼可以安全假設「呼叫端已通過管理員檢查」。
 
-與 csrf.go 的 isTrustedOrigin 如何分工
+	與 csrf.go 的 isTrustedOrigin 如何分工
 
 	兩者回答的是不同問題，互補而非替代：
 
 		requireAdminForum（身分）
 			依據 session cookie 內的 is_admin 欄位（session.Manager.IsAdmin）判斷
-			「呼叫者是誰、是不是管理員」，完全不看請求來自哪裡。
+			「呼叫者是誰、是不是管理員」，完全不看請求來自哪裡；並用
+			adminPrivilegeCurrent 回查白名單，確認那筆快照現在仍成立。
 
 		isTrustedOrigin（來源，csrf.go）
 			比對 Origin／Referer 與設定的 TrustedOrigins，判斷「這個請求從哪個網站發出」，
-			完全不看登入狀態。兩者皆未提供時它會視為通過（同源請求的正常情況）。
+			完全不看登入狀態。兩者皆未提供時，帶著 session cookie 的寫入請求會被擋；
+			不帶 cookie 的請求仍放行（工具與 seed 的寫入路徑）。
 
 	缺一不可的原因：只做身分檢查時，攻擊者可從任意外站對已登入管理員的瀏覽器發出
 	帶 cookie 的請求（CSRF）；只做來源檢查時，任何人都能帶著合法 Origin 直接呼叫管理 API。
@@ -268,6 +270,14 @@ func (s *Server) requireAdminForum(w http.ResponseWriter, r *http.Request) bool 
 	// forum-admin.js 的 loadPosts 與 forum-report.js 的 loadReports 都用
 	// response.status === 401 導回 /admin 重新登入。
 	if !s.sessions.IsAdmin(r) {
+		unauthorized(w, "admin access required")
+		return false
+	}
+	if !s.adminPrivilegeCurrent(r) {
+		// session 宣稱是管理員，但白名單已經不再覆蓋這個 email（人被移出、或設定檔
+		// 改掉後重啟）：撤掉那支 session，讓「收回權限」在下一個請求就生效，而不是
+		// 等它自然過期（預設 72 小時）。
+		s.revokeStaleAdminSession(w, r)
 		unauthorized(w, "admin access required")
 		return false
 	}

@@ -655,3 +655,108 @@ func TestHardeningJSONResponsesAreNotCacheable(t *testing.T) {
 		}
 	}
 }
+
+/* ==========================================================================
+   L-03：管理員身分的 session 快照在「人離開白名單」之後必須失效
+   ========================================================================== */
+
+// is_admin 是登入當下寫進 Redis 的一筆快照，因此收回權限原本要等那支 session 自然
+// 過期（預設 72 小時）。這裡釘住的是「下一個請求就失效」：401、cookie 被要求丟掉、
+// Redis 裡那支 key 消失。
+func TestAdminSessionRevokedWhenEmailLeavesWhitelist(t *testing.T) {
+	h := newCovHarness(t)
+	h.srv.cfg.AllowedAdminEmail = []string{"admin@example.com"}
+
+	inWhitelist := httptest.NewRequest(http.MethodGet, "/api/admin/forum/posts", nil)
+	inWhitelist.AddCookie(h.login("admin@example.com", true))
+	recorder := httptest.NewRecorder()
+	if !h.srv.requireAdminForum(recorder, inWhitelist) {
+		t.Fatalf("白名單內的 admin session 被擋 = %d", recorder.Code)
+	}
+
+	// 部署把這個人移出白名單（測試用直接改 cfg 表達，等同改設定檔後重啟）。
+	h.srv.cfg.AllowedAdminEmail = []string{"someone-else@example.com"}
+
+	out := httptest.NewRequest(http.MethodGet, "/api/admin/forum/posts", nil)
+	out.AddCookie(h.login("admin@example.com", true))
+	out.Header.Set("Origin", covOrigin)
+	recorder2 := httptest.NewRecorder()
+	if h.srv.requireAdminForum(recorder2, out) {
+		t.Fatal("已移出白名單的舊 session 仍被當成管理員")
+	}
+	if recorder2.Code != http.StatusUnauthorized {
+		t.Errorf("移出白名單後的回應 = %d, want 401", recorder2.Code)
+	}
+	if h.srv.sessions.IsLoggedIn(out) {
+		t.Error("session 仍在 Redis 裡 —— 撤銷沒有發生")
+	}
+	var cleared bool
+	for _, cookie := range recorder2.Result().Cookies() {
+		if cookie.Name == h.srv.sessionCookieName() && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("回應沒有要求瀏覽器丟掉 session cookie")
+	}
+}
+
+// 白名單為空時，is_admin 欄位就是唯一的權威來源（本機開發與測試的形態）。這一條釘住
+// 「不能因為白名單是空的就把所有 admin 擋掉」。
+func TestAdminSessionStillValidWithEmptyWhitelist(t *testing.T) {
+	h := newCovHarness(t)
+	h.srv.cfg.AllowedAdminEmail = nil
+
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/forum/posts", nil)
+	request.AddCookie(h.login("admin@example.com", true))
+	request.Header.Set("Origin", covOrigin)
+	recorder := httptest.NewRecorder()
+	if !h.srv.requireAdminForum(recorder, request) {
+		t.Errorf("白名單為空時 admin session 被擋 = %d", recorder.Code)
+	}
+}
+
+// /api/check 是前端決定「要不要顯示後台入口」的依據：過期的 true 會讓已被收回權限的
+// 人繼續看到後台。
+func TestCheckReportsAdminFalseAfterWhitelistRemoval(t *testing.T) {
+	h := newCovHarness(t)
+	h.srv.cfg.AllowedAdminEmail = []string{"admin@example.com"}
+	adminCookie := h.login("admin@example.com", true)
+
+	h.srv.cfg.AllowedAdminEmail = []string{"someone-else@example.com"}
+	recorder := httptest.NewRecorder()
+	check := httptest.NewRequest(http.MethodGet, "/api/check", nil)
+	check.AddCookie(adminCookie)
+	h.srv.handleCheck(recorder, check)
+
+	if strings.Contains(recorder.Body.String(), `"isAdmin":true`) {
+		t.Errorf("移出白名單後 /api/check 仍回報 admin: %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"ok":true`) {
+		t.Errorf("移出白名單不等同未登入: %s", recorder.Body.String())
+	}
+}
+
+// 後台 HTML 殼：同一支過期的 admin session 不能再拿到頁面（走 F-04 那層導向）。
+func TestAdminPageRedirectsAfterWhitelistRemoval(t *testing.T) {
+	h := newCovHarness(t)
+	h.srv.cfg.AllowedAdminEmail = []string{"admin@example.com"}
+	adminCookie := h.login("admin@example.com", true)
+
+	handler := h.srv.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h.srv.cfg.AllowedAdminEmail = []string{"someone-else@example.com"}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	request.AddCookie(adminCookie)
+	handler(recorder, request)
+
+	if recorder.Code != http.StatusSeeOther {
+		t.Errorf("過期 admin session 拿到後台頁 = %d, want 303", recorder.Code)
+	}
+	if loc := recorder.Header().Get("Location"); !strings.HasPrefix(loc, "/forum/login") {
+		t.Errorf("導向目標 = %q", loc)
+	}
+}

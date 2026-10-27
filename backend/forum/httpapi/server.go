@@ -355,6 +355,42 @@ func (s *Server) rateLimitRead(limiter *RateLimiter, next http.HandlerFunc) http
 	})
 }
 
+// adminPrivilegeCurrent 判斷「這個請求宣稱的管理員身分，以**現在**的白名單來看還成立嗎」。
+//
+// 為什麼要回查：session 的 is_admin 是登入當下由白名單寫死的一筆快照（見
+// session.Manager.Create），而白名單是設定檔裡的值。把某個信箱移出白名單、或改掉
+// ALLOWED_ADMIN_EMAIL 後重啟，那支舊 session 直到自然過期（預設 72 小時）之前都還
+// 帶著 is_admin=true —— 也就是「收回權限」要等到 session 過期，或有人手動去後台
+// 登出那一支。這一層把它改成「下一個請求就失效」。
+//
+// 白名單為空時回 true：那種部署下 is_admin 欄位就是唯一的權威來源（本機開發與測試
+// 都是這個形態），沒有白名單可回查。
+//
+// 它與 sessions.IsAdmin 的差別：後者問「這支 session 自稱是管理員嗎」，前者問
+// 「這個信箱現在還在白名單裡嗎」。兩個都成立才算數。
+func (s *Server) adminPrivilegeCurrent(r *http.Request) bool {
+	if len(s.cfg.AllowedAdminEmail) == 0 {
+		return true
+	}
+	return s.cfg.IsAdminEmail(s.sessions.ResolveUser(r))
+}
+
+// revokeStaleAdminSession 撤銷一支「白名單已不再覆蓋」的 session。
+//
+// 兩個動作都要做：只刪 Redis key 時 cookie 還留在瀏覽器裡直到自然到期，前端要等到
+// 下一次 /api/check 才發現自己已被登出；只清 cookie 時舊 token 仍可被直接重送
+// （見 session 檔頭「token 即憑證」那一段）。
+//
+// 這不寫稽核紀錄：被收回權限的人是透過自己的請求觸發撤銷的，沒有「誰做了這件事」
+// 可記；真正該留紀錄的是改動白名單的那次部署，而那是設定檔的變更、不在本站的
+// 操作範圍內。日誌是唯一對外可查的痕跡，因此這裡寫一行警告。
+func (s *Server) revokeStaleAdminSession(w http.ResponseWriter, r *http.Request) {
+	email := s.sessions.ResolveUser(r)
+	s.sessions.RemoveByRequest(r)
+	s.sessions.ClearCookie(w)
+	logger.Warnf("[AUTH] 撤銷一支已不在管理員白名單內的 session：email=%s path=%s", email, r.URL.Path)
+}
+
 // requireAdminPage 只讓管理員取得後台的 HTML 殼頁，其他人導向登入頁。
 //
 // 為什麼頁面也要這一層：資料端點早就由 requireAdminForum 把關，所以未登入者
@@ -367,6 +403,11 @@ func (s *Server) rateLimitRead(limiter *RateLimiter, next http.HandlerFunc) http
 // （他換一個帳號即可，不需要看到「你沒有權限」這種洩露身分判斷的訊息）。
 func (s *Server) requireAdminPage(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 白名單不再覆蓋這個信箱時先撤掉那支 session —— 之後 IsAdmin 自然回 false，
+		// 下面的導向就把他送去登入頁（見 adminPrivilegeCurrent 的說明）。
+		if s.sessions.IsAdmin(r) && !s.adminPrivilegeCurrent(r) {
+			s.revokeStaleAdminSession(w, r)
+		}
 		if !s.sessions.IsAdmin(r) {
 			location := "/forum/login?return=" + url.QueryEscape(r.RequestURI)
 			w.Header().Set("Location", location)
@@ -400,6 +441,11 @@ func (s *Server) requireLogin(next http.HandlerFunc) http.HandlerFunc {
 			// 就算原本這次是用 POST 觸發的。
 			w.WriteHeader(http.StatusSeeOther)
 			return
+		}
+		if s.sessions.IsAdmin(r) && !s.adminPrivilegeCurrent(r) {
+			// 白名單已不再覆蓋這個信箱：先撤掉那支 session，下面就會把它當成普通
+			// 使用者處理（含停權檢查），而不是繼續享受「管理員略過停權」的例外。
+			s.revokeStaleAdminSession(w, r)
 		}
 		if !s.sessions.IsAdmin(r) {
 			// 停權檢查只擋非管理員：管理員必須仍能進入系統，才能處理被停權
