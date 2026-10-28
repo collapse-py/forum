@@ -23,6 +23,12 @@ vite.config.ts.timestamp-*.mjs
 # 版本控只留原始碼。（node_modules 裡的 esbuild.exe 也一併被這條蓋掉。）
 *.exe
 
+# Linux 版產物：部署時用 `GOOS=linux go build -o server` 在本機編譯後上傳
+# （遠端 Go 版本比 go.mod 要求的舊，不在遠端 build）。這幾個名字沒有 `.exe`
+# 後綴，上面那條蓋不到它們，而 15 MB 的執行檔進版控只會讓 repo 變大。
+backend/server
+files_server/server
+
 # 編譯前留下的舊二進位副本（例如替換正在執行的 forum.exe 時先複製一份 `forum.exe~`）。
 # 它是本機暫存，不是產物，也不該進版控。
 *.exe~
