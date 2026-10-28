@@ -714,16 +714,23 @@ func (f *fakeIndexStore) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var q struct {
-		Size        int   `json:"size"`
-		SearchAfter int64 `json:"search_after"`
+		Size        int     `json:"size"`
+		SearchAfter []int64 `json:"search_after"`
 	}
+	// 與真實 ES 同形：`search_after` 給純數字會解码失敗 → 400。替身若收純數字，
+	// 就會讓「search_after 必須是陣列」這個合約在測試裡靜默通過（線上那條
+	// parsing_exception 正是這個形状）。
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil || q.Size <= 0 {
 		writeJSONBody(w, http.StatusBadRequest, `{"error":{"type":"bad_request"}}`)
 		return
 	}
+	after := int64(0)
+	if len(q.SearchAfter) > 0 {
+		after = q.SearchAfter[0]
+	}
 	hits := make([]string, 0, q.Size)
 	for _, id := range f.ids {
-		if id <= q.SearchAfter {
+		if id <= after {
 			continue
 		}
 		if len(hits) >= q.Size {

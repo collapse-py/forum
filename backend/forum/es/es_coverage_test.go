@@ -168,7 +168,9 @@ func TestListAllIDsPaginatesWithSearchAfter(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		var b strings.Builder
 		b.WriteString(`{"hits":{"hits":[`)
-		if strings.Contains(string(body), "search_after") {
+		// 分頁標記必須是陣列形状（`"search_after":[200]`）；給純數字時真實 ES 會
+		// 回 parsing_exception，這裡用同一個條件同時驗形状與「這是第二頁」。
+		if strings.Contains(string(body), `"search_after":[`) {
 			// 第二頁：只回一筆，結束分頁。
 			b.WriteString(`{"_id":"201"}`)
 		} else {

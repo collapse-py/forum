@@ -491,7 +491,16 @@ func (c *Client) ListAllIDs(ctx context.Context) ([]int64, error) {
 			"_source": false,
 		}
 		if !firstPage {
-			query["search_after"] = searchAfter
+			/*
+			 * `search_after` 必須是**陣列**，而且元素要對應 `sort` 的那一欄 ——
+			 * ES 的合約是「每個 sort 條目給一個游標值」，這裡只有一個 sort 條目，
+			 * 所以是一個元素的陣列。直接給純數字會被 ES 拒掉：
+			 * `http status 400 (parsing_exception): Unknown key for a VALUE_NUMBER
+			 * in [search_after]`（線上 ES 9.5.5 實測，對帳每輪都失敗並只留一條 WARN）。
+			 * 測試替身原本收純數字也通過，所以這個合約在測試裡看不見 —— 替身現在
+			 * 改成一樣只接受陣列。
+			 */
+			query["search_after"] = []int64{searchAfter}
 		}
 		body, err := json.Marshal(query)
 		if err != nil {

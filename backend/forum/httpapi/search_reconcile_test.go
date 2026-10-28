@@ -40,16 +40,21 @@ func (f *fakeES) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && path == "/_search":
 		var q struct {
-			Size        int   `json:"size"`
-			SearchAfter int64 `json:"search_after"`
+			Size        int     `json:"size"`
+			SearchAfter []int64 `json:"search_after"`
 		}
+		// 只接受陣列（與真實 ES 同形）：純數字在線上是 400 parsing_exception。
 		if err := json.NewDecoder(r.Body).Decode(&q); err != nil || q.Size <= 0 {
 			writeRawJSON(w, http.StatusBadRequest, `{"error":{"type":"bad_request"}}`)
 			return
 		}
+		after := int64(0)
+		if len(q.SearchAfter) > 0 {
+			after = q.SearchAfter[0]
+		}
 		ids := make([]int64, 0, q.Size)
 		for id := range f.docs {
-			if id > q.SearchAfter {
+			if id > after {
 				ids = append(ids, id)
 			}
 		}
