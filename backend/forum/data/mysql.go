@@ -56,6 +56,7 @@ package data
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -187,6 +188,137 @@ func addColumnIfNotExists(db *sql.DB, table, column, definition string) error {
 	return nil
 }
 
+// legacyForumImageName 把「任何一種本站檔案的寫法」收斂成純檔名：先丟掉 `?`
+// 之後的查詢字串（舊的完整網址帶 `?token=…`），再取最後一段路徑
+// （`/files/x.png` 或完整網址），最後丟掉舊版遷移黏在尾段的 `"]`（舊版遷移先包
+// JSON 再切路徑留下的 `x.png"]` 損壞值；只丟 `]` 會剩下一個引號）。語意與
+// httpapi.forumImageFileName 及 purge.imageFileName 相同；三份刻意各寫各的 ——
+// data 是 schema 層，不該依賴 handler 層的工具。
+//
+// 它與 SQL 那邊的四步 SUBSTRING_INDEX（httpapi.forumImageLegacyPostsExpr）逐字
+// 對應，因此「遷移後存的值」與「查詢時收斂出的值」是同一個規則，兩邊不會不一致。
+// 合法檔名的白名單是 [A-Za-z0-9._-]，`"` 與 `]` 不在其中，因此看到第一個就切掉
+// 不會誤傷任何合法檔名。
+func legacyForumImageName(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if i := strings.Index(value, "?"); i >= 0 {
+		value = value[:i]
+	}
+	if i := strings.LastIndex(value, "/"); i >= 0 {
+		value = value[i+1:]
+	}
+	if i := strings.IndexAny(value, `"]`); i >= 0 {
+		value = value[:i]
+	}
+	return value
+}
+
+// forumImageValueToCanonical 回傳新契約的寫法：JSON 陣列字串（空值為 `[]`）。
+//
+// 三種輸入都處理：
+//   - 已是 JSON 陣列：逐元素收斂（舊版可能把完整網址包進陣列裡）。
+//   - 單一值（純檔名、/files/x.png、完整網址、`x.png"]` 損壞值）：收斂成一個檔名，
+//     包成單元素陣列。
+//   - 收斂不出任何東西（空字串、空陣列、元素全收斂不出來）：`[]`。
+//
+// 已知限制與第 18 步相同：這個收斂只切字串、不驗證主機。第三方圖片網址會得到
+// 一個指向自己檔案伺服器、但實際不存在的檔名 —— 讀取時回空字串（前端不顯示縮圖），
+// 而 CSP 的 img-src 本來就只放行本站的檔案伺服器。
+func forumImageValueToCanonical(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "[]"
+	}
+	if strings.HasPrefix(value, "[") {
+		var items []string
+		if err := json.Unmarshal([]byte(value), &items); err == nil {
+			names := make([]string, 0, len(items))
+			for _, item := range items {
+				if name := legacyForumImageName(item); name != "" {
+					names = append(names, name)
+				}
+			}
+			if len(names) == 0 {
+				return "[]"
+			}
+			// json.Marshal 對 []string 不會失敗；萬一失敗就保留原值，
+			// 「不丟資料」比「變成空陣列」重要。
+			encoded, err := json.Marshal(names)
+			if err != nil {
+				return value
+			}
+			return string(encoded)
+		}
+		// 不是合法 JSON（例如 `[broken`）：當單值處理，下面的包法會得到合法 JSON。
+	}
+	name := legacyForumImageName(value)
+	if name == "" {
+		return "[]"
+	}
+	encoded, err := json.Marshal([]string{name})
+	if err != nil {
+		return value
+	}
+	return string(encoded)
+}
+
+// normalizeForumImageValues 把 forum_posts.image_url 裡「非新契約」的值收斂成
+// 新契約（見 forumImageValueToCanonical），並修掉舊版遷移順序留下的損壞值。
+//
+// 為什麼用 Go 而不是 SQL：舊值有四種形狀，而「JSON 陣列裡的元素也要收斂」在
+// SQL 裡需要 JSON_TABLE —— 那對**不合法**的 JSON 會直接報錯（ER_INVALID_JSON）。
+// MigrateMySQL 是同步跑的，一條報錯的 UPDATE 會讓伺服器啟動失敗，而這裡只是在
+// 修一個資料格式的問題。Go 逐列收斂，非法 JSON 走單值那條路。
+//
+// 冪等：新契約的值（`["a.png"]`）不含 `/` 也不含 `?`，且以 `[` 開頭，因此下面的
+// 探測條件不會命中它們，第二次啟動不動任何一列。
+const forumImageLegacyRowsWhere = `image_url LIKE '%/%' OR image_url LIKE '%?%' OR (LEFT(TRIM(image_url), 1) <> '[' AND TRIM(image_url) <> '')`
+
+func normalizeForumImageValues(db *sql.DB) error {
+	var legacy int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM forum_posts WHERE ` + forumImageLegacyRowsWhere).Scan(&legacy); err != nil {
+		return err
+	}
+	if legacy == 0 {
+		return nil
+	}
+
+	rows, err := db.Query(`SELECT id, image_url FROM forum_posts WHERE ` + forumImageLegacyRowsWhere)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type canonicalUpdate struct {
+		id       int64
+		imageURL string
+	}
+	updates := make([]canonicalUpdate, 0, legacy)
+	for rows.Next() {
+		var id int64
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		if canonical := forumImageValueToCanonical(raw); canonical != raw {
+			updates = append(updates, canonicalUpdate{id: id, imageURL: canonical})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, u := range updates {
+		if _, err := db.Exec(`UPDATE forum_posts SET image_url = ? WHERE id = ?`, u.imageURL, u.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // OpenMySQL 依傳入的 DSN 建立 *sql.DB 連線池，並設定連線池的容量與存活期限。
 //
 // 參數：
@@ -286,6 +418,19 @@ func MigrateMySQL(db *sql.DB) error {
 	}
 	// 2b) 多圖改版：把舊的單一檔名/網址轉成 JSON 陣列字串，讓 image_url 欄位
 	//    統一以 JSON 陣列表示（空值為 []）。冪等：已為 JSON 陣列的列不會再被轉。
+	//
+	// 2b) 多圖改版：把舊的單一檔名/網址轉成 JSON 陣列字串，讓 image_url 欄位
+	//    統一以 JSON 陣列表示（空值為 []）。冪等：已為 JSON 陣列的列不會再被轉。
+	//
+	//    順序是這條遷移的關鍵：**先收斂成純檔名，再包成 JSON**（見下方
+	//    normalizeForumImageValues）。先包再切（第 18 步對整條字串做 SUBSTRING_INDEX）
+	//    會把 `["http://…/files/x.png?token=t"]` 一路切成 `x.png"]`，而那個值不再含
+	//    `/`，因此第 18 步的冪等條件永遠不會再動它。第 18 步現在會丟掉尾段的 `"]`
+	//    （與這裡的 Go 收斂同一個規則），但**多圖**的舊值被切之後仍只剩最後一個
+	//    檔名，前面的圖直接消失 —— 那才是 2b 必須先收斂的理由。
+	if err := normalizeForumImageValues(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`UPDATE forum_posts SET image_url = '[]' WHERE TRIM(image_url) = ''`); err != nil {
 		return err
 	}
@@ -553,17 +698,27 @@ func MigrateMySQL(db *sql.DB) error {
 	//     為什麼需要：此欄過去存的是檔案伺服器回傳的完整網址，導致換對外網域
 	//     必須 UPDATE 全表，而且內部位址（http://192.168.66.5:7070/…）會被寫進
 	//     資料庫。新契約只存檔名，完整網址由應用層以 FILES_SERVER_PUBLIC_URL 組出。
-	//     作法：先以 SUBSTRING_INDEX(…, '?', 1) 去掉 ?token=…，再取最後一段路徑。
+	//     作法：先以 SUBSTRING_INDEX(…, '?', 1) 去掉 ?token=…，再取最後一段路徑，
+	//     最後丟掉舊版包成 JSON 後留下的尾段 `"]`（與第 2b 步的 Go 收斂、
+	//     httpapi/purge 的 SQL 表達式同一個規則）。合法檔名的白名單是
+	//     [A-Za-z0-9._-]，`"` 與 `]` 不在其中，因此那一步不會誤傷任何合法檔名。
 	//     WHERE image_url LIKE '%/%' 是冪等條件：轉換後的值不含 "/"，因此
 	//     第二次啟動不會再動到任何一列。含 "?token=" 但無路徑者不可能出現
 	//     （token 一定接在 /files/<檔名> 之後），故不另設條件。
+	//
+	//     這一步現在是**第二道**防線而不是唯一一道：第 2b 步的
+	//     normalizeForumImageValues 先把值收斂成純檔名再包成 JSON 陣列，因此正常
+	//     情況下這裡查不到任何列（條件命中不了新契約的值）。保留它是為了讓「只有
+	//     SQL、沒有 Go 收斂」的舊版本仍能修正單一值。已知限制：對**多元素**的 JSON
+	//     陣列做字串切割只能得到最後一段（前面的圖會消失）—— 那正是 2b 必須先收斂
+	//     的理由（見 2b 的說明），這裡只當兜底。
 	//     已知限制：此敘述只做字串切割，不驗證主機。舊資料若存的是第三方
 	//     圖片網址，切完會得到一個指向自己檔案伺服器、但實際不存在的檔名，
 	//     讀取時回空字串（前端不顯示縮圖）。應用層的 forumImageFileName
 	//     會容忍尚未遷移的舊寫法，因此兩者不必同步進行。
 	if _, err := db.Exec(`
 		UPDATE forum_posts
-		SET image_url = SUBSTRING_INDEX(SUBSTRING_INDEX(image_url, '?', 1), '/', -1)
+		SET image_url = SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(image_url, '?', 1), '/', -1), ']', 1), '"', 1)
 		WHERE image_url LIKE '%/%';
 	`); err != nil {
 		return err

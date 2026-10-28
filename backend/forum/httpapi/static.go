@@ -21,6 +21,8 @@ blockedSuffixes 三層規則擋掉敏感路徑，再用 allowedExactPaths 明確
     一刀就能涵蓋所有「萬一被複製到前端目錄」的敏感檔案。前端全面改用
     TypeScript 之後 .ts 尤其關鍵：frontendRoot 在沒有 dist 時會回退到
     frontend/web，而那個目錄底下除了 HTML/CSS 之外全是原始碼。
+    比對的是「檔名裡出現過這個副檔名」而不是「以它結尾」，理由見
+    staticNameHasBlockedSuffix。
 */
 
 package httpapi
@@ -135,6 +137,12 @@ var blockedSuffixes = []string{
 	".csv",
 	".db",
 	".sqlite",
+	// 來源對應檔（source map）。擋掉它是因為 `.map` 不是「未建置的原始碼」，
+	// 而是**建置產物裡帶着完整原始碼**的那一份：`/assets/foo.js.map` 會把模組
+	// 來源连同來源檔名一併送出，繞過上面那條「擋原始碼」的理由。這個站目前不產
+	// .map（dist 裡沒有 .map 檔），因此擋掉它沒有代價 —— 而哪天打開 sourcemap
+	// 時，它不會悄悄變成公開資產。
+	".map",
 }
 
 // blockedAssetSuffixes 是 /assets/ 與 /asset/ 那兩條路由用的封鎖清單。
@@ -170,6 +178,37 @@ var blockedAssetSuffixes = []string{
 	".toml",
 	".db",
 	".sqlite",
+	// 見上方 blockedSuffixes 裡 `.map` 的說明：/assets/ 是建置產物目錄，而
+	// source map 正是「建置產物裡帶着完整原始碼」的那一份。
+	".map",
+}
+
+// staticNameHasBlockedSuffix 判斷某個「檔名」是否帶有封鎖的副檔名 ——
+// 不限它出現在結尾。
+//
+// 為什麼不再用 strings.HasSuffix：副檔名封鎖是這三層裡最有效的一層，而 HasSuffix
+// 只看「最後一個點之後」。兩個真實會出現的寫法因此漏網：
+//   - config.conf.bak.pre-readlimit —— `.conf` 在中間，結尾是 `.pre-readlimit`
+//   - provider.tsx.js               —— `.tsx` 在中間，結尾是 `.js`
+// 前者是一整份帶憑證的設定檔（正是這條規則要擋的東西），後者是把原始碼包成 `.js`
+// 的檔案。黑名單的語意是「這個檔案帶有那個型別」，不是「這個檔案以那個型別結尾」，
+// 所以比對的是「這個檔名裡出現過那個副檔名」。
+//
+// 比對的是最後一段（檔名），不是整條路徑：目錄段不該讓一個合法檔名被抓到
+// （`/tmp/x.js` 的目錄名剛好帶 `.tmp` 時，檔本身不是暫存檔），而真正的目錄級封鎖
+// 走 blockedPrefixes，不在這裡。
+//
+// 不會誤傷合法檔名：前端產物的形態是 name-hash.ext（一個點），而比對要求「點紧跟
+// 型別」—— env.js 不含 `.env`、blog.js 不含 `.log`、settings.js 不含 `.ts`、
+// react-dom.js 不含 `.tsx`。
+func staticNameHasBlockedSuffix(cleanPath string, suffixes []string) bool {
+	name := path.Base(cleanPath)
+	for _, suffix := range suffixes {
+		if strings.Contains(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isBlockedAssetPath 判斷 /assets/ 或 /asset/ 下的某個路徑是否禁止送出。
@@ -181,12 +220,7 @@ func isBlockedAssetPath(urlPath string) bool {
 		clean = "/"
 	}
 	lower := strings.ToLower(clean)
-	for _, suffix := range blockedAssetSuffixes {
-		if strings.HasSuffix(lower, suffix) && clean != "/" {
-			return true
-		}
-	}
-	return false
+	return staticNameHasBlockedSuffix(lower, blockedAssetSuffixes)
 }
 
 // staticPathIsDirectory 判斷某個靜態請求對應到的是目錄而非檔案。
@@ -241,14 +275,9 @@ func isBlockedStaticPath(urlPath string) bool {
 	// 副檔名比對轉小寫：Windows 與預設設定的 macOS 檔案系統不分大小寫，
 	// "config.GO"、"x.CoNf" 在那些環境中仍可被開啟，只比小寫等於一併擋掉。
 	lower := strings.ToLower(clean)
-	for _, suffix := range blockedSuffixes {
-		// 排除根路徑：HasSuffix 對 "/" 為 false，但保險起見仍明寫
-		// clean != "/"，避免日後新增 "/" 結尾的字串時意外擋掉首頁。
-		if strings.HasSuffix(lower, suffix) && clean != "/" {
-			return true
-		}
-	}
-	return false
+	// 比對「檔名裡出現過封鎖的副檔名」而不是「以它結尾」，理由見
+	// staticNameHasBlockedSuffix。根路徑 "/" 不會命中任何一條（它的檔名段就是 "/"）。
+	return staticNameHasBlockedSuffix(lower, blockedSuffixes)
 }
 
 // setPublicCacheControl 設定公開快取的 Cache-Control，並移除 session cookie。
@@ -306,6 +335,29 @@ func sourceAssetHandler(frontendDir string) http.Handler {
 		}
 		fs.ServeHTTP(w, r)
 	})
+}
+
+// serviceWorkerHandler 服務根目錄的 /service-worker.js（PWA 的更新入口）。
+//
+// 為什麼它不能帶長期快取：這支檔案是 PWA 唯一「能自己更新」的東西。瀏覽器每次
+// 載入頁面都會對它做一次更新檢查（Chrome 另有 24 小時的規則），而共享快取若帶著
+// max-age，那次檢查就從快取拿到舊版 —— 部署新的 SW 之後，使用者仍繼續跑舊的
+// 攔截邏輯，而且沒有辦法讓它失效（舊的 SW 正是那份快取的讀取者）。2026-10-28
+// 部署時就踩過這件事：邊緣節點帶著 max-age=14400，新 SW 四小時內對使用者不可見。
+//
+// no-cache 不是「不快取」，是「每次使用前必須回源驗證」：邊緣仍可儲存它（省下
+// 回源的流量），但部署後的第一次請求就會拿到新版。與 HTML 用同一組值 —— 兩者
+// 都是入口檔，更新後必須立即生效（見 safeStaticFileServer 裡 HTML 那一段）。
+//
+// Service-Worker-Allowed 是明確宣告而非補救：SW 的作用域預設是「註冊它的路徑所在
+// 的目錄」，這支檔案掛在根目錄，預設作用域已是全站 /。
+func serviceWorkerHandler(frontendDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("Service-Worker-Allowed", "/")
+		http.ServeFile(w, r, filepath.Join(frontendDir, "service-worker.js"))
+	}
 }
 
 // safeStaticFileServer 包一層安全性與快取策略的 FileServer。

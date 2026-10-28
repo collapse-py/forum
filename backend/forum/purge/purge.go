@@ -623,19 +623,35 @@ func (p *Pruner) forEachImage(ctx context.Context, names []string, fn func(conte
 
 // imageReferenceCount 回傳有幾個地方在引用這個檔名（貼文附圖與頭像合計）。
 //
-// 與 httpapi.forumImageReferenceCount 相同的形狀：含 LIKE 退路（舊資料可能
-// 存著 /files/x.png 或完整網址），且檔名先跳脫 LIKE 的萬用字元——檔名白名單
-// 裡有「_」，不跳脫會讓 %/a_b.png 也匹配 /aXb.png，多算一個引用。
+// 與 httpapi.forumImageReferenceCount 相同的形狀與同一個契約：
+// forum_posts.image_url 存的是 **JSON 陣列字串**（`["a.png","b.png"]`，見
+// data.MigrateMySQL 第 2b 步），因此「這張圖還有人在用」必須問
+// JSON_CONTAINS —— 用 `image_url = ?` 等值比對對新契約永遠是 0，那會讓清理
+// 排程把「仍然被其他貼文引用的圖」當沒有引用而直接刪掉（症狀是别人的貼文
+// 圖破掉），而這正是這條路徑最危險的誤判方向。
 //
-// 查詢拆成兩段的理由與 httpapi 那支相同：`OR ... LIKE` 會讓 MySQL 放棄索引
-// 而做全表掃描，而這條查詢在清理排程裡是每個不重複檔名跑一次。先問等值
-// （可用 idx_forum_posts_image_url / idx_forum_profiles_avatar_url），只有
-// 等值沒查到時才補問 LIKE。語意相同，常見情況是一個索引查找。
+// 頭像（forum_profiles.avatar_url）仍是單一值，因此它走等值 + 舊寫法退路。
+//
+// 兩段的分工：第一段走等值／JSON 判斷（常見情況）；第二段只在第一段查到 0
+// 時跑，處理舊資料的寫法（/files/x.png、完整網址、帶 ?token=…、舊版遷移留下
+// 的 `x.png"]` 損壞值）。第二段用 SQL 內的字串收斂做等值比對，而不是 LIKE
+// 樣式：樣式裡的 `_` 是萬用字元（檔名白名單允許它），`%/a_b.png` 會連
+// `/aXb.png` 一起匹配，多算一個引用；收斂後等值不會有這種誤判。
+//
+// 收斂的四步與 httpapi.forumImageFileName／本檔 imageFileName 的語意一致：
+// 先丟棄 `?` 之後的查詢字串，再取最後一段路徑，最後丟掉舊版遷移黏在尾段的
+// `"]`（`x.png"]` 這類損壞值 —— 舊版先把值包成 JSON 再切路徑，留下的尾段是
+// `檔名"]`，只丟 `]` 會剩下一個引號，那個值永遠匹配不到任何東西）。檔名白名單
+// 只有 [A-Za-z0-9._-]，因此 `?`、`/`、`]`、`"` 不會出現在合法檔名裡，這四步
+// 不會誤傷合法值。
+const imageLegacyPostsExpr = `SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(image_url), '?', 1), '/', -1), ']', 1), '"', 1)`
+const imageLegacyAvatarExpr = `SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(avatar_url), '?', 1), '/', -1), ']', 1), '"', 1)`
+
 func (p *Pruner) imageReferenceCount(ctx context.Context, name string) (int, error) {
 	var exact int
 	err := p.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE image_url = ?) +
+			(SELECT COUNT(*) FROM forum_posts WHERE JSON_VALID(image_url) AND JSON_CONTAINS(image_url, JSON_QUOTE(?))) +
 			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url = ?)`,
 		name, name).Scan(&exact)
 	if err != nil {
@@ -645,13 +661,12 @@ func (p *Pruner) imageReferenceCount(ctx context.Context, name string) (int, err
 		return exact, nil
 	}
 
-	pattern := "%/" + escapeLike(name)
 	var count int
 	err = p.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE image_url LIKE ?) +
-			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url LIKE ?)`,
-		pattern, pattern).Scan(&count)
+			(SELECT COUNT(*) FROM forum_posts WHERE image_url IS NOT NULL AND image_url <> '' AND `+imageLegacyPostsExpr+` = ?) +
+			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url IS NOT NULL AND avatar_url <> '' AND `+imageLegacyAvatarExpr+` = ?)`,
+		name, name).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -660,23 +675,24 @@ func (p *Pruner) imageReferenceCount(ctx context.Context, name string) (int, err
 
 // imageFileName 把「任何一種本站檔案的寫法」收斂成純檔名；收斂不出來回空
 // 字串。契約與 httpapi.forumImageFileName 相同：資料庫存純檔名，但舊資料
-// 可能存 /files/x.png 或完整網址，取最後一段即可。
+// 可能存 /files/x.png 或完整網址（帶 ?token=…），因此先丟棄查詢字串再取
+// 最後一段；尾段的 `"]` 也丟掉 —— 舊版遷移把 `["http://…/x.png"]` 切成
+// `x.png"]`，那兩個字元是遷移產物而不是檔名的一部分。合法檔名的白名單是
+// [A-Za-z0-9._-]（見 validForumImageFileName），`"` 與 `]` 不在其中，因此
+// 看到第一個就切掉不會誤傷任何合法檔名。
 func imageFileName(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
+	if idx := strings.Index(raw, "?"); idx >= 0 {
+		raw = raw[:idx]
+	}
 	if idx := strings.LastIndex(raw, "/"); idx >= 0 {
 		raw = raw[idx+1:]
 	}
+	if idx := strings.IndexAny(raw, `"]`); idx >= 0 {
+		raw = raw[:idx]
+	}
 	return raw
-}
-
-// escapeLike 跳脫 MySQL LIKE 樣式的萬用字元與跳脫字元本身。
-//
-// 與 httpapi.escapeLikePattern 逐字相同。刻意不跨套件共用：httpapi 是
-// handler 層，purge 是背景排程，讓背景排程依賴 handler 套件的工具函式
-// 會讓「誰依賴誰」的方向反轉（purge 只需要三行的 Replacer）。
-func escapeLike(value string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
 }

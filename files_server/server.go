@@ -456,8 +456,10 @@ func mediaTokenKey(cfg *Config, token string) string {
 // 時間比對。
 //
 // 設定檔沒設 token 時全部放行是既有的行為，保留它（本機測試用），但它是一個
-// 靜默的無驗證狀態 —— 那正是下面這個註解要留給部署者的提醒：
-// 留空等於任何人只要找得到這個服務就能上傳與刪除，而沒有任何錯誤訊息會告訴你。
+// 靜默的無驗證狀態 —— 留空等於任何人只要找得到這個服務就能上傳與刪除。
+// 那個狀態沒有任何錯誤或症狀，因此 main.go 的 uploadAuthWarning 會在啟動時把它
+// 講出來（一條含 WARNING 的日誌）。這裡不改行為：改成了 fail-closed 會直接壞掉
+// 本機開發與尚未設定 token 的部署，而那是比這個提醒更大的變動。
 func validUploadToken(cfg *Config, r *http.Request) bool {
 	token := r.Header.Get("Authorization")
 	if token == "" {

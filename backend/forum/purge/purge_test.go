@@ -70,6 +70,12 @@ func TestImageFileName(t *testing.T) {
 		{"a_b.png", "a_b.png"},
 		{"/files/a_b.png", "a_b.png"},
 		{"http://localhost:7070/files/a_b.png", "a_b.png"},
+		// 舊資料的完整網址帶 token（見 data.MigrateMySQL 第 18 步的說明）。
+		{"http://localhost:7070/files/a_b.png?token=xyz", "a_b.png"},
+		{"/files/a_b.png?token=xyz", "a_b.png"},
+		// 舊版遷移的損壞值：先包成 JSON 再切路徑會把 `"]` 黏在檔名上。
+		{`a_b.png"]`, "a_b.png"},
+		{`["http://localhost:7070/files/a_b.png?token=xyz"]`, "a_b.png"},
 		{"", ""},
 		{"   ", ""},
 		{"/files/", ""},
@@ -78,12 +84,6 @@ func TestImageFileName(t *testing.T) {
 		if got := imageFileName(c.raw); got != c.want {
 			t.Errorf("imageFileName(%q) = %q, want %q", c.raw, got, c.want)
 		}
-	}
-}
-
-func TestEscapeLike(t *testing.T) {
-	if got := escapeLike(`a_b%c\d`); got != `a\_b\%c\\d` {
-		t.Fatalf("escapeLike 的跳脫順序錯誤: %q", got)
 	}
 }
 

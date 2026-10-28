@@ -646,7 +646,7 @@ func (s *Server) Handler() http.Handler {
 		  /api/forum/notifications        requireLogin → rateLimitRead(read) → handleForumNotifications（列表／標記已讀）
 		  /api/forum/notifications/unread-count requireLogin → handleForumNotificationUnreadCount（私有唯讀，每頁一次，不吃額度）
 		  /api/forum/notifications/ws     requireLogin → handleForumNotificationStream（即時推播；連線數由各 handler 自己的額度控管）
-		  /api/forum/public-profile       handleForumPublicProfile（刻意公開；非分頁，不吃讀取額度）
+		  /api/forum/public-profile       rateLimitRead(read) → handleForumPublicProfile（刻意公開；非分頁，但吃讀取額度，見該處註解）
 		  /api/forum/public-posts         rateLimitRead(read) → handleForumPublicPosts（依金鑰讀取某人貼文，公開分頁）
 		  /api/forum/search               rateLimitRead(read) → handleForumSearch（公開唯讀；ES 不可用時降級 MySQL LIKE）
 
@@ -784,10 +784,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/forum/notifications/ws", s.requireLogin(s.handleForumNotificationStream))
 	mux.HandleFunc("/api/forum/notifications", s.requireLogin(
 		s.rateLimitRead(s.readRateLimiter, s.handleForumNotifications)))
-	// 公開個人頁刻意不掛任何中介層，因為它就是設計給未登入訪客看的，而它不是
-	// 分頁端點（一次等值查詢回一份資料）—— 沒有「一頁一頁拉完」的形態，因此
-	// 也不需要讀取額度。
-	mux.HandleFunc("/api/forum/public-profile", s.handleForumPublicProfile)
+	// 公開個人頁：掛 read 額度。它仍然是**公開**的（沒有 requireLogin），限流不是
+	// 授權檢查，未登入訪客照樣能看到資料 —— 只是不再能無限打。
+	//
+	// 舊版這一條什麼中介層都不掛，理由是「它不是分頁端點，不會一頁一頁拉完」。
+	// 那個理由只涵蓋了爬整份動態的形態，漏掉這一條真正的攻擊形態：**列舉**。
+	// 它是一次 `WHERE author_email = ?` 的等值查詢，因此一個攻擊者可以用一份
+	// email 清單把全站的個人頁（暱稱、頭像、bio、統計）逐個抓下來，而每一發
+	// 都不會被擋 —— 沒有額度、沒有 Retry-After、沒有 429。那是匿名可直接打的
+	// DB 查詢，成本與分頁清單同級，因此額度也放在同一處。
+	//
+	// 正常使用不會撞到它：read 額度是 60 次／分鐘（見 config.RateLimitReadRequests），
+	// 而個人頁是「逛一個人」的請求，一個使用者在一分鐘內逛不到 60 個個人頁。
+	// 與 /api/forum/public-posts 共用同一個 read 桶也是刻意的：兩條都是「讀某人的
+	// 公開資料」，-split 成兩個桶只會讓列舉攻擊多拿一份額度。
+	mux.HandleFunc("/api/forum/public-profile", s.rateLimitRead(s.readRateLimiter, s.handleForumPublicProfile))
 	// 貼文搜尋：掛 read 額度。它仍是匿名可讀的（沒有 requireLoginForWrite），
 	// 但每一頁都要走 ES 或 MySQL 的全文比對，是讀取端點裡單次最貴的。
 	// 沒有掛 requireLoginForWrite 是因為它只有 GET 一種方法需要；把唯讀端點
@@ -878,14 +889,7 @@ func (s *Server) Handler() http.Handler {
 	// HTML。實測 ServeMux 的匹配與註冊順序無關，只看哪個樣式更具體，因此
 	// 把比對邏輯留在 handler 裡是唯一不依賴 mux 內部規則的寫法。
 	mux.HandleFunc("/forum-manifest.json", s.handleForumManifest(frontendDir))
-	mux.HandleFunc("/service-worker.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript")
-		// Service Worker 的作用域預設為「註冊它的路徑所在的目錄」。這支檔案
-		// 掛在根目錄 /service-worker.js，預設作用域已經是全站 /，所以這行
-		// 是明確宣告而非補救；保留它是為了讓意圖不必靠閱讀者自行推導。
-		w.Header().Set("Service-Worker-Allowed", "/")
-		http.ServeFile(w, r, filepath.Join(frontendDir, "service-worker.js"))
-	})
+	mux.HandleFunc("/service-worker.js", serviceWorkerHandler(frontendDir))
 	mux.HandleFunc("/admin", s.requireAdminPage(func(w http.ResponseWriter, r *http.Request) {
 		// 這個比對在目前的註冊方式下其實不會命中："/admin" 是完全比對樣式，
 		// "/admin/" 根本不會進來（實測會落到最後的 catch-all）。保留它是防禦性

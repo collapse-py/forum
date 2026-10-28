@@ -66,7 +66,54 @@ func TestRateLimiterSweepRemovesIdleBuckets(t *testing.T) {
 	}
 }
 
-// TestRateLimiterMiddlewareRetryAfterIsCeil 守住 Retry-After 是「向上取整的
+// TestClientKeyStripsPort 守住計價鍵是「來源 IP，不含埠號」。
+//
+// 含埠的鍵是這個計價器最容易靜默失效的方式：桶是「每來源一個」，而每條新 TCP
+// 連線都帶一個新的臨時埠，因此「每發請求都開新連線」的呼叫端永遠落在一個全新的
+// 桶裡 —— 限流仍在跑、仍在回 429 的程式碼，卻一次也不會觸發。
+func TestClientKeyStripsPort(t *testing.T) {
+	for _, tc := range []struct {
+		remoteAddr string
+		want       string
+	}{
+		{"203.0.113.9:52415", "203.0.113.9"},
+		{"[2001:db8::1]:443", "2001:db8::1"},
+		// 沒有可切分的冒號對：保留原值（它們本身就是可用的鍵）。
+		{"::1", "::1"},
+		{"203.0.113.9", "203.0.113.9"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/files/x.jpg", nil)
+		request.RemoteAddr = tc.remoteAddr
+		if got := clientKey(request); got != tc.want {
+			t.Errorf("clientKey(%q) = %q，want %q", tc.remoteAddr, got, tc.want)
+		}
+	}
+}
+
+// TestRateLimiterSameIPDifferentPortsShareBucket 是上一條的行為版：同一個 IP
+// 換了埠，額度必須繼續被消耗，而不是重新計。
+func TestRateLimiterSameIPDifferentPortsShareBucket(t *testing.T) {
+	limiter := newRateLimiter(1, 1, 16)
+	handler := limiter.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	first := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/files/x.jpg", nil)
+	request.RemoteAddr = "203.0.113.9:40000"
+	handler.ServeHTTP(first, request)
+	if first.Code != http.StatusOK {
+		t.Fatalf("第一個請求 = %d，want 200", first.Code)
+	}
+
+	second := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/files/x.jpg", nil)
+	request.RemoteAddr = "203.0.113.9:40001" // 同一個 IP、新的連線埠
+	handler.ServeHTTP(second, request)
+	if second.Code != http.StatusTooManyRequests {
+		t.Errorf("同一 IP 換埠後 = %d，want 429（兩個埠各拿到一份額度）", second.Code)
+	}
+}
 // 每秒補充數」，且永遠至少 1。
 //
 // 0 會讓呼叫端立刻重試，正好製造出這個中介層想擋掉的行為。

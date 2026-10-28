@@ -340,18 +340,18 @@ func purgeCovPosts(rows ...[]purgeCovValue) purgeCovResponse {
 	}
 }
 
-// purgeCovRefExactRule 對應引用計數的「等值」那一段（可用索引）。
+// purgeCovRefExactRule 對應引用計數的「新契約」那一段（JSON 陣列的等值判斷）。
 //
-// 與 LIKE 那一段分成兩條規則：引用計數的查詢被拆成等值與 LIKE 兩段
+// 與舊寫法那一段分成兩條規則：引用計數的查詢被拆成新契約與舊寫法兩段
 // （見 imageReferenceCount 的說明），而兩段的子字串不同，測試才能分開
 // 給它們不同的回應。
 func purgeCovRefExactRule(responses ...purgeCovResponse) *purgeCovQueryRule {
-	return &purgeCovQueryRule{substr: "COUNT(*) FROM forum_posts WHERE image_url = ?", responses: responses}
+	return &purgeCovQueryRule{substr: "JSON_CONTAINS(image_url, JSON_QUOTE(?))", responses: responses}
 }
 
-// purgeCovRefLikeRule 對應引用計數的「LIKE 退路」那一段。
-func purgeCovRefLikeRule(responses ...purgeCovResponse) *purgeCovQueryRule {
-	return &purgeCovQueryRule{substr: "COUNT(*) FROM forum_posts WHERE image_url LIKE ?", responses: responses}
+// purgeCovRefLegacyRule 對應引用計數的「舊寫法退路」那一段（字串收斂後等值）。
+func purgeCovRefLegacyRule(responses ...purgeCovResponse) *purgeCovQueryRule {
+	return &purgeCovQueryRule{substr: "image_url IS NOT NULL", responses: responses}
 }
 
 func purgeCovRef(count int) purgeCovResponse {
@@ -552,7 +552,7 @@ func TestCovPruneSkipsPostsRestoredBeforeDelete(t *testing.T) {
 	// id=1 在取回後被還原：交易內的重新確認只看得到 id=2。
 	src.addQuery(purgeCovLockRule(2))
 	src.addQuery(purgeCovRefExactRule(purgeCovRef(0)))
-	src.addQuery(purgeCovRefLikeRule(purgeCovRef(0)))
+	src.addQuery(purgeCovRefLegacyRule(purgeCovRef(0)))
 
 	deleter := &purgeCovDeleter{}
 	removed, err := NewPruner(db, deleter, time.Hour, time.Hour).Prune(context.Background())
@@ -635,14 +635,14 @@ func TestCovPruneReleasesOnlyUnreferencedImages(t *testing.T) {
 	)))
 	src.addQuery(purgeCovLockRule(1, 2, 3, 4, 5, 6, 7))
 	/*
-	 * 引用計數分成「等值」與「LIKE 退路」兩段查詢（見 imageReferenceCount
-	 * 的說明），因此兩段各有自己的回應序列：
+	 * 引用計數分成「新契約（JSON 陣列）」與「舊寫法退路」兩段查詢（見
+	 * imageReferenceCount 的說明），因此兩段各有自己的回應序列：
 	 *
-	 *   等值：a.png → 0、b.png → 2、c.png → 查詢失敗、d.png → 0、e.png → 0
-	 *   LIKE：a.png → 0、d.png → 0、e.png → 0
+	 *   新契約：a.png → 0、b.png → 2、c.png → 查詢失敗、d.png → 0、e.png → 0
+	 *   舊寫法：a.png → 0、d.png → 0、e.png → 0
 	 *
-	 * b.png 的等值就有兩個引用，因此不會再問 LIKE；c.png 的查詢失敗，
-	 * 因此也不會問 LIKE。
+	 * b.png 的新契約就有兩個引用，因此不會再問舊寫法；c.png 的查詢失敗，
+	 * 因此也不會問舊寫法。
 	 */
 	src.addQuery(purgeCovRefExactRule(
 		purgeCovRef(0),
@@ -651,7 +651,7 @@ func TestCovPruneReleasesOnlyUnreferencedImages(t *testing.T) {
 		purgeCovRef(0),
 		purgeCovRef(0),
 	))
-	src.addQuery(purgeCovRefLikeRule(
+	src.addQuery(purgeCovRefLegacyRule(
 		purgeCovRef(0),
 		purgeCovRef(0),
 		purgeCovRef(0),
@@ -731,7 +731,7 @@ func TestCovPruneMediaDeleteFailureKeepsQueue(t *testing.T) {
 	src.addQuery(purgeCovFetchRule(purgeCovPosts([]purgeCovValue{int64(1), "media.png"})))
 	src.addQuery(purgeCovLockRule(1))
 	src.addQuery(purgeCovRefExactRule(purgeCovRef(0)))
-	src.addQuery(purgeCovRefLikeRule(purgeCovRef(0)))
+	src.addQuery(purgeCovRefLegacyRule(purgeCovRef(0)))
 	src.addExec(purgeCovExecRule{substr: "DELETE FROM forum_media WHERE filename", err: errors.New("media locked")})
 
 	deleter := &purgeCovDeleter{}
@@ -757,7 +757,7 @@ func TestCovPruneRetriesQueuedImageDeletion(t *testing.T) {
 	))
 	src.addQuery(purgeCovLockRule(1))
 	src.addQuery(purgeCovRefExactRule(purgeCovRef(0), purgeCovRef(0)))
-	src.addQuery(purgeCovRefLikeRule(purgeCovRef(0), purgeCovRef(0)))
+	src.addQuery(purgeCovRefLegacyRule(purgeCovRef(0), purgeCovRef(0)))
 
 	deleter := &purgeCovDeleter{fail: map[string]bool{"retry.png": true}}
 	p := NewPruner(db, deleter, time.Hour, time.Hour)

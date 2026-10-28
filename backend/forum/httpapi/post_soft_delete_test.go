@@ -281,20 +281,24 @@ var softDeleteExceptions = []struct {
 		reason: "public key → email 的退路解析與貼文可見性無關",
 	},
 	{
-		// forumImageReferenceCount（forum_media_handlers.go）。圖片的引用
-		// 計數刻意把軟刪除的貼文也算進去：貼文可以還原（後台 /restore），
-		// 還原之後圖片必須還在。「先刪圖、後還原」是一個合法的使用者順序，
-		// 而把它排除的症狀是還原後得到一張破掉的圖。
-		//
-		// 這個 marker 同時對應兩條查詢（等值與 LIKE 退路）：它們是同一個
-		// 判斷的兩段，而兩段都必須包含軟刪除的貼文。
-		marker: "COUNT(*) FROM forum_posts WHERE image_url",
+		// forumImageReferenceExact（forum_media_handlers.go）。圖片的引用計數
+		// 刻意把軟刪除的貼文也算進去：貼文可以還原（後台 /restore），還原之後
+		// 圖片必須還在。「先刪圖、後還原」是一個合法的使用者順序，而把它排除的
+		// 症狀是還原後得到一張破掉的圖。
+		marker: "FROM forum_posts WHERE JSON_VALID(image_url)",
 		reason: "圖片引用計數必須包含軟刪除的貼文，否則還原後的圖片會被刪掉",
 	},
 	{
-		// forumFileAttachable（forum_media_handlers.go）。舊制圖片的所有權
-		// 退路：以「已經是自己貼文的圖片」證明所有權。
-		marker: "FROM forum_posts WHERE author_email = ? AND image_url IS NOT NULL",
+		// forumImageReferenceLegacy。同一個判斷的另一段（舊寫法的退路），因此
+		// 理由與上一條相同 —— 兩段都必須包含軟刪除的貼文。
+		marker: "FROM forum_posts WHERE image_url IS NOT NULL",
+		reason: "圖片引用計數必須包含軟刪除的貼文，否則還原後的圖片會被刪掉",
+	},
+	{
+		// forumFileAttachable（forum_media_handlers.go）。舊制圖片的所有權退路：
+		// 以「已經是自己貼文的圖片」證明所有權。它回答的是「這個人擁有這個檔案」，
+		// 而不是「這個檔案可見」，因此軟刪除的貼文照樣算在內（貼文可以被還原）。
+		marker: "FROM forum_posts WHERE author_email = ? AND (JSON_VALID(image_url)",
 		reason: "舊制（forum_media 之前）圖片的所有權退路與貼文是否被軟刪除無關",
 	},
 }

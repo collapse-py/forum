@@ -27,6 +27,8 @@ Redis 在這個程序裡已經代表「媒體 token 的那個儲存」，而限�
 這個服務是內部端點：真正的呼叫端是論壇後端與使用者的瀏覽器。RemoteAddr 不經過
 代理剝殼，因此它比「X-Forwarded-For 第一段」可信（後者任何呼叫端都能自己填）。
 不支援信任代理白名單是刻意的簡化：這個服務的規模不值得為它引入一份設定。
+鍵取的是**去掉埠號的 IP**（見 clientKey）：計價是「每來源一個桶」，而每一次新
+連線都帶一個新的臨時埠，含埠的鍵等於每一發請求都進到一個全新的桶。
 
 【失敗模式】
 被限制時回 429 並附 Retry-After。刻意不用 403：那看起來像「你沒有權限」，
@@ -37,6 +39,7 @@ package main
 
 import (
 	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -154,7 +157,20 @@ func (l *rateLimiter) middleware(next http.Handler) http.Handler {
 	})
 }
 
-// clientKey 是計價的鍵。只用 RemoteAddr（含埠），理由見檔頭。
+// clientKey 是計價的鍵：來源 IP，不含埠號。
+//
+// 為什麼要剝掉埠：桶是「每來源一個」，而 RemoteAddr 的形態是 "IP:port" ——
+// 每一條新的 TCP 連線都帶一個新的臨時埠。含埠的鍵因此讓每一發請求都落在一個
+// 全新的桶裡：一個每發請求都開新連線的攻擊者（curl 與多數爬蟲預設就這麼做）
+// 永遠不會超過 burst，限流變成完全無作用的裝飾品 —— 後端的 RATE_LIMIT_REQUESTS
+// 曾經就處於這個處境，不可重蹈。
+//
+// 沒有可切分的冒號對時保留原值：net/http 保證 "host:port"，但裸 IPv6（"::1"）
+// 讓 SplitHostPort 報錯，那種情況原字串本身就已是可用的鍵。
 func clientKey(r *http.Request) string {
-	return r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }

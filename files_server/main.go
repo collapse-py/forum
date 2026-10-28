@@ -56,6 +56,23 @@ import (
 // 慢一秒。超時後會降級（見檔頭第 1 點），因此不需要更寬的期限。
 const mediaPingTimeout = 2 * time.Second
 
+// uploadAuthWarning 是啟動日誌裡關於「上傳驗證」的那一行。
+//
+// 為什麼需要它：token 留空時 validUploadToken 放行**所有**請求（見 server.go 那處
+// 的註解），也就是任何人只要能連到這個埠就能上傳與刪除檔案。那個狀態沒有錯誤、沒有
+// 症狀、也沒有回應上的差別 —— 唯一會說「這個服務沒有驗證」的地方就是這一行日誌。
+// 之前它只在 token 有設定時印出一行「已啟用」，留空時什麼都不說，因此部署端從日誌
+// 看不出自己處於 fail-open。
+//
+// 刻意不 fail-fast：本機開發與既有部署都靠留空跑，把「可能只是忘了設定」變成整
+// 個服務起不來，代價比它要修的問題還大。這裡的手段是一條不會被忽略的警告。
+func uploadAuthWarning(cfg *Config) string {
+	if cfg.Upload.Token != "" {
+		return "Upload token authentication enabled"
+	}
+	return "WARNING: upload token is empty — /upload and /delete have NO authentication; set [upload] token in config.conf"
+}
+
 func main() {
 	// 設定檔路徑相對於工作目錄（見 config.go 的說明），不是執行檔目錄。
 	cfg, err := loadConfig("config.conf")
@@ -82,9 +99,7 @@ func main() {
 	defer signal.Stop(sigCh)
 
 	log.Printf("Starting files server on %s (storage=%s)", listenAddr(cfg), cfg.Storage.Type)
-	if cfg.Upload.Token != "" {
-		log.Println("Upload token authentication enabled")
-	}
+	log.Println(uploadAuthWarning(cfg))
 	if redisClient != nil {
 		log.Println("Static file media token authentication via Redis enabled")
 	}

@@ -11,6 +11,7 @@ package main
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/redis/go-redis/v9"
@@ -40,7 +41,30 @@ func TestMediaTokenStoreOrNil(t *testing.T) {
 	}
 }
 
-// TestConnectRedisWithoutAddr 守住「沒有設定位址 → 直接降級」。
+// TestUploadAuthWarningIsExplicitWhenTokenEmpty 守住「留空＝沒有驗證」必須被講出來。
+//
+// validUploadToken 在 token 為空時放行所有請求（既有的本機測試就靠它），那是一個
+// 靜默的 fail-open 狀態：沒有錯誤、沒有症狀，日誌裡也沒有任何一行說「這台服務沒有
+// 驗證」。這一條釘的是那個狀態會印 WARNING，而不是只印「已啟用」或什麼都不印。
+func TestUploadAuthWarningIsExplicitWhenTokenEmpty(t *testing.T) {
+	empty := uploadAuthWarning(&Config{})
+	if !strings.Contains(empty, "WARNING") {
+		t.Errorf("token 留空時的啟動紀錄 = %q，want 含 WARNING", empty)
+	}
+	for _, mention := range []string{"/upload", "/delete"} {
+		if !strings.Contains(empty, mention) {
+			t.Errorf("啟動紀錄沒有提到受影響的端點 %s: %q", mention, empty)
+		}
+	}
+
+	set := uploadAuthWarning(&Config{Upload: UploadConfig{Token: "tok"}})
+	if strings.Contains(set, "WARNING") {
+		t.Errorf("token 已設定卻印 WARNING: %q", set)
+	}
+	if !strings.Contains(set, "enabled") {
+		t.Errorf("token 已設定時啟動紀錄 = %q，want 說「已啟用」", set)
+	}
+}
 //
 // 這條路徑不該嘗試連線：位址是空的代表 Redis 沒有被設定，而不是「連
 // localhost」。若它真的去連，啟動會多等一個逾時。

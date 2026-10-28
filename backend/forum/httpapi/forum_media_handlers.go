@@ -157,21 +157,6 @@ func (s *Server) handleForumImageDelete(w http.ResponseWriter, r *http.Request) 
 	writeOK(w, map[string]bool{"ok": true})
 }
 
-// forumImageLikePattern 是「以 /檔名 結尾」的 LIKE 樣式，供引用計數與舊制
-// 所有權退路共用。
-//
-// 兩個部分各有理由：
-//
-//   - 前綴 %/：舊資料可能存著 /files/x.png 或完整網址（見 forumImageFileName），
-//     因此除了完全相等也接受「最後一段是這個檔名」的值。
-//   - escapeLikePattern：檔名允許「_」（合法檔名的白名單裡有它），而 LIKE 的
-//     _ 是「任意一個字元」。不跳脫的話 %/a_b.png 也會匹配 /aXb.png，症狀是
-//     引用計數多算（刪不掉自己的圖）或所有權退路誤判（把別人的舊檔當成自己
-//     引用過的）。搜尋的 content LIKE 用的是同一支跳脫函式。
-func forumImageLikePattern(name string) string {
-	return "%/" + escapeLikePattern(name)
-}
-
 // forumMediaOwner 回傳某個檔名的上傳者；沒有紀錄（舊制檔案）時回空字串。
 //
 // 刻意用「空字串＝沒有紀錄」而不是 sql.ErrNoRows：呼叫端（所有權判斷與
@@ -190,45 +175,80 @@ func (s *Server) forumMediaOwner(ctx context.Context, name string) (string, erro
 	return owner, nil
 }
 
+// forumImageLegacyPostsExpr / forumImageLegacyAvatarExpr 是「把舊資料的寫法收斂成
+// 純檔名」的 SQL 表達式，供引用計數與舊制所有權退路共用，讓比對是等值而不是樣式。
+//
+// 四步與 httpapi.forumImageFileName／purge.imageFileName 的語意一致：先丟棄
+// `?` 之後的查詢字串（舊的完整網址帶 `?token=…`），再取最後一段路徑
+// （`/files/x.png`、完整網址），最後丟掉舊版遷移黏在尾段的 `"]`（舊版遷移先包
+// JSON 再切路徑，會留下 `x.png"]` 這種損壞值，見 data.MigrateMySQL 第 2b/18 步；
+// 只丟 `]` 會剩下一個引號，那個值匹配不到任何東西）。檔名白名單只有
+// [A-Za-z0-9._-]，因此這四步不會誤傷合法檔名。
+//
+// 為什麼不用 LIKE 樣式：檔名白名單允許 `_`，而 LIKE 的 `_` 是「任意一個字元」，
+// `%/a_b.png` 會連 `/aXb.png` 一起匹配；樣式也匹配不到帶 token 的舊值。等值比對
+// 收斂後的值沒有這兩個問題。與 purge.imageReferenceCount 用的是同一份表達式。
+const forumImageLegacyPostsExpr = `SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(image_url), '?', 1), '/', -1), ']', 1), '"', 1)`
+const forumImageLegacyAvatarExpr = `SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(avatar_url), '?', 1), '/', -1), ']', 1), '"', 1)`
+
 // forumImageReferenceCount 回傳有幾個地方在引用這個檔名（貼文附圖與頭像合計）。
 //
-// 兩個刻意的決定：
+// 三個刻意的決定：
 //
 //  1. 含軟刪除的貼文（不過濾 deleted_at）。貼文可以還原（後台的
 //     /api/admin/forum/posts/{id}/restore），還原後圖片必須還在 —— 把軟刪文
 //     排除會讓「先刪圖、後還原」得到一張破掉的圖，而那個順序是合法的使用
 //     者行為。代價是「刪文之後圖片不會自動釋放」，但那本來就不是這條路徑
 //     的職責（真正的回收是保留期清理那條線的事）。
-//  2. LIKE 退路。資料庫的契約是純檔名（MigrateMySQL 第 18 步），但舊資料
-//     可能存著 /files/x.png 或完整網址（見 forumImageFileName 的相容說明），
-//     因此除了完全相等也接受「以 /檔名 結尾」的值。
+//  2. 新契約走 JSON_CONTAINS：image_url 存的是 JSON 陣列字串（`["a.png","b.png"]`，
+//     見 data.MigrateMySQL 第 2b 步），因此「這圖還有人在用」必須問陣列包含性。
+//     只問 `image_url = ?` 對新契約永遠是 0，那等於把仍被其他貼文引用的圖當
+//     沒引用而刪掉 —— 那是這條路徑最危險的誤判方向。
+//  3. 舊寫法退路：舊資料可能存純檔名、/files/x.png、完整網址（帶 token），或
+//     舊版遷移留下的損壞值。這些收斂成檔名後做等值比對（見上方兩個表達式）。
 //
-// 檔名先過 escapeLikePattern（與搜尋的 content LIKE 同一支）：檔名允許
-// 「_」，而 LIKE 的 _ 是「任意一個字元」—— 不跳脫的話 %/a_b.png 也會匹配
-// /aXb.png。方向是保守的（多算一個引用只會讓刪除被拒絕），但那個「多算」
-// 會讓使用者看到一個不存在的「圖片仍在使用中」，因此仍然不是可接受的行為。
+// 查詢拆成兩段是為了讓常見情況只跑一次便宜的查詢：新契約的資料在大多數部署裡
+// 就是唯一形態，等值／JSON 那段查到 >0 就結束；只有查到 0 時才補問舊寫法那段
+// （它是全表掃描，但「查到 0」代表這支圖可能只剩舊寫法的引用，那正是必須問的
+// 情況）。語意完全相同（「有沒有人引用」）。
 //
-// 查詢拆成兩段是為了讓索引派得上用場：`WHERE image_url = ? OR image_url LIKE ?`
-// 裡的 OR + 前綴 LIKE 會讓 MySQL 直接放棄索引（整張表掃描），而這條路徑
-// 會在**每次**換圖、刪圖、改頭像時跑到。先問等值（可用
-// idx_forum_posts_image_url / idx_forum_profiles_avatar_url），只有在等值
-// 沒查到時才補問 LIKE —— 語意完全相同（「有沒有人引用」），而常見情況是
-// 一個索引查找。
+// JSON_VALID 的護欄：JSON_CONTAINS 對非 JSON 的文字會直接報錯（ER_INVALID_JSON），
+// 而未遷移的舊值正是那種文字。沒有這一步，第一段查詢會失敗，而失敗的處理是
+// 「不刪」（見 releaseForumImage），結果是舊資料的圖永遠回收不了。
 func (s *Server) forumImageReferenceCount(ctx context.Context, name string) (int, error) {
 	exact, err := s.forumImageReferenceExact(ctx, name)
 	if err != nil {
 		return 0, err
 	}
-	return exact, nil
+	if exact > 0 {
+		return exact, nil
+	}
+	return s.forumImageReferenceLegacy(ctx, name)
 }
 
-// forumImageReferenceExact 用等值比對算引用數（可用索引）。
+// forumImageReferenceExact 用「新契約」的寫法算引用數（JSON 陣列包含該檔名，
+// 加上頭像的等值比對）。
 func (s *Server) forumImageReferenceExact(ctx context.Context, name string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE image_url IS NOT NULL AND JSON_CONTAINS(COALESCE(NULLIF(image_url, ''), '[]'), JSON_QUOTE(?))) +
+			(SELECT COUNT(*) FROM forum_posts WHERE JSON_VALID(image_url) AND JSON_CONTAINS(COALESCE(NULLIF(image_url, ''), '[]'), JSON_QUOTE(?))) +
 			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url = ?)`,
+		name, name).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// forumImageReferenceLegacy 用「舊寫法」算引用數，只在 forumImageReferenceExact
+// 查到 0 時被呼叫（理由見 forumImageReferenceCount 的說明）。
+func (s *Server) forumImageReferenceLegacy(ctx context.Context, name string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM forum_posts WHERE image_url IS NOT NULL AND image_url <> '' AND `+forumImageLegacyPostsExpr+` = ?) +
+			(SELECT COUNT(*) FROM forum_profiles WHERE avatar_url IS NOT NULL AND avatar_url <> '' AND `+forumImageLegacyAvatarExpr+` = ?)`,
 		name, name).Scan(&count)
 	if err != nil {
 		return 0, err
@@ -260,17 +280,19 @@ func (s *Server) forumFileAttachable(ctx context.Context, name, email string) (b
 		return owner == email, nil
 	}
 	// 舊制檔案（沒有上傳紀錄）：退路查詢與引用計數同一個形狀，但多兩個
-	// 「必須是自己的內容」的條件。檔名同樣先跳脫 LIKE 的萬用字元 —— 這一條
-	// 的誤判方向比引用計數更危險：模式裡的 _ 讓「/files/aXbei.png」也算成
-	// 「自己引用過 a_bei.png」，於是別人的舊檔就能被掛到自己的內容上
-	//（掛上之後，換圖回收只問引用計數，那個檔案就真的會被刪掉）。
-	pattern := forumImageLikePattern(name)
+	// 「必須是自己的內容」的條件。比對同樣走「收斂成檔名之後的等值」而不是
+	// LIKE 樣式 —— 這一條的誤判方向比引用計數更危險：LIKE 樣式裡的 `_` 會讓
+	// 「/files/aXbei.png」也被算成「自己引用過 a_bei.png」，於是別人的舊檔就能
+	// 被掛到自己的內容上（掛上之後，換圖回收只問引用計數，那個檔案就真的會被
+	// 刪掉）。收斂之後做等值沒有這種誤判，也才匹配得到帶 token 的舊網址。
+	postsLegacy := forumImageLegacyPostsExpr + " = ?"
+	avatarLegacy := forumImageLegacyAvatarExpr + " = ?"
 	var count int
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM forum_posts WHERE author_email = ? AND image_url IS NOT NULL AND JSON_CONTAINS(COALESCE(NULLIF(image_url, ''), '[]'), JSON_QUOTE(?))) +
-			(SELECT COUNT(*) FROM forum_profiles WHERE author_email = ? AND (avatar_url = ? OR avatar_url LIKE ?))`,
-		email, name, email, name, pattern).Scan(&count)
+			(SELECT COUNT(*) FROM forum_posts WHERE author_email = ? AND (JSON_VALID(image_url) AND JSON_CONTAINS(COALESCE(NULLIF(image_url, ''), '[]'), JSON_QUOTE(?)) OR `+postsLegacy+`)) +
+			(SELECT COUNT(*) FROM forum_profiles WHERE author_email = ? AND (avatar_url = ? OR `+avatarLegacy+`))`,
+		email, name, name, email, name, name).Scan(&count)
 	if err != nil {
 		return false, err
 	}

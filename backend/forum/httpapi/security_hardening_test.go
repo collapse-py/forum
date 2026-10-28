@@ -83,6 +83,21 @@ func TestHardeningStaticBlacklistCoversBackupAndAdminShells(t *testing.T) {
 		"/src/App.tsx":         true,
 		"/範例/logo.png":         true,
 		"/admin-notes.txt":     false, // 不是 /admin/ 前綴，也不是後台殼
+
+		// 副檔名「在中間出現」也算命中：結尾不是敏感型別時，HasSuffix 會漏掉
+		// 這雨種真實存在的路徑（改設定留下的備檔再加後綴、把原始碼包成 .js）。
+		"/config.conf.bak.pre-readlimit": true,
+		"/provider.tsx.js":               true,
+		"/notes.env.js":                  true,
+
+		// 但「中間出現」不能變成「檔名裡有這幾個字就擋」：這些是合法的前端資源，
+		// 它们的點只出现在真正的副檔名前。
+		"/env.js":       false,
+		"/blog.js":      false,
+		"/settings.js":  false,
+		"/react-dom.js": false,
+		"/tmp/x.js":     false, // /tmp 是目錄段，檔本身不是 .tmp
+		"/sitemap.xml":  false, // 帶 .map 這三個字的目錄名不是來源對應檔
 	}
 	for path, want := range blocked {
 		if got := isBlockedStaticPath(path); got != want {
@@ -105,6 +120,10 @@ func TestHardeningAssetBlacklistKeepsManifestWhileBlockingSource(t *testing.T) {
 		"/assets/main.go":           true,
 		"/assets/config.conf":       true,
 		"/assets/config.conf.bak":   true,
+		"/assets/config.conf.bak.pre-readlimit": true, // .conf 在中間也算
+		"/assets/provider.tsx.js":   true,             // .tsx 在中間也算
+		"/assets/forum-CHhv90hV.js": false,            // 真實的建置產物名稱
+		"/assets/foo.js.map":        true,             // source map 帶着完整原始碼
 		"/assets/.env":              true,
 		"/assets/schema.sql":        true,
 		"/assets/x.yaml":            true,
@@ -758,5 +777,50 @@ func TestAdminPageRedirectsAfterWhitelistRemoval(t *testing.T) {
 	}
 	if loc := recorder.Header().Get("Location"); !strings.HasPrefix(loc, "/forum/login") {
 		t.Errorf("導向目標 = %q", loc)
+	}
+}
+
+/* ==========================================================================
+   Service Worker 的快取標頭：部署新版之後不能還是舊版
+   ========================================================================== */
+
+// TestHardeningServiceWorkerIsNotLongCached 釘住 /service-worker.js 的回應不帶
+// 任何長期快取或 public。
+//
+// 這一支的存在理由不是「快取越快越好」的反面，而是 SW 的更新機制：瀏覽器載入頁面
+// 時會對這支檔案做一次更新檢查，而共享快取帶著 max-age 時那次檢查直接拿到快取的舊版。
+// 症狀是「部署完成了，但使用者仍跑舊的攔截邏輯」，而且沒有使用者端的手段能讓它失效
+// （舊 SW 就是那份快取的讀取者）。2026-10-28 的部署就踩過：邊緣節點帶著
+// max-age=14400，新 SW 四小時內對使用者不可見。
+func TestHardeningServiceWorkerIsNotLongCached(t *testing.T) {
+	frontendDir := t.TempDir()
+	script := "self.addEventListener('install', () => {});"
+	if err := os.WriteFile(filepath.Join(frontendDir, "service-worker.js"), []byte(script), 0o644); err != nil {
+		t.Fatalf("寫入 service-worker.js 失敗: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	serviceWorkerHandler(frontendDir).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/service-worker.js", nil))
+	covWantStatus(t, recorder, http.StatusOK)
+	if got := recorder.Body.String(); got != script {
+		t.Errorf("回應本文 = %q，want 那支腳本本身", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/javascript" {
+		t.Errorf("Content-Type = %q, want application/javascript", got)
+	}
+	if got := recorder.Header().Get("Service-Worker-Allowed"); got != "/" {
+		t.Errorf("Service-Worker-Allowed = %q, want /", got)
+	}
+
+	cache := recorder.Header().Get("Cache-Control")
+	// public / max-age / immutable 是 hashed 資產用的那一組：它們假設「檔名帶 hash，
+	// 內容不會原地改動」。SW 的檔名沒有 hash，而它的內容正是會原地改動的那一份。
+	for _, forbidden := range []string{"public", "max-age", "immutable"} {
+		if strings.Contains(cache, forbidden) {
+			t.Errorf("Cache-Control = %q，含 %s —— 舊版會被共享快取留住，部署的新 SW 對使用者不可見", cache, forbidden)
+		}
+	}
+	if !strings.Contains(cache, "no-cache") {
+		t.Errorf("Cache-Control = %q，want 含 no-cache（使用前必須回源驗證）", cache)
 	}
 }

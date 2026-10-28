@@ -425,7 +425,9 @@ func TestCovForumProfileSelfProfilePutSuccess(t *testing.T) {
 			[]string{"avatar_url"}, []driverValue{"old.png"})
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(0)})
+		// 引用計數是「新契約先查、查到 0 才查舊寫法」的兩段，因此兩段都要登記。
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(0)})
+		h.rows("FROM forum_posts WHERE image_url IS NOT NULL", []string{"count"}, []driverValue{int64(0)})
 
 		body := covProfileJSONBody(t, map[string]interface{}{
 			"nickname":  " 新暱稱 ",
@@ -467,7 +469,7 @@ func TestCovForumProfileSelfProfilePutSuccess(t *testing.T) {
 		covProfileConfigureMedia(h)
 		h.rows("SELECT avatar_url FROM forum_profiles WHERE author_email = ?",
 			[]string{"avatar_url"}, []driverValue{"old.png"})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(2)})
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(2)})
 		recorder := h.do(h.srv.handleForumProfile, http.MethodPut, "/api/forum/profile", `{"nickname":"暱稱","avatarUrl":""}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusOK)
 		if h.sawQuery("DELETE FROM forum_media") {
@@ -1017,11 +1019,11 @@ func TestCovForumProfileMediaHelpers(t *testing.T) {
 		h := newCovHarness(t)
 		h.srv.releaseForumImage(context.Background(), "", "owner")
 
-		h.queryError("FROM forum_posts WHERE image_url", errors.New("db down"))
+		h.queryError("FROM forum_posts WHERE JSON_VALID(image_url)", errors.New("db down"))
 		h.srv.releaseForumImage(context.Background(), "pic.png", "owner")
 
 		h2 := newCovHarness(t)
-		h2.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(1)})
+		h2.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(1)})
 		h2.srv.releaseForumImage(context.Background(), "pic.png", "owner")
 	})
 }
@@ -1450,7 +1452,7 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h := newCovHarness(t)
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.queryError("FROM forum_posts WHERE image_url", errors.New("db down"))
+		h.queryError("FROM forum_posts WHERE JSON_VALID(image_url)", errors.New("db down"))
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusInternalServerError)
 	})
@@ -1459,7 +1461,7 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h := newCovHarness(t)
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(1)})
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(1)})
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusConflict)
 	})
@@ -1473,7 +1475,9 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h.srv.cfg.FilesServerURL = files.URL
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(0)})
+		// 引用計數是「新契約先查、查到 0 才查舊寫法」的兩段，因此兩段都要登記。
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(0)})
+		h.rows("FROM forum_posts WHERE image_url IS NOT NULL", []string{"count"}, []driverValue{int64(0)})
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusBadGateway)
 	})
@@ -1487,7 +1491,9 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h.srv.cfg.FilesServerURL = files.URL
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(0)})
+		// 引用計數是「新契約先查、查到 0 才查舊寫法」的兩段，因此兩段都要登記。
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(0)})
+		h.rows("FROM forum_posts WHERE image_url IS NOT NULL", []string{"count"}, []driverValue{int64(0)})
 		h.execError("DELETE FROM forum_media", errors.New("db down"))
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusInternalServerError)
@@ -1498,7 +1504,9 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h.srv.cfg.FilesServerURL = "://bad"
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(0)})
+		// 引用計數是「新契約先查、查到 0 才查舊寫法」的兩段，因此兩段都要登記。
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(0)})
+		h.rows("FROM forum_posts WHERE image_url IS NOT NULL", []string{"count"}, []driverValue{int64(0)})
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusBadGateway)
 	})
@@ -1517,7 +1525,9 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h.srv.cfg.FilesServerURL = files.URL
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(0)})
+		// 引用計數是「新契約先查、查到 0 才查舊寫法」的兩段，因此兩段都要登記。
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(0)})
+		h.rows("FROM forum_posts WHERE image_url IS NOT NULL", []string{"count"}, []driverValue{int64(0)})
 
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusOK)
@@ -1542,7 +1552,9 @@ func TestCovForumProfileImageDelete(t *testing.T) {
 		h.srv.cfg.FilesServerURL = files.URL
 		h.rows("SELECT owner_email FROM forum_media WHERE filename = ?",
 			[]string{"owner_email"}, []driverValue{covProfileEmail})
-		h.rows("FROM forum_posts WHERE image_url", []string{"count"}, []driverValue{int64(0)})
+		// 引用計數是「新契約先查、查到 0 才查舊寫法」的兩段，因此兩段都要登記。
+		h.rows("FROM forum_posts WHERE JSON_VALID(image_url)", []string{"count"}, []driverValue{int64(0)})
+		h.rows("FROM forum_posts WHERE image_url IS NOT NULL", []string{"count"}, []driverValue{int64(0)})
 
 		recorder := h.do(h.srv.handleForumImageDelete, http.MethodPost, path, `{"url":"pic.png"}`, covProfileEmail, false)
 		covWantStatus(t, recorder, http.StatusOK)

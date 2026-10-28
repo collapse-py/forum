@@ -287,6 +287,14 @@ func covDataCountZero(src *covDataSource) {
 		cols:   []string{"GET_LOCK"},
 		rows:   [][]covDataValue{{int64(1)}},
 	})
+	// 第 2b 步（normalizeForumImageValues）的「還有多少舊寫法的列」計數。回 0 代表
+	// 「已經都是新契約」，那個分支會直接返回，不再逐列 SELECT、也不 UPDATE。
+	// 沒有這條規則時，整條遷移路線會死在「no rows in result set」上。
+	src.addQuery(covDataQueryRule{
+		substr: "SELECT COUNT(*) FROM forum_posts WHERE image_url LIKE",
+		cols:   []string{"COUNT(*)"},
+		rows:   [][]covDataValue{{int64(0)}},
+	})
 }
 
 /* ==========================================================================

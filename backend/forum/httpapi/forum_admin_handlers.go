@@ -1027,7 +1027,8 @@ listAdminForumPosts 對應 GET /api/admin/forum/posts：分頁列出全部文章
 
 查詢參數
 
-	page=N		頁碼，預設 1（寬容：任何解析不出來的值都當成第 1 頁）
+	page=N		頁碼，預設 1（寬容：任何解析不出來的值都當成第 1 頁；
+			超過最後一頁的值夾成最後一頁，見下方 offset 的說明）
 	deleted=1	只列已刪除（軟刪除）的貼文，依刪除時間新到舊。
 			任何其他值都當成預設的「只列未刪除」。
 
@@ -1054,7 +1055,6 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 	}
 	// 每頁固定 25 筆：同時限制單次回應的大小，以及「每篇文章再查一次留言」所產生的查詢次數。
 	const pageSize = 25
-	offset := (page - 1) * pageSize
 
 	// ?deleted=1 切換成「只看已刪除」的清單（軟刪除的還原入口）。
 	// 刻意只認字面的 "1"：這個參數是篩選器的開關，任何其他值（含拼錯的
@@ -1085,6 +1085,21 @@ func (s *Server) listAdminForumPosts(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "unable to count forum posts")
 		return
 	}
+	// 最後一頁的頁碼（向上取整）。total = 0 時算出 0，因此這裡再夾成 1：
+	// 沒有資料時第 1 頁仍是合法的一頁（空的第 1 頁），而不是「第 0 頁」。
+	lastPage := (total + pageSize - 1) / pageSize
+	if lastPage < 1 {
+		lastPage = 1
+	}
+	// page 的上界。沒有這一步，?page=1000000 會變成 offset = 24999975：MySQL 會為
+	// 一個根本不會出現的結果掃過（或跳過）那麼多列，而一個 int64 級的巨大 page
+	// 讓 (page-1)*pageSize 溢出成負數 —— 負的 OFFSET 對 MySQL 是語法錯誤，回 500。
+	// 夾界後 offset 恆落在 [0, total]，巨大 page 退化成「最後一頁」，與本函式對
+	// 壞 page 參數一貫的寬容（退化成可達的頁，而不是回 400 讓整個管理頁載入失敗）。
+	if page > lastPage {
+		page = lastPage
+	}
+	offset := (page - 1) * pageSize
 	// 按讚數與留言數以相關子查詢在主查詢內一次算完，避免在 Go 迴圈裡為每篇文章各打兩次
 	// COUNT（那樣會變成 3N 次往返）。兩張子表都有以 post_id 開頭的索引
 	// （idx_forum_post_likes_post_id、idx_forum_post_comments_post_id），
