@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { errorMessage, requestJSON } from '../core';
+import { ApiError, errorMessage, requestJSON } from '../core';
 import { msg, tr, type Message } from '../i18n';
 import type { ItemsResponse, LikeResponse, BookmarkResponse, UploadResponse, ForumPost } from '../types';
 
@@ -138,8 +138,25 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
   const itemsRef = useRef<ForumPost[]>([]);
   itemsRef.current = state.items;
 
+  /*
+   * retryUntilRef 是「限流額度恢復之前不再打一次」的時刻（epoch ms），
+   * retryTimerRef 是時間到時自動補一頁的那個定時器。
+   *
+   * 存在的原因：後端的 429 帶 `Retry-After`（見 core.ts 的 ApiError.retryAfter），
+   * 而沒讀它的前端會把「請稍後再試」當成「請立刻再試」。這一頁有兩條**自動**再打的
+   * 路徑 —— 列表底部的 sentinel 預載（FeedPage 的 IntersectionObserver）與底部導覽的
+   * 「首頁鈕」—— 額度沒恢復時它們只會又擠出一個 429，使用者看到的是「一直載入失敗」。
+   * 夾住 load() 讓那兩條在等待期間變成 no-op，並在時間到時補上那一頁。
+   */
+  const retryUntilRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const load = useCallback(
     (reset: boolean) => {
+      // 等待期間：任何自動或手動的再打都視為「這一次不做」（不是「被丟棄的 reset」，
+      // 那個語意是清空重來，而這裡沒有清空任何東西）。
+      if (retryUntilRef.current > Date.now()) return;
+
       if (loadingRef.current) {
         /*
          * reset 一定要執行：它的語意是「回到第一頁重新載入」，而被丟棄時
@@ -205,6 +222,29 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
         } catch (error) {
           if (controller.signal.aborted) return;
           if (requestId !== requestIdRef.current) return;
+          /*
+           * 429 走「等 Retry-After 秒之後再試」這條分支，而不是泛型的「載入失敗」：
+           * 這一頁的失敗多數是額度用完，而「立刻再打」正是讓它一直失敗的原因。
+           * 定時器只排一個（反覆失敗時舊的那個必須先取消，否則會疊出多個補載）。
+           */
+          const seconds = error instanceof ApiError && error.status === 429 ? error.retryAfter : null;
+          if (seconds !== null && seconds > 0) {
+            retryUntilRef.current = Date.now() + seconds * 1000;
+            if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+            retryTimerRef.current = setTimeout(() => {
+              retryTimerRef.current = null;
+              retryUntilRef.current = 0;
+              load(reset);
+            }, seconds * 1000);
+            const wait = msg('common.retryInSeconds', { seconds });
+            setState((current) =>
+              reset
+                ? { phase: 'failed', items: [], status: wait, message: wait }
+                : { ...current, status: wait },
+            );
+            void errorMessage(error, tr(wait));
+            return;
+          }
           const message = msg('feed.postsFailed');
           setState((current) =>
             reset
@@ -241,7 +281,15 @@ export function useFeed({ pageSize = 25, endpoint = DEFAULT_ENDPOINT, enabled = 
     if (!enabled) return undefined;
     resetScrollForFreshFeed();
     load(true);
-    return () => abortRef.current?.abort();
+    return () => {
+      abortRef.current?.abort();
+      // 等待中的補載定時器必須跟著頁面離開一起取消：否則它會在卸載之後呼叫
+      // load()，對一個已經不在畫面上的列表送出請求（React 會警告 setState）。
+      if (retryTimerRef.current !== null) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
   }, [enabled, load]);
 
   const patch = useCallback((postId: number, update: Partial<ForumPost>) => {

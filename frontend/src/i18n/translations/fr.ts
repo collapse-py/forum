@@ -41,9 +41,11 @@ export const fr: Record<MessageKey, string> = {
     'Publier',
   'common.placeholder':
     '—',
-  'common.confirm': 'Confirm',
-  'common.updateFailed': 'Update failed',
-  'common.selectAll': 'Select all',
+  'common.confirm': 'Confirmer',
+  'common.updateFailed': 'Échec de la mise à jour',
+  'common.selectAll': 'Tout sélectionner',
+  'common.retryInSeconds': 'Réessayer dans {seconds} s',
+  'common.skipToMain': 'Aller au contenu principal',
   'common.oneHour': '1 heure',
   'common.oneDay': '1 jour',
   'common.sevenDays': '7 jours',
@@ -1119,9 +1121,9 @@ export const fr: Record<MessageKey, string> = {
   'posts.searchLabel':
     'Recherche',
   'posts.searchPlaceholder':
-    'Rechercher dans le contenu des messages ou l’adresse Email complète de l’auteur du message',
+    'Rechercher dans le contenu des messages ou l’adresse e-mail complète de l’auteur du message',
   'posts.searchHint':
-    'Tries selon leur pertinence ; saisissez une adresse Email complète pour trouver tous les messages de cet utilisateur. La recherche remplace la pagination, et les résultats affichent au maximum 25 messages.',
+    'Triés par pertinence ; saisissez une adresse e-mail complète pour trouver tous les messages de cet utilisateur. La recherche remplace la pagination, et les résultats affichent au maximum 25 messages.',
   'posts.searchTotal':
     'Total de {total} résultats de recherche',
   'posts.searchFailed':
@@ -1234,7 +1236,7 @@ export const fr: Record<MessageKey, string> = {
   'reports.targetIdLabel':
     'ID de cible',
   'reports.reporterEmailLabel':
-    'Email de l’auteur du signalement',
+    'E-mail de l’auteur du signalement',
   'reports.statusLabel':
     'Statut',
   'reports.reasonLabel':

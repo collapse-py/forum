@@ -41,9 +41,11 @@ export const th: Record<MessageKey, string> = {
     'เผยแพร่',
   'common.placeholder':
     '—',
-  'common.confirm': 'Confirm',
-  'common.updateFailed': 'Update failed',
-  'common.selectAll': 'Select all',
+  'common.confirm': 'ยืนยัน',
+  'common.updateFailed': 'อัปเดตไม่สำเร็จ',
+  'common.selectAll': 'เลือกทั้งหมด',
+  'common.retryInSeconds': 'ลองอีกครั้งใน {seconds} วินาที',
+  'common.skipToMain': 'ข้ามไปยังเนื้อหาหลัก',
   'common.oneHour': '1 ชั่วโมง',
   'common.oneDay': '1 วัน',
   'common.sevenDays': '7 วัน',
@@ -260,7 +262,7 @@ export const th: Record<MessageKey, string> = {
   'newPost.addImage':
     'เพิ่มภาพ',
   'newPost.emailPrivate':
-    'Email ไม่ถูกเผยแพร่',
+    'อีเมลไม่ถูกเผยแพร่',
   'newPost.submit':
     'เผยแพร่โพสต์',
   'newPost.publishing':
@@ -1119,9 +1121,9 @@ export const th: Record<MessageKey, string> = {
   'posts.searchLabel':
     'ค้นหาแบบคีย์',
   'posts.searchPlaceholder':
-    'เนื้อหา POST หรือ Email เต็มรูปของผู้เขียน POST',
+    'เนื้อหาโพสต์ หรืออีเมลครบถ้วนของผู้เขียนโพสต์',
   'posts.searchHint':
-    'จัดอันดับตามความเกี่ยวข้อง; กรอกรายการ Email เต็มรูปเพื่อหา POST ทั้งหมดที่ผู้ใช้คนนี้สร้าง ค้นหาแทนการสลับหน้า ผลลัพธ์แสดงได้สูงสุด 25 รายการ',
+    'จัดอันดับตามความเกี่ยวข้อง; กรอกอีเมลครบถ้วนเพื่อหาโพสต์ทั้งหมดที่ผู้ใช้คนนี้สร้าง ค้นหาแทนการสลับหน้า ผลลัพธ์แสดงได้สูงสุด 25 รายการ',
   'posts.searchTotal':
     'ผลการค้นหา {total} รายการ',
   'posts.searchFailed':
@@ -1234,7 +1236,7 @@ export const th: Record<MessageKey, string> = {
   'reports.targetIdLabel':
     'ID เป้าหมาย',
   'reports.reporterEmailLabel':
-    'Email ของผู้รายงาน',
+    'อีเมลของผู้รายงาน',
   'reports.statusLabel':
     'สถานะ',
   'reports.reasonLabel':

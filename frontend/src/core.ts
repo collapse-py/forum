@@ -143,12 +143,40 @@ export interface ErrorPayload {
 /** 後端回錯時的 Error 子類，保留 HTTP status 供上層分流。 */
 export class ApiError extends Error {
   readonly status: number;
+  /**
+   * `Retry-After` 標頭的秒數；沒有這個標頭時為 null。
+   *
+   * 存在的原因：限流的 429 已經帶了「還要等幾秒」（後端
+   * backend/forum/httpapi/ratelimit.go 的 Middleware 送這個標頭），而沒有讀它的前端
+   * 會把「稍後再試」當成「立刻再試」—— 重試按鈕與 IntersectionObserver 的預載
+   * 在額度還沒恢復時又打一次，症狀是「一直 429」而使用者不知道要等多久。
+   */
+  readonly retryAfter: number | null;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, retryAfter: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.retryAfter = retryAfter;
   }
+}
+
+/**
+ * 解析 `Retry-After` 標頭，回「多少秒之後可以再試」；沒有或解析不出來回 null。
+ *
+ * 兩種形式都要接（RFC 9110 §10.4.3）：這個後端送的是整數秒（限流與 IP 封鎖那兩處），
+ * 但 HTTP-date 也是合法寫法，而 Date.parse 對純數字字串會回 NaN —— 因此先走數字那條，
+ * 再試日期那條。夾在 >= 0：負值（日期已在過去）變成「立刻」，而不是「等待一個負數」。
+ */
+export function parseRetryAfter(response: Response): number | null {
+  const raw = response.headers.get('Retry-After');
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && trimmed !== '') return Math.max(0, Math.round(seconds));
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, Math.round((at - Date.now()) / 1000));
 }
 
 /**
@@ -216,7 +244,11 @@ export async function requestJSON<T>(path: string, options: RequestOptions = {})
 
   const response = await fetch(path, init);
   if (isLoginRedirect(response)) throw new LoginRequiredError();
-  if (!response.ok) throw new ApiError(await readErrorMessage(response, fallback), response.status);
+  if (!response.ok) {
+    // 429 的 Retry-After 必須跟著 Error 一起上去（見 ApiError.retryAfter 的說明）：
+    // 上層要知道「等多久」而不只是「失敗了」。
+    throw new ApiError(await readErrorMessage(response, fallback), response.status, parseRetryAfter(response));
+  }
 
   // 204 / 空回應主動當作 null，避免 response.json() 在空 body 上拋例外。
   const text = await response.text();

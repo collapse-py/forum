@@ -41,6 +41,37 @@ const ph = (s) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(','
 const HAN_IS_FOREIGN = (file) => !/^(zh-|ja)/.test(file);
 
 /*
+ * 非拉丁書寫的語系裡「英文原字逐字保留」＝沒翻。
+ *
+ * 這一條補的是上面那條漢字檢查的缺口：zh/ja 被排除在漢字檢查之外，因此它們
+ * **完全不在任何「未翻譯」檢查裡** —— 一個 `zh-CN: 'common.confirm': 'Confirm'`
+ * 過去是合法綠色的結果，而它在中文介面上就是一個英文按鈕。同理適用于 ko / th /
+ * ar / hi / ru。
+ *
+ * 拉丁書寫的語系（de / es / fr / id / pt-BR / vi）刻意不在這條之列：那些語言裡
+ * 「與英文同字」多數是合法的（德文的 Route、System、Export 就是同字），逐字比對
+ * en 只會產生噪音。真正該被抓的是「非拉丁語系卻留著英文原字」那種方向明確的情況。
+ *
+ * 三種放行，每一種都要寫出理由（沒有理由的放行項就是下一個人的漏網）：
+ *   1. eyebrow 類鍵：這個站的 eyebrow 用拉丁大寫字是**設計選擇**（見 messages.ts
+ *      裡那些釘住的 eyebrow），不是沒翻。
+ *   2. 技術專名：MySQL、Redis、Elasticsearch、X-Forwarded-For、X-Real-IP、
+ *      P50 / P95、IP、Goroutines —— 每一種語言的介面裡都寫原字。
+ *   3. 純佔位符（`{site}`、`{time}`）：沒有文字可翻。
+ */
+const LATIN_CATALOG = /^(de|en|es|fr|id|pt-BR|vi)\.ts$/;
+const LATIN_RESIDUE_EXEMPT = [
+  'monitor.depMysql', 'monitor.depRedis', 'monitor.depEngineEs',
+  'monitor.sourceXff', 'monitor.sourceRealIp',
+  'monitor.colP50', 'monitor.colP95', 'monitor.timelineHour',
+  'monitor.statGoroutines', 'monitor.statBlockedSplit',
+  'log.requestId', 'block.colIp', 'title.forum', 'admin.consoleName',
+];
+const isLatinCatalog = (file) => LATIN_CATALOG.test(file);
+const isEyebrowKey = (key) => /\.eyebrow$/i.test(key);
+const isPlaceholderOnly = (value) => value.replace(/\{\w+\}/g, '').trim() === '';
+
+/*
  * U+FFFD（REPLACEMENT CHARACTER）＝ 字元損毀，與語言無關。
  *
  * 為什麼這條要獨立於「未翻譯殘留」：U+FFFD 不是任何一種語言的字，它出現在
@@ -65,6 +96,11 @@ const srcVals = new Map(
 );
 
 const files = readdirSync(translationsDir).filter((f) => f.endsWith('.ts')).sort();
+// 英文目錄是「逐字比對」的對象本身：沒有它，英文殘留檢查無從判斷。
+const enVals = new Map(
+  [...readFileSync(resolve(translationsDir, 'en.ts'), 'utf8')
+    .matchAll(/^ {2}'([a-zA-Z0-9_.]+)':\s*\n?\s*'([\s\S]*?)',\r?\n/gm)].map((m) => [m[1], m[2]]),
+);
 let bad = 0;
 
 for (const file of files) {
@@ -77,12 +113,22 @@ for (const file of files) {
   const extra = keys.filter((k) => !order.includes(k));
   const badPh = [];
   const untranslated = [];
+  const latinResidue = [];
   const damaged = [];
   for (const k of keys) {
     if (REPLACEMENT.test(vals.get(k))) damaged.push(k);
     if (PIN.includes(k)) continue;
     if (ph(srcVals.get(k) ?? '') !== ph(vals.get(k))) badPh.push(k);
     if (HAN_IS_FOREIGN(file) && HAN.test(vals.get(k))) untranslated.push(k);
+    if (
+      !isLatinCatalog(file) &&
+      !isEyebrowKey(k) &&
+      !LATIN_RESIDUE_EXEMPT.includes(k) &&
+      !isPlaceholderOnly(vals.get(k)) &&
+      enVals.get(k) === vals.get(k)
+    ) {
+      latinResidue.push(k);
+    }
   }
   const orderOk = JSON.stringify(keys) === JSON.stringify(order);
   const ok =
@@ -90,6 +136,7 @@ for (const file of files) {
     !extra.length &&
     !badPh.length &&
     !untranslated.length &&
+    !latinResidue.length &&
     !damaged.length &&
     orderOk;
   if (!ok) bad += 1;
@@ -100,6 +147,9 @@ for (const file of files) {
       (orderOk ? '' : ' order:differs') +
       (badPh.length ? ` placeholder:${badPh.join(',')}` : '') +
       (untranslated.length ? ` untranslated:${untranslated.join(',')}` : '') +
+      (latinResidue.length
+        ? ` latinResidue:${latinResidue.join(',')}（值逐字等於 en —— 非拉丁語系裡這代表沒翻）`
+        : '') +
       (damaged.length
         ? ` damaged:${damaged.join(',')}（含 U+FFFD，原始字元已丟失，須照 messages.ts 重寫）`
         : ''),

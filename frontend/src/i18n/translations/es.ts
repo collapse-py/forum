@@ -41,9 +41,11 @@ export const es: Record<MessageKey, string> = {
     'Publicar',
   'common.placeholder':
     '—',
-  'common.confirm': 'Confirm',
-  'common.updateFailed': 'Update failed',
-  'common.selectAll': 'Select all',
+  'common.confirm': 'Confirmar',
+  'common.updateFailed': 'Error al actualizar',
+  'common.selectAll': 'Seleccionar todo',
+  'common.retryInSeconds': 'Reintentar en {seconds} s',
+  'common.skipToMain': 'Saltar al contenido',
   'common.oneHour': '1 hora',
   'common.oneDay': '1 día',
   'common.sevenDays': '7 días',
@@ -1119,9 +1121,9 @@ export const es: Record<MessageKey, string> = {
   'posts.searchLabel':
     'Búsqueda por palabras clave',
   'posts.searchPlaceholder':
-    'Contenido de la publicación o Email completo de la persona autora de la publicación',
+    'Contenido de la publicación o correo electrónico completo de la persona autora de la publicación',
   'posts.searchHint':
-    'Ordenados por relevancia; introduce un Email completo para encontrar todas las publicaciones de esa persona. La búsqueda sustituye la paginación; se muestran como máximo 25 resultados.',
+    'Ordenados por relevancia; introduce un correo electrónico completo para encontrar todas las publicaciones de esa persona. La búsqueda sustituye la paginación; se muestran como máximo 25 resultados.',
   'posts.searchTotal':
     'Se encontraron {total} resultados de búsqueda',
   'posts.searchFailed':
@@ -1234,7 +1236,7 @@ export const es: Record<MessageKey, string> = {
   'reports.targetIdLabel':
     'ID del objetivo',
   'reports.reporterEmailLabel':
-    'Email de la persona denunciante',
+    'Correo electrónico de la persona denunciante',
   'reports.statusLabel':
     'Estado',
   'reports.reasonLabel':

@@ -241,7 +241,7 @@ export function BookmarksPage() {
     <ForumShell>
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum/bookmarks" install={install} />
 
-      <main className="forum-main bookmarks-main">
+      <main className="forum-main bookmarks-main" id="main">
         <a className="back-link" href="/forum">
           <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}

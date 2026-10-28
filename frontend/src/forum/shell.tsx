@@ -398,10 +398,21 @@ export interface ForumShellProps {
  * 論壇頁唯一的共用容器，把副作用放在這裡等於九頁都會拿到非阻斷的字型載入，
  * 而不必在每一個入口檔案各寫一次。放在 effect（而非模組求值）是為了確保它排在
  * 首次算繪之後 —— 那正是把 Google Fonts 從關鍵路徑上拿掉的關鍵。
+ *
+ * 「跳至主要內容」的連結同樣放在這一層：它是九頁唯一都拿得到的位置，而且必須排在
+ * 任何導覽連結**之前**，鍵盤使用者按 Tab 才會先看到它而不是先跳進導覽列。各頁的
+ * <main> 都帶 id="main"，因此這條連結在九頁都落到對的地方。
  */
 export function ForumShell({ className, children }: ForumShellProps) {
   useEffect(() => {
     scheduleWebFonts();
   }, []);
-  return <div className={className ? `forum-shell ${className}` : 'forum-shell'}>{children}</div>;
+  return (
+    <div className={className ? `forum-shell ${className}` : 'forum-shell'}>
+      <a className="skip-link" href="#main">
+        {t('common.skipToMain')}
+      </a>
+      {children}
+    </div>
+  );
 }

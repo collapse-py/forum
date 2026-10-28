@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 
 import { ForumGlyph } from '../icons';
+import { LanguageSwitcher } from '../i18n/LanguageSwitcher';
 import { t, usePageTitle } from '../i18n';
 import { SITE_MARK, SITE_NAME, SITE_SHORT_NAME } from '../site';
 import { ForumShell, InstallHint, InstallButton, usePwaInstall } from './shell';
@@ -42,10 +43,15 @@ export function LoginPage() {
           <a className="login-link" href={oauthHref}>
             {t('auth.googleLogin')}
           </a>
+          {/* 這一頁不用 ForumNav（它沒有導覽列可借），因此語言切換器要自己放進去：
+              沒有它，一個未登入的訪客在這一站唯一能選語言的地方就是「登入之後」。
+              版面是 .nav-actions 的 grid 第 3 欄（見 forum-login.html 的註解），
+              與 shell.tsx 的 ForumNav 同一個寫法。 */}
+          <LanguageSwitcher variant="forum" />
         </div>
       </header>
 
-      <main className="login-gate-main">
+      <main className="login-gate-main" id="main">
         <section className="login-gate-panel">
           <div className="login-gate-avatar" aria-hidden="true">
             {SITE_MARK}

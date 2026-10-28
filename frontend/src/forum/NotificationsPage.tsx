@@ -154,7 +154,7 @@ export function NotificationsPage() {
     <ForumShell>
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum/notifications" install={install} />
 
-      <main className="forum-main notification-main">
+      <main className="forum-main notification-main" id="main">
         <a className="back-link" href="/forum">
           <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}

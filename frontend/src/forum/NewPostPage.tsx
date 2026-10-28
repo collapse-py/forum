@@ -289,7 +289,7 @@ export function NewPostPage() {
     <ForumShell className="forum-new-shell">
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum/new" install={install} />
 
-      <main className="forum-main new-post-main">
+      <main className="forum-main new-post-main" id="main">
         <a className="back-link" href="/forum">
           <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}

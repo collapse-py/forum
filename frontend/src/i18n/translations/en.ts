@@ -26,6 +26,8 @@ export const en: Record<MessageKey, string> = {
   'common.confirm': 'Confirm',
   'common.updateFailed': 'Update failed',
   'common.selectAll': 'Select all',
+  'common.retryInSeconds': 'Try again in {seconds}s',
+  'common.skipToMain': 'Skip to main content',
   'common.oneHour': '1 hour',
   'common.oneDay': '1 day',
   'common.sevenDays': '7 days',

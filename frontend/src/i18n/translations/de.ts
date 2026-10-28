@@ -41,9 +41,11 @@ export const de: Record<MessageKey, string> = {
     'Veröffentlichen',
   'common.placeholder':
     '—',
-  'common.confirm': 'Confirm',
-  'common.updateFailed': 'Update failed',
-  'common.selectAll': 'Select all',
+  'common.confirm': 'Bestätigen',
+  'common.updateFailed': 'Aktualisierung fehlgeschlagen',
+  'common.selectAll': 'Alle auswählen',
+  'common.retryInSeconds': 'Erneut versuchen in {seconds} s',
+  'common.skipToMain': 'Zum Hauptinhalt springen',
   'common.oneHour': '1 Stunde',
   'common.oneDay': '1 Tag',
   'common.sevenDays': '7 Tage',
@@ -187,7 +189,7 @@ export const de: Record<MessageKey, string> = {
   'post.reply':
     'Antwort',
   'post.permalink':
-    'Permalink',
+    'Direktlink',
   'post.editedBadge':
     'bearbeitet',
   'post.editContentLabel':
@@ -260,7 +262,7 @@ export const de: Record<MessageKey, string> = {
   'newPost.addImage':
     'Bild hinzufügen',
   'newPost.emailPrivate':
-    'Deine Email wird nicht veröffentlicht',
+    'Deine E-Mail wird nicht veröffentlicht',
   'newPost.submit':
     'Beitrag veröffentlichen',
   'newPost.publishing':

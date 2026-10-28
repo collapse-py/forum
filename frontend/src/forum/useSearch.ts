@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { errorText, requestJSON } from '../core';
+import { ApiError, errorText, requestJSON } from '../core';
 import { msg, t, tr, type Message } from '../i18n';
 import type { ForumPost, SearchResponse } from '../types';
 
@@ -93,7 +93,34 @@ export function useSearch(): SearchController {
   const totalRef = useRef(0);
   totalRef.current = state.total;
 
+  /*
+   * retryUntilRef / retryTimerRef：限流的「等 Retry-After 秒再打」狀態
+   * （見 core.ts 的 ApiError.retryAfter）。
+   *
+   * 沒有它，搜尋失敗後的「再打」是三條自動路徑：sentinel 預載下一頁、使用者
+   * 再按一次 Enter、以及輸入了新關鍵字後的 submit。額度沒恢復時它們只會各自
+   * 擠出一個 429，而畫面一直顯示「搜尋失敗」。等待期間把 run() 夾住，並在
+   * 時間到時用**當下**的關鍵字補跑一次（新關鍵字不能丟，否則使用者看到輸入框
+   * 更新了、結果卻還是舊的）。
+   */
+  const retryUntilRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const run = useCallback((query: string, reset: boolean) => {
+    if (retryUntilRef.current > Date.now()) {
+      if (reset) {
+        // 等待期間打進來的新關鍵字：排一次「時間到就帶著這個關鍵字重跑」。
+        const waitMs = retryUntilRef.current - Date.now();
+        if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = null;
+          retryUntilRef.current = 0;
+          run(query, true);
+        }, waitMs);
+      }
+      return;
+    }
+
     if (loadingRef.current) {
       /*
        * reset 一定要執行：它的語意是「用新關鍵字從第一頁重來」，若因為
@@ -147,6 +174,28 @@ export function useSearch(): SearchController {
       } catch (error) {
         if (controller.signal.aborted) return;
         if (requestId !== requestIdRef.current) return;
+        /*
+         * 429 走「等 Retry-After 秒再試」這一路（與 useFeed 同一個規則）：
+         * 搜尋是讀取端點裡單次最貴的（ES 或 MySQL 全文比對），額度用完時
+         * 「立刻再打」只會讓它一直失敗。等待中的補跑帶**當下**這個關鍵字。
+         */
+        const seconds = error instanceof ApiError && error.status === 429 ? error.retryAfter : null;
+        if (seconds !== null && seconds > 0) {
+          retryUntilRef.current = Date.now() + seconds * 1000;
+          if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null;
+            retryUntilRef.current = 0;
+            run(query, reset);
+          }, seconds * 1000);
+          const wait = msg('common.retryInSeconds', { seconds });
+          setState((current) =>
+            reset
+              ? { ...idleState(), query, phase: 'failed', status: wait, message: wait }
+              : { ...current, status: wait },
+          );
+          return;
+        }
         const message = errorText(error, msg('feed.searchFailed'));
         setState((current) =>
           reset
@@ -193,6 +242,12 @@ export function useSearch(): SearchController {
       // 卸載後不該再有任何 setState：先讓請求失效，再中止它。
       requestIdRef.current++;
       abortRef.current?.abort();
+      // 「等 Retry-After 再打」的那個定時器也要一起取消：它會在卸載之後呼叫
+      // run()，對一個不在畫面上的列表送出請求並 setState。
+      if (retryTimerRef.current !== null) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     },
     [],
   );

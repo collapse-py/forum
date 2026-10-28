@@ -60,6 +60,15 @@ export const zhTW = {
   'common.confirm': '確定',
   'common.updateFailed': '更新失敗',
   'common.selectAll': '全選',
+  /* 兩個新增鍵的理由（2026-10-28 那輪稽核的 F-04／F-07）：
+     - common.retryInSeconds：後端的限流 429 帶 `Retry-After`，前端讀它之後必須
+       說「幾秒之後再試」而不是「請稍後再試」——後者是「立刻再試」的錯誤暗示
+       （見 core.ts 的 ApiError.retryAfter 與 useFeed/useSearch 的等待分支）。
+     - common.skipToMain：公開頁（/forum/*）的跳過導覽連結。刻意不用
+       admin.skipToMain：那是一個後臺命名的鍵，公開 shell 引用它會讓「誰在用這
+       條文案」看不出來，而兩處的文案本來就要各自演進。 */
+  'common.retryInSeconds': '{seconds} 秒後再試',
+  'common.skipToMain': '跳至主要內容',
 
   /* 封鎖時長選單。共用鍵而非分語系翻譯（理由同 common.confirm）：這些是
      時間單位，各語系的慣用說法幾乎一致，而分開翻譯只會多出 80 個字串卻不會

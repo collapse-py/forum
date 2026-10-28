@@ -37,6 +37,13 @@ node ../../tools/i18n/verify-catalogs.mjs
   上去，會讓一條翻錯的譯文看起來通過驗證 —— 那比直接失敗更糟。
 - **`verify-catalogs.mjs` 的 Han 檢查排除中文與日文。** 日文介面裡出現漢字是正常
   的，用它判斷「未翻譯」只會產生噪音。
+- **`verify-catalogs.mjs` 另有一條「英文原字殘留」檢查，專給非拉丁語系。** Han 檢查
+  排除 zh/ja 之後，那兩個目錄其實完全不在任何「未翻譯」檢查裡 —— 一個
+  `zh-CN: 'common.confirm': 'Confirm'` 過去是合法綠色的結果。這條比對的是「值逐字
+  等於 en」，適用 zh / ja / ko / th / ar / hi / ru；拉丁語系（de、es、fr、id、pt-BR、
+  vi）刻意不適用，那些語言裡與英文同字多數是合法的（德文的 `Route`、`System`）。
+  放行三種：eyebrow 類鍵（拉丁大寫字是設計選擇）、技術專名（MySQL、P50、IP…）、
+  以及純佔位符（`{site}`、`{time}`）。
 - **`verify-catalogs.mjs` 另外擋 `U+FFFD`。** 那是解碼失敗的替代符號，不是任何一種
   語言的字：它代表某個字元在編碼往返中被換掉且原始位元組已丟失，因此不能靠重譯
   修好。鍵集、佔位符、順序在這種情況下全部正常 —— 實測抓到過兩處 `th` 的損毀，

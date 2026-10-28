@@ -41,9 +41,11 @@ export const ko: Record<MessageKey, string> = {
     '게시',
   'common.placeholder':
     '—',
-  'common.confirm': 'Confirm',
-  'common.updateFailed': 'Update failed',
-  'common.selectAll': 'Select all',
+  'common.confirm': '확인',
+  'common.updateFailed': '업데이트 실패',
+  'common.selectAll': '모두 선택',
+  'common.retryInSeconds': '{seconds}초 후 재시도',
+  'common.skipToMain': '본문으로 건너뛰기',
   'common.oneHour': '1시간',
   'common.oneDay': '1일',
   'common.sevenDays': '7일',
@@ -260,7 +262,7 @@ export const ko: Record<MessageKey, string> = {
   'newPost.addImage':
     '이미지 추가',
   'newPost.emailPrivate':
-    '당신의 Email은 공개되지 않습니다.',
+    '당신의 이메일은 공개되지 않습니다.',
   'newPost.submit':
     '게시',
   'newPost.publishing':
@@ -1119,9 +1121,9 @@ export const ko: Record<MessageKey, string> = {
   'posts.searchLabel':
     '키워드 검색',
   'posts.searchPlaceholder':
-    '글 내용 또는 작성자의 전체 Email',
+    '글 내용 또는 작성자의 전체 이메일',
   'posts.searchHint':
-    '관련성순으로 정렬됩니다. 전체 Email을 입력하면 해당 사용자의 모든 글을 찾을 수 있습니다. 검색 기능으로 탭이 대체되며 결과는 최대 25건까지 표시됩니다.',
+    '관련성순으로 정렬됩니다. 전체 이메일을 입력하면 해당 사용자의 모든 글을 찾을 수 있습니다. 검색 기능으로 탭이 대체되며 결과는 최대 25건까지 표시됩니다.',
   'posts.searchTotal':
     '검색 결과 {total}건',
   'posts.searchFailed':
@@ -1234,7 +1236,7 @@ export const ko: Record<MessageKey, string> = {
   'reports.targetIdLabel':
     '대상 ID',
   'reports.reporterEmailLabel':
-    '신고자 Email',
+    '신고자 이메일',
   'reports.statusLabel':
     '상태',
   'reports.reasonLabel':

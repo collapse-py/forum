@@ -308,7 +308,7 @@ export function OthersProfilePage() {
       {/* showAccount=false：公開頁不顯示登入狀態與登出鈕。 */}
       <ForumNav auth={{ phase: 'ready', loggedIn: false }} loginReturn="/forum" showAccount={false} />
 
-      <main className="forum-main profile-main">
+      <main className="forum-main profile-main" id="main">
         <a className="back-link" href="/forum">
           <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}

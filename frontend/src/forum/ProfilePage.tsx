@@ -439,7 +439,7 @@ export function ProfilePage() {
     <ForumShell className="forum-profile-shell">
       <ForumNav auth={navAuth} labels={authLabels()} loginReturn="/forum/profile" install={install} />
 
-      <main className="forum-main profile-main">
+      <main className="forum-main profile-main" id="main">
         <a className="back-link" href="/forum">
           <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}

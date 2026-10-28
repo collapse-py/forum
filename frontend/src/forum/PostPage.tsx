@@ -246,7 +246,7 @@ export function PostPage() {
     <ForumShell>
       <ForumNav auth={auth} labels={authLabels()} loginReturn={window.location.pathname} install={install} />
 
-      <main className="forum-main post-page-main">
+      <main className="forum-main post-page-main" id="main">
         <a className="back-link" href="/forum">
           <ForumGlyph name="arrow_back" />
           {t('common.backToHome')}

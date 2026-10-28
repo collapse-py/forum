@@ -3,7 +3,10 @@
 # 對應的 config.conf.example 是去密碼化的範本，刻意**要**進版控。
 config.conf
 data.json
-server.log
+# 執行期日誌。`server.log*` 而不是 `server.log`：dev 與部署端會留下輪替出來的
+# `server.log.1` 這類副本（本機就有 52 MB 的一份），內容含請求與位址細節，
+# 也不該進版控。
+server.log*
 
 # 前端相依套件。React 版帶進 node_modules 後，這一項從「建議」變成「必須」：
 # 沒有它，npm 裝的幾百 MB 會跟著進版控。

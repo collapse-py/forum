@@ -9,7 +9,7 @@
  * 呼叫端只需要 try/catch + toast，不必各自解析錯誤形狀。
  */
 
-import { ApiError } from '../core';
+import { ApiError, parseRetryAfter } from '../core';
 import { t } from '../i18n';
 
 export { ApiError };
@@ -74,7 +74,9 @@ export async function adminApi<T = unknown, TBody = unknown>(
   }
 
   if (!response.ok) {
-    throw new ApiError(await readErrorMessage(response), response.status);
+    // 後臺的限流 429 也帶 Retry-After（同一個後端中介層），讀它才能讓上層的
+    // 「重試」不是立刻再打一次。
+    throw new ApiError(await readErrorMessage(response), response.status, parseRetryAfter(response));
   }
 
   // 204 / 空回應主動當作 null，避免 response.json() 在空 body 上拋例外。

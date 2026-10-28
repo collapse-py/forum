@@ -393,7 +393,8 @@ export function FeedPage() {
     <ForumShell>
       <ForumNav auth={auth} labels={authLabels()} loginReturn="/forum" install={install} search={searchForm} />
 
-      <main className="forum-main">
+      {/* id="main" 是 ForumShell 的「跳至主要內容」連結的目標（見 shell.tsx）。 */}
+      <main className="forum-main" id="main">
         {/*
          * 公告橫幅放在狀態列**之前**。
          *
