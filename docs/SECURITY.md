@@ -14,6 +14,7 @@
 - [刻意不做的事](#刻意不做的事)
 - [上線檢查表](#上線檢查表)
 - [已知的低風險問題](#已知的低風險問題)
+- [尚未關閉的項目（2026-10-29 對帳）](#尚未關閉的項目2026-10-29-對帳)
 
 ---
 
@@ -267,7 +268,7 @@ CSRF 隨機 nonce，因此 `state` 未綁定發起登入的瀏覽器 —— 攻�
 | 項目 | 做法 | 失敗時的症狀 |
 | --- | --- | --- |
 | `state` | 一次性 nonce（Redis，TTL 10 分鐘，`GETDEL` 取完即消失） | 用過一次 / 過期 / Redis 不可用 → 400 或 500，**不會**登入成功 |
-| 綁定瀏覽器 | 另外寫一枚短寿命的 `FORUM_oauth_state` cookie，回呼時比對 | 從別的瀏覽器貼上回呼網址 → 拒絕 |
+| 綁定瀏覽器 | 另外寫一枚短壽命的 `FORUM_oauth_state` cookie，回呼時比對 | 從別的瀏覽器貼上回呼網址 → 拒絕 |
 | 授權碼綁定 client | PKCE（S256，`code_verifier` 只在 Redis 裡） | 授權碼被別處重放時換不到 token |
 | 回跳路徑 | 存 Redis（跟 nonce 同一筆），不再塞在 `state` 裡 | 沒有可被偽造開放轉向的地方；`isSafeReturnPath` 仍在 |
 
@@ -458,6 +459,9 @@ GET /api/forum/public-posts?user=<SHA-256(email)>
 管理員提權，但都是純網際網路可達的問題。第 2、3 項已在同一輪修掉（見各小節的標題）；
 第 1 項仍在，因為它是**部署設定**的決定，不是實作缺陷。
 
+2026-10-29 的對帳把**還開著**的項目集中到下一節（那一節區分「倉庫改不到的部署端缺口」與
+「倉庫已修但線上未驗證」，這兩種的處理方式不同）。
+
 ### 1. 限流可被單一偽造標頭繞過
 
 `TRUSTED_PROXY_CIDRS` 留空時（**預設**），限流的分桶鍵是 `X-Forwarded-For` 的最左項：
@@ -489,9 +493,83 @@ IP 封鎖**不受**此影響（它檢查所有候選位址，命中任何一個�
 ### 3. 登入 CSRF（已修，2026-10-27）
 
 見[CSRF](#csrf)那一節。`state` 現在是一次性 nonce（Redis、`GETDEL`、TTL 10 分鐘）並綁定
-一枚短寿命 cookie，另加 PKCE；回跳路徑改存 Redis。Redis 或 OAuth 不可用時 fail closed。
+一枚短壽命 cookie，另加 PKCE；回跳路徑改存 Redis。Redis 或 OAuth 不可用時 fail closed。
 
 ### 順帶：`public-profile` 與 `public-posts` 的參數名不一致
 
 `/api/forum/public-profile` 用 `?key=`，`/api/forum/public-posts` 用 `?user=`。
 兩者都是 64 字元長度檢查。這是現況不是筆誤，但兩個端點並排時很容易記錯。
+
+---
+
+## 尚未關閉的項目（2026-10-29 對帳）
+
+上面那節是三項**已確認**的低風險問題，其中兩項已修掉。這一節是**還開著**的：每一項都標出它是
+「倉庫改不到的部署端缺口」還是「倉庫已修但線上還沒驗證到」。優先序由上往下。
+
+### 1. 對外的作者識別碼仍可離線還原（部署端沒有那把秘密）
+
+`AUTHOR_KEY_SECRET` 未設定時 `DeriveAuthorKey` 回退到 `publicForumKey`，對外的 `authorKey`
+因此仍是 `SHA-256(email)`。2026-10-29 抽樣線上 25 篇貼文，**25/25** 的識別碼等於
+`SHA-256(seedXXXX@example.test)` → 知道種子格式的人可以列出每個使用者的發文紀錄（那些貼文
+本來就是公開的，洩露的是「誰寫了哪些」這層對應）。
+
+程式層已經支援 HMAC 並有回填（`BackfillProfileAuthorKeys`），**部署了也不生效** —— 缺的是
+那把秘密本身。設定步驟、回填與「換秘密會讓已發布識別碼全部失效」的代價見
+[匿名性的邊界](#匿名性的邊界)與[上線檢查表](#上線檢查表)。
+
+### 2. Cookie 不帶 `Secure`、沒有 HSTS、明文 HTTP 不轉 HTTPS
+
+`COOKIE_SECURE=false`；HTTPS 的 `/forum` 回應裡沒有 `Strict-Transport-Security`；
+明文 HTTP 的 `/forum` 與 `/healthz` 回 **404**，而不是轉址到 HTTPS。
+
+三項都在倉庫之外（一個設定值、兩項是代理端的事），本倉庫只能靠 `-check` 警告那一個設定值。
+風險是 session cookie 可能走明文通道，而 token 不輪替、不綁 IP／UA（見
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#session-不記錄-ip-與-user-agent)）→ 撿到就是完整接管。
+
+### 3. 兩台的媒體 token 前綴不一致
+
+`files_server/config.conf` 的 `token_key_prefix = "hpnm:token:"` 對上後端的
+`MEDIA_TOKEN_KEY_PREFIX=forum:token:`。倉庫的**預設值**是 `forum:token:`
+（`files_server/config.go`），範本裡也明寫「必須與後端相同」。
+
+現況線上那台用的是 `forum:token:`，所以圖片正常；但**一旦改跑倉庫版**、或有人拿本機那份
+設定檔起服務，所有圖片就靜默變 401（可用性缺陷，不是繞過）。兩份 `config.conf` 都不進
+版控（只有 `.example` 進），因此這一項只能在兩台機器上手動對齊 —— 它是第 4 項的前置條件。
+
+### 4. 線上跑的檔案伺服器是倉庫外的舊版（四條都來自它）
+
+線上是 `/opt/files-server/main.go`，不是倉庫的 `files_server/`。改倉庫對它**沒有**效果，
+因此下列四條對線上仍開放（倉庫版那一份的狀態列在右欄）：
+
+| 線上現況 | 倉庫版 |
+| --- | --- |
+| `GET /files/..` → 307 → `/` → **列根目錄**（含 `files/`） | 已修（路徑收斂，不列目錄） |
+| `Access-Control-Allow-Origin` **回聲任意 Origin**（存取仍由 media token 把關，無 token 一律 401） | `allowed_origins = ["*"]` 是設定值 → 換版時要收緊 |
+| `upload.token` 留空時 `/upload` 與 `/delete` **完全不驗證** | 已修：啟動印含 `WARNING` 的日誌（`uploadAuthWarning`），刻意不 fail-fast |
+| 限流的計價鍵含埠 → 同一 IP 換埠就換桶（實測：250 次 keep-alive 打出 50×429；250 次新連線 0×429） | 已修：`net.SplitHostPort` 去埠 |
+
+換版的順序是**先做第 3 項（前綴對齊）再換版**，否則全站圖片失效。
+
+### 5. Redis 故障時 IP 封鎖失效（刻意的取捨，不是缺口）
+
+封鎖的候選位址存在 Redis，Redis 不可用時 fail open。代價與理由見
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md#ip-封鎖在-redis-故障時失效fail-open)；這一節列它只因為它
+是安全面上**已知的開放狀態**，監控頁的 Redis 探測是唯一提示。
+
+### 6. `/service-worker.js` 仍被 CDN 快取 4 小時
+
+倉庫那條路由已送 `Cache-Control: no-cache, must-revalidate`（2026-10-29 部署）。經 Cloudflare
+的公開回應是 `max-age=14400, must-revalidate`（`cf-cache-status: REVALIDATED`）→ 過期那筆一定
+回源驗證，「部署後 4 小時拿不到新 SW」的症狀消失；CF 對 `.js` 的 `max-age` 預設本身要在那端改。
+
+### 已修、但線上還沒驗證到的
+
+| 項目 | 缺的驗證 |
+| --- | --- |
+| ES 索引對帳（`search_after` 必須是陣列，2026-10-29 修） | 第一輪對帳的「移除 N 筆幽靈文件」日誌。線上 ES 有 6,018 筆 vs MySQL 6,000 筆可見貼文 → 預期約 18 筆 |
+| OAuth nonce ＋ PKCE | 一次真實的 Google 登入（nonce 是否被 `GETDEL` 比對、PKCE 是否被 Google 接受） |
+| 白名單移除即撤銷既有 session | 需要管理員 session 才能端到端驗證 |
+| 上傳的 `MaxBytesReader` ＋ 串流轉送 | 需要寫入請求（會動儲存，本次未觸發） |
+| 圖片引用計數與遷移的收斂 | 依賴真實 MySQL 的門控測試（`FORUM_TEST_MYSQL_DSN`），本機未跑 |
+| skip-link 與 `<main id="main">` | 元素已部署，Lighthouse 分數未重跑 |

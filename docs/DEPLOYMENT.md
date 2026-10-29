@@ -73,6 +73,21 @@ cd ../files_server && go build -o files-server .
 cd ../backend && go build -o forum .
 ```
 
+**在目標機器上 build 需要該機器的 Go ≥ 1.26**（兩個模組的 `go.mod` 都要 1.26）。舊的部署機
+（例如 Go 1.24.4）會在那一步直接失敗 —— 那種情況下改在本機 cross-compile 再上傳：
+
+```bash
+cd backend && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o server
+```
+
+`backend/server` 與 `files_server/server` 這兩個 Linux 產物已列在 `.gitignore`（15 MB 的二進位
+不進版控）。這樣做的前提是**本機跑過測試**，而要注意兩件事：部署的產物不是 CI 那台機器 build 的，
+而本機測試跑的是 Windows 二進位 —— 上傳的那個檔本身沒有被任何測試執行過。
+
+**尚未處理的部署端項目**（設定值與代理端的事，本倉庫改不到）見
+[`SECURITY.md`](SECURITY.md#尚未關閉的項目2026-10-29-對帳)：`AUTHOR_KEY_SECRET`、
+`COOKIE_SECURE`／HSTS、兩台的媒體 token 前綴、線上那台倉庫外的舊版 `files_server`。
+
 ---
 
 ## 容器部署（docker compose）

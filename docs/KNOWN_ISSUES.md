@@ -12,7 +12,8 @@
 - [E. 清理](#e-清理)
 
 安全相關的問題（限流可繞過、發文紀錄可枚舉、登入 CSRF、Redis 信任邊界）見
-[`SECURITY.md`](SECURITY.md#已知的低風險問題)，那裡有實測記錄。
+[`SECURITY.md`](SECURITY.md#已知的低風險問題)，那裡有實測記錄；**還開著的項目**（含部署端改不到的
+那幾項）見 [`SECURITY.md`](SECURITY.md#尚未關閉的項目2026-10-29-對帳)。
 
 ---
 
@@ -34,6 +35,15 @@
 **`forum/data` 的遷移測試與 `forum/httpapi` 的子樹刪除測試需要真實 MySQL**，本機執行時會全部跳過（未設
 `FORUM_TEST_MYSQL_DSN`）。CI 的 `migrations` job 會跑它們 —— 但那也意味著
 **本機的 `go test ./...` 不會驗證 schema 遷移與留言子樹刪除的 SQL**。
+
+本機有一台 MySQL（`127.0.0.1:3306`），但它**不接受 CI 那組憑證**（`root:root` → `Error 1045
+Access denied for user 'root'@'localhost'`）。因此「本機也能跑門控測試」這件事目前的障礙是
+憑證，不是資料庫缺席：要用可用的 DSN 顯式帶進去 ——
+`FORUM_TEST_MYSQL_DSN='<DSN>' go test ./forum/httpapi ./forum/data -count=1`。
+
+**`forum/httpapi` 的測試偶發競態**：2026-10-29 跑 `go test ./...` 時出現一次 `httpapi` 失敗，
+同命令重跑兩次（含 `-count=2`）都是綠。那是平行套件之間的瞬時共享狀態，不是回歸 —— 但記錄它
+是因為「一次紅、一次綠」很容易被誤讀成改動造成的壞測。遇到時先重跑，再判斷。
 
 ---
 
@@ -236,6 +246,63 @@ P95 只會落在 1/2/5/10/25/50/100/250/500ms 或 1/2/5/10s 上。介面上照�
 沒有被判成有問題就讓這一步變紅。留著這一條是因為教訓值得記：一個沒有被反向測試過的
 檢查，會安靜地退化成一個只印訊息的路由 —— 而一個**規則太寬**的檢查，會同樣安靜地
 退化成一個每次都誤報的路由。
+
+### 線上的檔案伺服器是倉庫外的舊版
+
+`files_server/` 在倉庫裡，但線上跑的是 `/opt/files-server/main.go` 那一份舊的單檔程式。
+因此倉庫裡對 `files_server` 的修復（路徑收斂、上傳驗證的啟動警示、限流計價鍵去埠）**對線上
+沒有效果** —— 那四條現況列在 [`SECURITY.md`](SECURITY.md#尚未關閉的項目2026-10-29-對帳) 第 4 項。
+
+換版前要先把媒體 token 的前綴對齊（下一節），否則全站圖片 401。
+
+### 兩台的媒體 token 前綴不一致
+
+`files_server/config.conf` 是 `hpnm:token:`，後端 `backend/config/config.conf` 是
+`forum:token:`。倉庫的預設值（`files_server/config.go`）與範本都寫 `forum:token:`，並明寫兩邊
+必須相同。線上目前兩邊都是 `forum:token:`，所以圖片正常 —— 這是**未來**的缺口：拿倉庫那份設定
+起服務、或換成倉庫版，就全站靜默 401。
+
+兩份 `config.conf` 都不進版控（只有 `.example` 進，`secrets` job 驗的就是範本），因此這一項
+無法由倉庫修，只能在機器上手動改。
+
+### 公開流量目前只落在一個節點
+
+`192.168.66.2:8088` 對本機是 connection refused（nginx／openresty 的 upstream 裡它是
+`weight=100` 的主節點），因此每筆公開請求都是「先失敗、再重試到 `.66.5`」。後果是延遲多一次
+失敗，而且整個站實際上只有一個後端在服務 —— 那不是漏洞，是要修那台服務本身的事。
+
+### 部署用本機 cross-compile 後上傳
+
+遠端那台的 Go 是 1.24.4，而兩個模組的 `go.mod` 都要 1.26 → 在遠端 `go build` 直接失敗。
+本輪的做法是本機 `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false`
+再上傳執行檔（Linux 產物已列在 `.gitignore`，那 15 MB 的檔不進版控）。
+
+代價：**部署的產物不是 CI 那台機器 build 的**，而且上傳的執行檔沒有被任何測試跑過（測試在
+本機跑過，但那是 Windows 上的測試程序，不是那個 Linux 二進位）。
+
+### CDN 對 `.js` 有它自己的 `max-age` 預設
+
+`/service-worker.js` 經 Cloudflare 是 `max-age=14400`。倉庫那條路由已送
+`no-cache, must-revalidate`（2026-10-29 部署）→ 過期那筆一定回源驗證，因此「部署後 4 小時拿不到
+新 SW」不再發生；要把 TTL 本身拿掉得在 CDN 端改，本倉庫改不到。
+
+### ES 索引對帳曾每輪都失敗（已修，2026-10-29）
+
+`es.ListAllIDs` 的 `search_after` 送的是**純數字**，ES 9.5.5 回
+`400 parsing_exception: Unknown key for a VALUE_NUMBER in [search_after]` → 每六小時那輪對帳全部
+失敗，幽靈文件永遠清不掉。已改成陣列（`[]int64{searchAfter}`），兩個 fake store 也改成只接受
+陣列，以免測試繼續替錯誤的形狀背書。
+
+尚未觀察到的部分：線上 ES 有 6,018 筆文件 vs MySQL 6,000 筆可見貼文 → 第一輪對帳預期移除約
+18 筆。要確認的是日誌裡那條 `[SEARCH] 索引對帳完成，移除 N 筆幽靈文件`（見
+[ES 的幽靈文件](#es-的幽靈文件會被定期對帳收斂)）。
+
+### 對帳報告本身不進版控
+
+安全與程式的對帳紀錄在 `audit-workspace/`（被 `.gitignore` 忽略）：實測輸出、逐項判定、部署
+紀錄都是**工作底稿**。進版控的只有這幾個檔裡被摘要出來的待辦 ——
+[`SECURITY.md`](SECURITY.md#尚未關閉的項目2026-10-29-對帳)、本檔、[`DEPLOYMENT.md`](DEPLOYMENT.md)。
+因此「報告裡寫了已修」不等於「版控裡有紀錄」；要追溯，看這一節與 SECURITY 那一節。
 
 ---
 
