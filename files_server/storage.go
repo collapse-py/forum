@@ -11,6 +11,7 @@ storage.go 是 files_server 的儲存後端：把「檔名 + 內容」這件事�
 storageBackend：後端介面，三個方法。
 newStorageBackend：以設定選出具體實作。
 newFileName：為上傳的檔案產生儲存檔名（UUID v4 + 副檔名）。
+newFileNameForExt：為**正規化後的內容**產生儲存檔名（UUID v4 + 給定的副檔名）。
 本檔不碰 HTTP，也不碰 Redis。
 
 【主要依賴】
@@ -27,6 +28,10 @@ AWS SDK：那會讓這個模組多出一個體積可觀的相依樹，而實際�
     預設 50 MiB；它若被調高到數百 MB，這裡會變成記憶體尖峰的來源，因此
     介面不假裝支援串流 —— 真的需要時，介面要改成 io.Reader 串流而不是在
     呼叫端偷偷 buffer。
+    2026-10-29 起**本機模式也**是全讀進記憶體：圖片正規化必須先拿到完整的位元組
+    （見 imagepolicy.go），而 handleUpload 因此不再把 io.Reader 交給 saveFile。
+    兩邊同一個量級之後，介面的「不假裝串流」這句話反而更成立了 —— 但它也意味著
+    max_size 調高時，尖峰不再只屬於 S3 模式。
 */
 package main
 
@@ -310,6 +315,29 @@ func newStorageBackend(cfg *Config) (storageBackend, error) {
 	}
 }
 
+// newFileNameForExt 產生一個 UUID v4 加上**給定的**副檔名的檔名。
+//
+// 副檔名由呼叫端決定而不是從上傳者的檔名衍生，是因為上傳的**內容**被正規化之後，
+// 實際的格式可能與檔名原本宣稱的格式不同（見 server.go 的 handleUpload）。
+// 從原檔名衍生會得到「存的是 JPEG、檔名是 .png」這種被誤標的檔案，而瀏覽器是依
+// 副檔名拿到 Content-Type 的。
+//
+// 副檔名一律轉小寫：後端 validForumImageFileName 只認小寫的 .jpg/.png 等，
+// 保留 "PHOTO.JPG" 的大小寫會讓上傳成功卻在後端被判定為非法圖片。
+//
+// crypto/rand 讀取失敗會回錯誤而不是退化成亂數：理由見 newFileName。
+func newFileNameForExt(ext string) (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	// RFC 4122 §4.4：把版本與變異位元固定下來，產生合法的 v4 UUID。
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x%s", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16], strings.ToLower(ext)), nil
+}
+
 // newFileName 為上傳的檔案產生一個新的儲存檔名：UUID v4 + 原始副檔名。
 //
 // 為什麼不用使用者上傳的檔名當儲存鍵：原始檔名是使用者可控的輸入，直接拿來
@@ -325,22 +353,8 @@ func newStorageBackend(cfg *Config) (storageBackend, error) {
 // 這裡刻意自行用 crypto/rand 組出 UUID v4，而不是引入相依套件：這個服務的
 // 相依項已經只有 toml 與 redis 兩個，為了一個 16 行的函式增加外部相依不值。
 //
-// crypto/rand 讀取失敗會回錯誤而不是退化成亂數：檔名不可預測是這條路徑的安全
-// 前提，而 crypto/rand 失敗代表作業系統的隨機來源有問題，那種情況下寧可讓上傳
-// 失敗，也不要產出一批可猜測的檔名。
+// 這個函式保留給「原樣存檔」的那條路徑（白名單裡非圖片的副檔名，見 server.go）；
+// 圖片走 newFileNameForExt，因為它的副檔名來自內容而不是檔名。
 func newFileName(original string) (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	// RFC 4122 §4.4：把版本與變異位元固定下來，產生合法的 v4 UUID。
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-
-	// 副檔名一律轉小寫：後端 validForumImageFileName 只認小寫的 .jpg/.png 等，
-	// 保留 "PHOTO.JPG" 的大小寫會讓上傳成功卻在後端被判定為非法圖片。
-	// 這裡只取副檔名（而非整個檔名），且呼叫端已先以 filepath.Base 正規化。
-	ext := strings.ToLower(filepath.Ext(original))
-
-	return fmt.Sprintf("%x-%x-%x-%x-%x%s", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16], ext), nil
+	return newFileNameForExt(filepath.Ext(original))
 }

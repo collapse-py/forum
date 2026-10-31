@@ -46,7 +46,9 @@ func TestUploadReturns500WhenStorageFails(t *testing.T) {
 	cfg := testConfig(t, t.TempDir())
 	handler := NewServer(cfg, &failingStorage{saveErr: errors.New("disk full")}, nil).Handler()
 
-	req := multipartUpload(t, "/upload", "test-upload-token", "photo.jpg", "image/jpeg", []byte("bytes"))
+	// 一份真的 JPEG：正規化必須先通過，才能走到「儲存失敗」那一步。
+	// 送假位元組的話會得到 400（內容不是圖片），那這條測試就變成測內容判斷而不是測 500。
+	req := multipartUpload(t, "/upload", "test-upload-token", "photo.jpg", "image/jpeg", sampleJPEG(t, 20, 12))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

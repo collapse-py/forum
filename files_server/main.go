@@ -8,10 +8,11 @@ main 是檔案伺服器的執行進入點（package main，不可被其他套件
 逾時取值、訊號處理與監聽等待位於同模組的 shutdown.go。
 
 【檔案分工】
-config.go    設定檔（TOML）解析與兜底值。
-storage.go   儲存後端（本機磁碟 / S3）與檔名產生。
-server.go    路由、上傳與刪除、媒體 token 中介層。
-shutdown.go  監聽、停止訊號、優雅停止。
+config.go     設定檔（TOML）解析、兜底值，以及把設定轉成圖片正規化政策（imagePolicy）。
+storage.go    儲存後端（本機磁碟 / S3）與檔名產生。
+imagepolicy.go 上傳內容的圖片正規化（內容判斷、剝中繼資料、尺寸收斂）。
+server.go     路由、上傳與刪除、媒體 token 中介層。
+shutdown.go   監聽、停止訊號、優雅停止。
 測試分佈與各檔相同：每個 _test.go 只驗證同名的非測試檔。
 
 【為什麼不保留 package 層的 redisClient 全域變數】
@@ -42,6 +43,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -73,6 +75,24 @@ func uploadAuthWarning(cfg *Config) string {
 	return "WARNING: upload token is empty — /upload and /delete have NO authentication; set [upload] token in config.conf"
 }
 
+// imagePolicyWarning 是啟動日誌裡關於「圖片正規化」的那一行。
+//
+// 為什麼需要它：`upload.reencode = false` 是一個**安靜的**隱私決定 —— 關掉之後 JPEG 的
+// EXIF（GPS、相機型號、拍攝時間、軟體名稱）會原樣存進儲存並掛在公開的圖片網址上，
+// 而沒有任何錯誤、沒有任何回應上的差別、也沒有任何頁面會說這件事。對一個「匿名性由構造
+// 保證」的站（README 的核心立論），那是一個與立論直接矛盾的狀態，而它只能由日誌看出來。
+//
+// 刻意不 fail-fast：與 uploadAuthWarning 同一個道理 —— 把「可能只是忘了設定」變成整個
+// 服務起不來，代價比它要修的問題還大。
+func imagePolicyWarning(cfg *Config) string {
+	p := cfg.imagePolicy()
+	if !p.Reencode {
+		return "WARNING: upload.reencode = false — images are stored byte-for-byte; EXIF metadata (including GPS) is NOT stripped"
+	}
+	return fmt.Sprintf("Image normalization enabled (max %dx%d px output, source cap %d px, JPEG quality %d)",
+		p.MaxWidth, p.MaxHeight, p.MaxSourcePixels, p.JPEGQuality)
+}
+
 func main() {
 	// 設定檔路徑相對於工作目錄（見 config.go 的說明），不是執行檔目錄。
 	cfg, err := loadConfig("config.conf")
@@ -100,6 +120,7 @@ func main() {
 
 	log.Printf("Starting files server on %s (storage=%s)", listenAddr(cfg), cfg.Storage.Type)
 	log.Println(uploadAuthWarning(cfg))
+	log.Println(imagePolicyWarning(cfg))
 	if redisClient != nil {
 		log.Println("Static file media token authentication via Redis enabled")
 	}

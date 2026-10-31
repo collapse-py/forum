@@ -334,14 +334,25 @@ HTML 內的 `<style>` 區塊在啟動時算 SHA-256 寫進 `style-src` 的 hash 
 
 | 防線 | 內容 |
 | --- | --- |
-| 檔名 | 落地一律 **UUID v4 + 原副檔名**，永遠不用使用者提供的檔名 |
-| 副檔名 | 白名單 `{.jpg,.jpeg,.png,.gif,.webp}`，**不含 svg** |
+| 檔名 | 落地一律 **UUID v4 + 副檔名**，永遠不用使用者提供的檔名（那個副檔名是由**內容**決定的，見下） |
+| 副檔名 | 白名單 `{.jpg,.jpeg,.png,.gif,.webp}`，**不含 svg**（它能內嵌腳本） |
+| 內容 | **型別由位元組決定，不由副檔名決定**：一份叫 `photo.jpg` 的 HTML 被 400 拒掉。放行它的舊行為是「一個公開的檔案託管，而後端會把它寫進貼文的 `image_url`」—— 那條防線從前靠的是「前端只讓選圖片」，而後端的路由可以被直接呼叫 |
+| 中繼資料 | JPEG／PNG 被**重新編碼**，因此 EXIF（**GPS**、相機型號、拍攝時間、軟體名稱）與 PNG 的 `tEXt`／`iTXt`／`eXIf` 不會進儲存；GIF 剝掉 Comment 與非 NETSCAPE 的 Application（動畫保留），WebP 剝掉 `EXIF` 與任何不認識的 RIFF 區塊（`ICCP` 保留）。`[upload].reencode = false` 會把它們全部留下來 —— 啟動時印 `WARNING` |
+| 尺寸 | 輸出上限 `max_width`／`max_height`（預設 2048）：JPEG／PNG 等比縮小，GIF／WebP 被拒。那是一道**傳輸量**防線（一頁十張原檔） |
+| 來源解析度 | `max_source_pixels`（預設 24M px）在任何解碼**之前**檢查，且只讀標頭 —— 一個幾 KB 的 PNG 宣告 20000×20000 的畫布是 1.6 GB 的 RGBA，而 `max_size` 管不到它 |
 | 大小 | `upload.max_size`，預設 50 MB |
 | 路徑穿越 | 刪除端點對 `..`、多層路徑等做完整家族測試 |
 | 存取 | 綁短 TTL 的 Redis token（`FORUM:token:*`），不是公開網址 |
 | 授權 | 上傳需要登入 + 限流 + 來源檢查 |
 | 結構 | **沒有任何路徑能列出儲存結構** |
 
+**中繼資料那一條是匿名性的一部分，不是「乾淨的檔案」**：手機拍的圖在 EXIF 裡帶 GPS，
+那正是「這張圖在哪裡拍的」。這個站的立論是「email 不出現在任何 URL 與公開頁面」
+（見下面的[匿名性的邊界](#匿名性的邊界)），而一張帶 GPS 的附圖把那個立論對「你貼的這張圖」
+破掉了 —— 而且沒有任何頁面會說這件事。因此它只能由構造保證（重新編碼），而不是由
+「前端不讓選帶 GPS 的圖」保證。
+
+被拒的上傳**不留檔案**：一個「被擋下但仍然消耗磁碟」的上傳端點是一個免費的儲存。
 `files_server` 的媒體 token 驗證在 Redis 故障時回 **503 而非 401** —— 兩者的差別是
 「憑證無效」與「無法判斷」。
 
@@ -442,6 +453,11 @@ GET /api/forum/public-posts?user=<SHA-256(email)>
 - [ ] `FILES_SERVER_TOKEN` 兩邊一致；`MEDIA_TOKEN_KEY_PREFIX` 與 files_server 的
       `token_key_prefix` 一致
 - [ ] `FILES_SERVER_PUBLIC_URL` 與 `FILES_SERVER_URL` 不同（相同代表沒有內外網分離）
+- [ ] files_server 的 `[upload] reencode` 是 `true` —— 除非部署**明確**要原檔。關掉它是一個
+      隱私決定（圖片帶 GPS 進儲存，而那個 GPS 掛在公開的圖片網址上），因此啟動日誌會印一行
+      `WARNING`；那一行是維運唯一能看到「這台現在用什麼政策」的地方
+- [ ] `[upload] max_source_pixels` 與行程的記憶體上限一起看：上傳是**全讀進記憶體**再正規化，
+      峰值大致是「來源 + 解開的 RGBA + 輸出」（見 [`ARCHITECTURE.md`](ARCHITECTURE.md#正規化發生在檔案伺服器那一邊不在後端)）
 
 **部署環境**
 
@@ -548,8 +564,13 @@ IP 封鎖**不受**此影響（它檢查所有候選位址，命中任何一個�
 | `Access-Control-Allow-Origin` **回聲任意 Origin**（存取仍由 media token 把關，無 token 一律 401） | `allowed_origins = ["*"]` 是設定值 → 換版時要收緊 |
 | `upload.token` 留空時 `/upload` 與 `/delete` **完全不驗證** | 已修：啟動印含 `WARNING` 的日誌（`uploadAuthWarning`），刻意不 fail-fast |
 | 限流的計價鍵含埠 → 同一 IP 換埠就換桶（實測：250 次 keep-alive 打出 50×429；250 次新連線 0×429） | 已修：`net.SplitHostPort` 去埠 |
+| **上傳的檔案原樣存**：副檔名照上傳者給的檔名、EXIF（含 **GPS**）留在公開的圖片網址上、尺寸不收斂、非圖片內容被誤標就能存 | 已做：`files_server/imagepolicy.go` 以位元組判型別、重新編碼移除中繼資料、收斂尺寸 |
+| 上傳是**串流**寫入磁碟 | 改成**全讀進記憶體**再正規化（見 [`ARCHITECTURE.md`](ARCHITECTURE.md) 的媒體一節）→ 換版時 `max_size` 與記憶體上限要一起看 |
 
-換版的順序是**先做第 3 項（前綴對齊）再換版**，否則全站圖片失效。
+換版的順序是**先做第 3 項（前綴對齊）再換版**，否則全站圖片失效。換版之後還有兩件事要記得：
+**舊的檔案不會被重編碼**（正規化發生在上傳那一刻），而「副檔名由內容決定」會改變**新的**上傳
+（叫 `a.png` 的 JPEG 現在落地成 `.jpg`）—— 兩條都寫在
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)。
 
 ### 5. Redis 故障時 IP 封鎖失效（刻意的取捨，不是缺口）
 

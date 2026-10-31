@@ -401,6 +401,29 @@ INSERT INTO forum_posts (id, author_email, content, image_url, created_at) VALUE
 限制比檔案伺服器實際會存檔的範圍更嚴，是刻意的**縱深防禦**：handler 收到的是使用者
 可控的字串，萬一日後放寬別的輸入來源，這裡仍擋得住。
 
+### 正規化發生在檔案伺服器那一邊，不在後端
+
+後端只負責「這個檔名合法嗎、這是我上傳的嗎」。圖片的**型別、尺寸、中繼資料**在
+`files_server/imagepolicy.go` 決定，理由是那邊才是持有圖片格式知識的地方：一份 JPEG 的
+APP1 區塊怎麼走、GIF 的區塊邊界在哪，與路由和授權無關。後端看到的是一句「這份位元組能存嗎」，
+而代價是它必須把 files_server 的非 2xx 統一成 502（原因不帶出去，見 [`API.md`](API.md#檔案層對上傳內容的規則post-apiforumimages)）。
+
+`handleUpload` 的順序是有意義的，不是随意的：
+
+```text
+方法 → 上傳 token → 大小上限 → 解析 multipart → 副檔名白名單
+     → 以位元組判型別 → 讀標頭尺寸 → max_source_pixels → 正規化 → 落地（UUID + 內容決定的副檔名）
+```
+
+**讀尺寸在解碼之前**（`image.DecodeConfig` 對 JPEG／PNG／GIF 都不解碼，WebP 因為標準庫沒有
+解碼器所以由 `parseWebP` 讀標頭）。那一道的存在理由是解壓炸彈：一個幾 KB 的 PNG 可以宣告
+20000×20000 的畫布，解開是 1.6 GB 的 RGBA，而 `upload.max_size` 完全管不到那個位元組數。
+
+**代價是整個上傳在記憶體裡**：串流寫盤的舊做法被換掉了，因為重新編碼需要完整的位元組
+（解碼器要整張圖），而剝 GIF／WebP 的區塊要知道容器邊界。峰值大致是「來源 + 解開的 RGBA +
+輸出」，因此那三道上限（`max_size`／`max_source_pixels`／`max_width`×`max_height`）是
+一起作用的，而不是只靠 `max_size`。寫盤失敗時已寫出的半成品會被刪掉（與舊版同一條规则）。
+
 ---
 
 ## 為什麼前端沒有獨立服務

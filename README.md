@@ -76,6 +76,9 @@ framework、沒有 ORM），前端是 Vite + React 19 + TypeScript 的多頁應�
   （預設 50/s 與 2/s，burst 分別 200 與 20）。它與後端的限流器互不隸屬 —— 後端的
   額度保護不到另一個程序，而 `/files/` 的每一次讀取都伴隨一次 Redis 探查
 - **媒體存取權杖**：上傳時發短 TTL 的 Redis token 綁定圖片網址，可主動釋放
+- **上傳的圖片被正規化**（在 `files_server` 那一邊）：型別由位元組決定而不是由副檔名決定，
+  重新編碼會移除 EXIF（含 GPS），輸出尺寸收斂到設定上限。代價是原檔不再可取回，而
+  GIF／WebP 超過上限時是被拒而不是被縮小
 - **單一的來源位址真相**：限流、IP 封鎖、監控、稽核與 access log 全都走同一份
   `TRUSTED_PROXY_CIDRS` 信任模型 —— 同一個請求不會因為「哪一段程式碼問它來自哪裡」
   而得到兩個不同的答案
@@ -215,7 +218,14 @@ docker compose --env-file deploy/settings.conf up -d       # 3. 起服務
 - CSP（`script-src 'self'`，無 `unsafe-inline` / `unsafe-eval`）、CSRF 來源檢查、
   四段式限流（含分頁型 GET）
 - 匿名性：email 不出現在 URL，公開身分是 `SHA256(email)`
-- 媒體：UUID v4 檔名、副檔名白名單（不含 svg）、短 TTL 存取權杖
+- 媒體：UUID v4 檔名（副檔名由**檔案的位元組**決定，不由上傳者給的檔名決定）、副檔名白名單
+  （不含 svg）、短 TTL 存取權杖
+- **上傳的圖片被重新編碼，因此 EXIF（含 GPS、相機型號、拍攝時間）不會進儲存**：那是一張
+  「在哪裡拍的」的紀錄，而這個站的立論是「email 不出現在任何 URL 與公開頁面」。關掉它
+  （`[upload] reencode = false`）會讓 GPS 留在一個公開的圖片網址上，因此啟動時會印一行
+  `WARNING` —— 那是維運唯一能看到「這台現在用什麼政策」的地方。尺寸也被收斂
+  （JPEG／PNG 等比縮小；GIF／WebP 只剝中繼資料，超過上限被拒，理由見
+  [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#圖片正規化upload-reencode)）
 - **寫入端點的 body 有大小上限**：`MaxBytesReader` 在解碼時就生效，而不是等業務長度
   檢查跑完 —— 一個數百 MB 的 JSON 不會先完整進到記憶體裡
 - **刪除路徑被收斂到單一檔名**：`/delete` 只接受 `<filesDir>/<一個檔名>`，`. 與 ..`

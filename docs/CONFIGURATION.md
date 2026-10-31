@@ -110,13 +110,42 @@ TOML 格式，同樣是相對於工作目錄的 `config.conf`，所以要從 `fi
 | `[storage.s3] endpoint, keys, region, bucket, files_prefix, presign_expire_seconds` | S3 / MinIO 相容後端 |
 | `[upload] token` | 上傳／刪除權杖，必須等於後端的 `FILES_SERVER_TOKEN` |
 | `[upload] max_size` | 位元組上限，預設 50 MB |
-| `[upload] allowed_files` | 副檔名白名單（**不含 svg**） |
+| `[upload] allowed_files` | 副檔名白名單（**不含 svg**）。預設值只有這五種圖片，與後端的 `validForumImageFileName` 相同 |
+| `[upload] reencode` | 圖片正規化，預設 `true`。`false` = **原樣存檔**，EXIF（含 GPS）留在公開的圖片網址上 —— 行程啟動時會印一行 `WARNING` |
+| `[upload] max_width` / `max_height` | 輸出尺寸上限，預設 2048×2048。JPEG／PNG 超過時被等比縮小；GIF／WebP 超過時被 400 拒掉 |
+| `[upload] max_source_pixels` | 來源解析度上限（寬×高），預設 24,000,000。超過一律拒收、不縮小（解壓炸彈防護，只讀標頭就能決定） |
+| `[upload] jpeg_quality` | JPEG 重新編碼的品質（1–100），預設 85；超出範圍會被夾（寫 500 實際用 100） |
 | `[redis] addr, password, db` | |
 | `[redis] token_key_prefix, token_ttl_sec` | 媒體權杖驗證用，須與後端一致 |
 | `[redis] public_files` | `true` 則 `/files/*` 不需要 token |
 | `[logger]`, `[cors]` | |
 
-檔案落地時一律用 **UUID v4 + 原副檔名（小寫）**，永遠不用使用者提供的檔名。
+檔案落地時一律用 **UUID v4 + 副檔名**，永遠不用使用者提供的檔名，而那個副檔名是由
+**檔案的位元組**決定的（不是上传者給的檔名）：叫 `a.png` 的 JPEG 會存成 `<uuid>.jpg`，
+叫 `a.jpg` 的 HTML 會被 400 拒掉。這樣 `FileServer` 依副檔名給出的 `Content-Type` 才不會
+與實際內容矛盾（那個矛盾的症状是「某一張圖在某些瀏覽器上永遠不顯示」而沒有任何错误）。
+
+### 圖片正規化（`[upload] reencode`）
+
+上傳的圖片在落地前會被正規化，這是隱私那條的實作位置（見 docs/SECURITY.md 的媒體一節）：
+
+| 格式 | 做什麼 | 超過輸出上限時 |
+| --- | --- | --- |
+| JPEG | 解碼後重新編碼 → EXIF 全部消失（GPS、相機型號、拍攝時間、軟體名稱） | 等比縮小 |
+| PNG | 解碼後重新編碼 → `tEXt`／`iTXt`／`eXIf` 全部消失，alpha 保留 | 等比縮小 |
+| GIF | 只剝容器區塊：Comment 與非 NETSCAPE 的 Application；動畫、影格順序、循環保留 | **被拒（400）** |
+| WebP | 只剝容器區塊：`EXIF` 與任何不認識的 RIFF 區塊；`ICCP`（色彩描述）與動畫保留 | **被拒（400）** |
+
+GIF／WebP 不被縮小是刻意的取捨：標準庫沒有 WebP 的解碼器，而 `image/gif` 只解第一影格
+（重編碼會把動畫變成單影格）。為了縮這兩種格式要加一個外部相依，而這個模組的相依標準是
+「能用預設值跑起來的站不需要額外安裝任何東西」。代價就是上面的 400 —— 使用者上傳一張
+3000×2000 的 GIF 會看到「上傳失敗」而不是「被縮小」，而那個 400 的訊息在 files_server 的
+日誌裡，後端把它統一成 502（見 docs/API.md）。
+
+`reencode = false` 是一次需要被看見的決定：那個狀態下圖片帶著 GPS 進儲存，而本站的立論是
+「匿名性由構造保證」（README）。因此它不能靠 bool 的零值表達（`false` 同時是「沒設定」與
+「明確關掉」），設定層用 `*bool`，而啟動日誌在關掉時印 `WARNING` —— 那是維運唯一能看到
+「這台現在用什麼政策」的地方。
 
 > `token_key_prefix` 兩邊必須一致，且要與後端 session 的 `forum:session:` 前綴區隔。
 > 不一致的話**症狀是上傳成功、貼文也存得下，但圖片 GET 一律 401**。
@@ -177,6 +206,13 @@ base_dir = "./storage"
 token = "change_me"      # 必須與後端 FILES_SERVER_TOKEN 相同
 max_size = 52428800
 allowed_files = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+# 下面五個是**預設值**，寫出來只是為了讓「現在用什麼政策」在設定檔裡看得见。
+# reencode = false 會讓 EXIF（含 GPS）原樣存進儲存 —— 啟動時會印 WARNING。
+reencode = true
+max_width = 2048
+max_height = 2048
+max_source_pixels = 24000000
+jpeg_quality = 85
 
 [redis]
 addr = "127.0.0.1:6379"

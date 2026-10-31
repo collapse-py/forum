@@ -38,13 +38,22 @@ resolveDir / isAllowedExt / originAllowed：三個純函式的決策，供測試
     的「合法路徑」只有一種形狀，放進介面等於要求每個後端各自重寫同一段驗證。
  3. 媒體 token 只擋 GET/HEAD 且只擋 /files/ 前綴：上傳與刪除是後端對後端的
     呼叫，用的是另一個 token 通道。把它們一起擋掉會讓後端的上傳也 401。
+ 4. 上傳的**內容**決定存什麼，副檔名只決定「這個上傳要不要走圖片正規化」。
+    從前副檔名是唯一的事實：`photo.jpg` 帶 `[]byte("fake-jpeg-bytes")` 會被存進儲存並
+    掛在 `/files/<uuid>.jpg` 上，瀏覽器拿到一份 Content-Type 說「這是圖」的非圖。
+    現在非圖片的內容在圖片副檔名下會被拒（400），而輸出副檔名由檢測到的格式產生
+    —— 因此「a.png 裡裝的是 JPEG」存成 `.jpg`。代價：正規化要完整的位元組，
+    本機模式不再串流寫磁碟（上限仍是 upload.max_size，與 S3 那邊本來就全讀進記憶體
+    是同一個量級，見 storage.go 的 saveFile）。
 */
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -186,9 +195,16 @@ func rejectDirectoryListing(next http.Handler) http.Handler {
 
 // handleUpload 接受 multipart 上傳並回傳檔案的對外網址。
 //
-// 拒絕的順序刻意是「方法 → token → 大小上限 → 表單解析 → 檔名白名單 → 存檔」：
-// 前三項都不需要讀取本文，因此成本最低；而「先解析表單再驗 token」的話，
+// 拒絕的順序刻意是「方法 → token → 大小上限 → 表單解析 → 副檔名白名單 → 內容判斷 →
+// 正規化 → 存檔」：前三項都不需要讀取本文，因此成本最低；而「先解析表單再驗 token」的話，
 // 每一次未授權的請求都會先把整個本文收進記憶體，正是最不該讓它發生的順序。
+//
+// 內容判斷排在副檔名白名單**之後**是刻意的：白名單是便宜的字串比對，而內容判斷要讀位元組。
+// 一個被白名單拒掉的請求不該還被讀過本文。
+//
+// 正規化（重新編碼、剝中繼資料、收斂尺寸）見 imagepolicy.go。這裡只負責它的錯誤分類：
+// 「內容不是圖片」與「圖片處理失敗」都是 400，但日誌裡兩者的訊息不同，而那個差異
+// 是維運唯一看得出「上傳者是亂傳」還是「檔案真的壞了」的地方。
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -220,6 +236,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// 副檔名決定目錄與 Content-Type，仍以「上傳者給的檔名」為準判斷；
 	// 但實際寫進磁碟的檔名是 UUID（見 newFileName），兩者不可混為一談。
+	//
+	// 這一條只回答「這個副檔名在不在白名單裡」。**內容**是不是圖片由 detectImageKind
+	// 回答（見下面），因此一個叫 photo.jpg 的 HTML 檔會在這裡通過、在內容那一步被拒。
 	original := filepath.Base(handler.Filename)
 	dir := resolveDir(original, s.cfg.Upload.AllowedFiles)
 	if dir == "" {
@@ -227,14 +246,78 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename, err := newFileName(original)
+	// 正規化（重新編碼、剝中繼資料、收斂尺寸）必須拿到完整的位元組，因此這一條路徑
+	// **不再**串流到磁碟。記憶體上限仍是 Upload.MaxSize —— 與 S3 後端本來就把整個
+	// 檔案讀進記憶體是同一個量級（見 storage.go 的 saveFile）。代價寫在 docs/KNOWN_ISSUES.md：
+	// 上限被調高時這裡與 S3 那一邊一起變成尖峰的來源。
+	data, err := io.ReadAll(io.LimitReader(file, s.cfg.Upload.MaxSize+1))
+	if err != nil {
+		log.Printf("讀取上傳檔案失敗: %v", err)
+		http.Error(w, "Unable to save file", http.StatusInternalServerError)
+		return
+	}
+	// MaxBytesReader 已經設過同一個上限，這一條是縱深防禦：讀取端與上限之間若将来
+	// 多出一層（例如新的 multipart 處理），「比上限大一點」不會被當成合法檔案存下來。
+	if int64(len(data)) > s.cfg.Upload.MaxSize {
+		http.Error(w, "File exceeds size limit", http.StatusBadRequest)
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(original))
+	kind, isImage := detectImageKind(data)
+	if !isImage {
+		// 副檔名是圖片、內容不是圖片 → 拒。這正是這一支端點從前最安靜的缺口：
+		// "fake-jpeg-bytes" 會被存進儲存並掛在 /files/<uuid>.jpg 上，Content-Type 說
+		// 「這是圖」而它不是圖（沒有任何錯誤，且後端會把它寫進貼文）。
+		if isImageExtension(ext) {
+			log.Printf("上傳被拒：副檔名 %q 是圖片但內容不是（%d bytes）", ext, len(data))
+			http.Error(w, "File content is not a supported image", http.StatusBadRequest)
+			return
+		}
+		// 白名單裡非圖片的副檔名（音訊）原樣存：它們沒有圖片的重新編碼可用，
+		// 而論坛目前沒有掛音訊的地方（後端的 validForumImageFileName 只認圖片）。
+		filename, err := newFileName(original)
+		if err != nil {
+			log.Printf("產生檔名失敗: %v", err)
+			http.Error(w, "Unable to save file", http.StatusInternalServerError)
+			return
+		}
+		rel, err := s.store.saveFile(r.Context(), dir, filename, bytes.NewReader(data))
+		if err != nil {
+			log.Printf("儲存檔案失敗: %v", err)
+			http.Error(w, "Unable to save file", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]string{"url": s.store.getBaseURL() + rel})
+		return
+	}
+
+	out, kind, err := normalizeImage(data, s.cfg.imagePolicy())
+	if err != nil {
+		// 細節（尺寸、格式、區塊）只在日誌裡：給使用者的 400 不該洩漏「你的檔案內部長什麼樣」，
+		// 而後端把非 2xx 統一成 502（见 backend 的 forum_handlers.go），使用者看到的本來就是摘要。
+		log.Printf("圖片正規化失敗: %v", err)
+		http.Error(w, "Unable to process image", http.StatusBadRequest)
+		return
+	}
+
+	// 輸出副檔名由**檢測到的內容**決定，不由上傳者的檔名決定（見 imagepolicy.go 檔頭第 1 點）。
+	// 「叫 a.png 但內容是 JPEG」因此存成 .jpg —— 存一份被誤標的檔案沒有任何好處。
+	outExt := extensionFor(kind)
+	if !isAllowedExt(outExt, s.cfg.Upload.AllowedFiles) {
+		log.Printf("上傳被拒：內容是 %s 但 upload.allowed_files 不含 %s", kind, outExt)
+		http.Error(w, "Unsupported file type", http.StatusBadRequest)
+		return
+	}
+
+	filename, err := newFileNameForExt(outExt)
 	if err != nil {
 		log.Printf("產生檔名失敗: %v", err)
 		http.Error(w, "Unable to save file", http.StatusInternalServerError)
 		return
 	}
 
-	rel, err := s.store.saveFile(r.Context(), dir, filename, file)
+	rel, err := s.store.saveFile(r.Context(), dir, filename, bytes.NewReader(out))
 	if err != nil {
 		log.Printf("儲存檔案失敗: %v", err)
 		http.Error(w, "Unable to save file", http.StatusInternalServerError)

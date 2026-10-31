@@ -27,7 +27,7 @@ go test ./forum/es/...       # ES 傳輸層（httptest 假伺服器）
 go test ./forum/httpapi/...  # HTTP 層（用假的資料庫替身，不需要 MySQL）
 go test .                    # 監聽逾時、優雅停止、-check 報告（package main）
 
-# 檔案服務（上傳／刪除／token 驗證／路徑穿越）
+# 檔案服務（上傳／刪除／token 驗證／路徑穿越／圖片正規化與格式拒收）
 cd files_server && go test ./...
 
 # 需要真實 MySQL 的遷移測試（未設定 DSN 時會自動跳過）
@@ -128,6 +128,10 @@ cd ../backend && go run ./tools/coveragefloor <單一模組的 coverage.out> 75.
   backend 合計 **87.4%**、files_server **91.6%**、合併 **87.7%**（`forum/forum/logcaller` 沒有敘述，不列入）。
 
   2026-10-28 重測（本機 `go test`，只量有測試的套件，不含真實 MySQL）：backend 合計 **86.5%**，逐套件最低的是 `forum`（main）75.8%、`forum/forum/data` 75.9%、`forum/forum/metrics` 75.9%，其餘皆 ≥ 86%。`forum/forum/data` 那一個是貼著地板的：第 39 步與作者識別碼回填加了約 128 個敘述，而那些敘述只在有真實 MySQL 時才會被走到（`migrations` job 有 MySQL，但它的 profile 刻意不合併，見 `ci.yml`）。因此 `data` 的覆蓋率本質上是「本機能看到的那部分」，動到那個套件時要留意它離地板只有 0.9 個百分點。
+
+  2026-10-29 重測 `files_server`（本機 `go test -coverprofile`，不含真實 Redis 與 S3）：**90.4%**。那個數字在中間一度是 **84.8%** —— 加入 `imagepolicy.go` 之後，那幾條「半壞的檔案被拒而不是被截斷」的錯誤分支沒有測試，而那些正是這個功能最安靜的失效方式（截斷一份半壞的 GIF 會得到一個「存在但播不出來」的檔案，而掛在貼文上的症狀是破圖，沒有任何錯誤）。補上 malformed GIF／WebP／VP8X／VP8L 與 corrupt JPEG／PNG 的拒收測試之後回到 90.4%。剩下未覆蓋的分支是**防禦性的**：`jpeg.Encode`／`png.Encode` 的失敗回傳、`fitSize` 裡那两個「夾到上限」的分支（`scale` 是從兩個上限取較小的那個，因此 `w*scale ≤ maxWidth` 恒成立，走不到）、`gifIsLoopApp` 的截斷分支（`gifSubBlocks` 已經先驗過長度）。留著它們而不是刪掉，是因為改四捨五入或改走位時它們就會變成有意義的那一條。
+
+  **本機跑不了 CI 那條 `-race`。** `go test -race` 需要 `CGO_ENABLED=1`，而 Windows 上沒有 C 編譯器時它直接失敗（實測：`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`）。CI 在 Linux runner 上跑它，因此這裡的本地結果與 CI 的差別只有 race，不是測試內容。要在本機驗 race 需要裝一個 C 編譯器（`go env -w CGO_ENABLED=1` 加上可用的 gcc）。
 
 ---
 

@@ -65,6 +65,52 @@ func TestUploadAuthWarningIsExplicitWhenTokenEmpty(t *testing.T) {
 		t.Errorf("token 已設定時啟動紀錄 = %q，want 說「已啟用」", set)
 	}
 }
+
+// TestImagePolicyWarningIsExplicitWhenDisabled 守住「reencode=false 會留下 GPS」被講出來。
+//
+// 這個設定值是一個**安靜的隱私決定**：關掉之後 EXIF（含 GPS、相機型號、拍攝時間）會原樣
+// 存進儲存並掛在公開的圖片網址上，而沒有任何錯誤、沒有任何回應上的差別。對一個立論是
+// 「匿名性由構造保證」的站（README），那是一個與立論矛盾的狀態，而日誌是唯一能看出來
+// 的地方 —— 與 uploadAuthWarning 同一個道理（見那個注解）。
+func TestImagePolicyWarningIsExplicitWhenDisabled(t *testing.T) {
+	off := &Config{Upload: UploadConfig{Reencode: imagePolicyEnabled(false)}}
+	line := imagePolicyWarning(off)
+	if !strings.Contains(line, "WARNING") {
+		t.Errorf("正規化被關掉時啟動紀錄 = %q，want 含 WARNING", line)
+	}
+	for _, mention := range []string{"reencode", "EXIF", "GPS"} {
+		if !strings.Contains(line, mention) {
+			t.Errorf("啟動紀錄沒有提到 %s —— 那個決定影響的是什麼？: %q", mention, line)
+		}
+	}
+
+	// 開啟時不該印 WARNING，而且要印出**生效的**上限與品質：那行日誌是維運唯一能看到
+	// 「這台現在用什麼政策」的地方，而它必須是對的（見 config.go 的 imagePolicy 夾雜值）。
+	on := imagePolicyWarning(&Config{Upload: UploadConfig{Reencode: imagePolicyEnabled(true), MaxWidth: 1200, MaxHeight: 800, JPEGQuality: 90}})
+	if strings.Contains(on, "WARNING") {
+		t.Errorf("正規化開啟卻印 WARNING: %q", on)
+	}
+	for _, mention := range []string{"1200x800", "90"} {
+		if !strings.Contains(on, mention) {
+			t.Errorf("啟動紀錄沒有印出生效的 %s: %q", mention, on)
+		}
+	}
+}
+
+// TestImagePolicyWarningUsesClampedValues 守住「日誌印的是生效值而不是設定值」。
+//
+// jpeg_quality = 500 在編碼器上會被夾到 100。若日誌印 500，那是一條不實的啟動紀錄，
+// 而維運會拿它去對設定檔 —— 對不出來因為兩個數字都「看起來對」。
+func TestImagePolicyWarningUsesClampedValues(t *testing.T) {
+	line := imagePolicyWarning(&Config{Upload: UploadConfig{Reencode: imagePolicyEnabled(true), JPEGQuality: 500}})
+	if strings.Contains(line, "quality 500") {
+		t.Errorf("啟動紀錄印了設定裡的 500 而不是生效的 100: %q", line)
+	}
+	if !strings.Contains(line, "quality 100") {
+		t.Errorf("啟動紀錄 = %q，want 含生效的品質 100", line)
+	}
+}
+
 //
 // 這條路徑不該嘗試連線：位址是空的代表 Redis 沒有被設定，而不是「連
 // localhost」。若它真的去連，啟動會多等一個逾時。

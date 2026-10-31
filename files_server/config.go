@@ -70,6 +70,23 @@ type UploadConfig struct {
 	Token        string   `toml:"token"`
 	MaxSize      int64    `toml:"max_size"`
 	AllowedFiles []string `toml:"allowed_files"`
+
+	// Reencode 是「重新編碼以移除中繼資料（含 JPEG 的 GPS）」的開關。
+	//
+	// 刻意宣告成 *bool 而不是 bool：這個開關的**預設是開**，而 bool 的零值是 false，
+	// 也就是「沒設定」與「明確關掉」在 bool 上無法區分。那是 config.go 檔頭第 2 點說的
+	// 那類缺陷，而這個欄位是隱私相關的 —— 「忘了設定」和「刻意留下 EXIF」必須是兩件事。
+	// nil＝沒寫過（套用預設 true）；明確寫 false＝原樣存檔，並由啟動日誌講出來。
+	Reencode *bool `toml:"reencode"`
+	// MaxWidth／MaxHeight 是輸出的尺寸上限。JPEG／PNG 超過會被等比縮小；GIF／WebP
+	// 超過會被拒（見 imagepolicy.go 檔頭第 4 點）。
+	MaxWidth  int `toml:"max_width"`
+	MaxHeight int `toml:"max_height"`
+	// MaxSourcePixels 是來源的寬×高上限，超過一律拒收而不是縮小 —— 縮小要先完整解碼，
+	// 而完整解碼是這條路徑唯一的記憶體尖峰來源（解壓炸彈：1 MB 的 PNG 可以宣告 20000×20000）。
+	MaxSourcePixels int `toml:"max_source_pixels"`
+	// JPEGQuality 是 jpeg.Encode 的品質（1–100）。PNG 沒有這個維度，因此沒有對應的鍵。
+	JPEGQuality int `toml:"jpeg_quality"`
 }
 
 type CORSPolicy struct {
@@ -218,7 +235,39 @@ func (c *Config) applyDefaults() {
 		c.Upload.MaxSize = 50 << 20
 	}
 	if len(c.Upload.AllowedFiles) == 0 {
-		c.Upload.AllowedFiles = []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus"}
+		// 只有圖片。這一份清單**必須**與後端的 validForumImageFileName（backend/forum/httpapi
+		// 的 forum_handlers.go）相同 —— 那裡註解寫的就是這件事。之前這裡的預設值多了六種
+		// 音訊副檔名，而後端永遠不認得它們：症狀是「上傳成功、掛不上任何內容、也永遠刪不掉」
+		// （後端的刪圖端點先比對副檔名白名單，音訊檔名在那一步就被擋掉）。
+		//
+		// 音訊仍然可以在設定檔裡明確加回來，但它不會被正規化，而且論壇沒有掛音訊的地方
+		// —— 保留它只是「日後要做音訊貼文」的預留通道，見 docs/KNOWN_ISSUES.md。
+		c.Upload.AllowedFiles = []string{".jpg", ".jpeg", ".png", ".gif", ".webp"}
+	}
+	// 圖片正規化（見 imagepolicy.go）。四項兜底值都刻意是「有限」的那一個：
+	// 0 在這些欄位上都不是「不設上限」，而是「沒設定」，而「沒設定」必須導向可用的預設。
+	if c.Upload.MaxWidth <= 0 {
+		// 2048：手機照片常見是 3000–4000 寬，縮到 2048 在螢幕上仍然清楚，
+		// 而動態一頁十張圖的傳輸量從「原檔」變成「上限內的圖」。
+		c.Upload.MaxWidth = 2048
+	}
+	if c.Upload.MaxHeight <= 0 {
+		c.Upload.MaxHeight = 2048
+	}
+	if c.Upload.MaxSourcePixels <= 0 {
+		// 24,000,000 px ≈ 4800×5000：一般手機全尺寸照片（12M px）遠低於它，
+		// 而解碼後的 RGBA 上限約 96 MB —— 那是單個上傳能佔用的尖峰上限。
+		// 20000×20000（400M px、1.6 GB RGBA）不是，而它只有 1 MB 的檔案大小。
+		c.Upload.MaxSourcePixels = 24_000_000
+	}
+	if c.Upload.JPEGQuality <= 0 {
+		// 85：論壇附圖是給人讀的，不是給人手修的。85 在 JPEG 上是「看不出差異」的那一區間，
+		// 而 100 會讓一個重編碼的 JPG 比原檔還大 —— 那是這條路徑唯一會「變大」的設定值。
+		c.Upload.JPEGQuality = 85
+	}
+	if c.Upload.Reencode == nil {
+		enabled := true
+		c.Upload.Reencode = &enabled
 	}
 	if c.Logger.Level == "" {
 		c.Logger.Level = "info"
@@ -279,5 +328,56 @@ func (c *Config) applyDefaults() {
 		//
 		// 0 刻意不當成「永不過期」：那會讓任何一張被轉貼出去的圖片連結永久有效。
 		c.Redis.TokenTTLSec = 300
+	}
+}
+
+// defaultImagePolicy 是 imagePolicy 在「這個值不是可用值」時使用的兜底。
+//
+// 它存在的理由是**測試直接建立 Config**（見 server_test.go 的 testConfig），那條路徑
+// 不經過 applyDefaults。若 imagePolicy 只假設「兜底值已經套用過」，那些測試會拿到
+// MaxWidth=0 與 JPEGQuality=0，而後者是 jpeg.Encode 的**最差**那一個值（它把 0 夾到 1，
+// 不是當成「用預設」）—— 症狀是測試產出的圖片比真實部署的更糟，而沒有任何人看到錯誤。
+const (
+	defaultImageMaxWidth       = 2048
+	defaultImageMaxHeight      = 2048
+	defaultImageMaxSrcPixels   = 24_000_000
+	defaultImageJPEGQuality    = 85
+	defaultImageReencode       = true
+	minJPEGQualityForEncoding = 1 // jpeg.Encode 會把 <1 夾到 1，因此 0 是「最差」不是「預設」
+)
+
+// imagePolicy 把設定轉成 handleUpload 用的 ImagePolicy。
+//
+// 收斂放在這裡而不是 imagepolicy.go：ImagePolicy 的合約是「拿到的是可用的值」，而
+// 「可用的值」的定義屬於設定層。放進 imagepolicy.go 就等於讓那個檔自己決定
+// 「jpeg_quality = 200 是什麼意思」，而那個決定在設定檔裡根本看不到。
+func (c *Config) imagePolicy() ImagePolicy {
+	width := c.Upload.MaxWidth
+	if width <= 0 {
+		width = defaultImageMaxWidth
+	}
+	height := c.Upload.MaxHeight
+	if height <= 0 {
+		height = defaultImageMaxHeight
+	}
+	pixels := c.Upload.MaxSourcePixels
+	if pixels <= 0 {
+		pixels = defaultImageMaxSrcPixels
+	}
+	quality := c.Upload.JPEGQuality
+	if quality < minJPEGQualityForEncoding {
+		quality = defaultImageJPEGQuality
+	}
+	if quality > 100 {
+		// jpeg.Encode 會自己夾到 100，這裡的夾只是為了讓啟動日誌與 -check 類似的
+		// 摘要（main.go 的 imagePolicySummary）印出「實際生效的值」而不是設定裡那個。
+		quality = 100
+	}
+	return ImagePolicy{
+		Reencode:        c.Upload.Reencode == nil || *c.Upload.Reencode,
+		MaxWidth:        width,
+		MaxHeight:       height,
+		MaxSourcePixels: pixels,
+		JPEGQuality:     quality,
 	}
 }

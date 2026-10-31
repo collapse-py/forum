@@ -94,10 +94,38 @@ func TestLoadConfigEmptyFileAppliesAllDefaults(t *testing.T) {
 	if cfg.Upload.MaxSize != 50<<20 {
 		t.Errorf("upload.max_size = %d，want %d", cfg.Upload.MaxSize, int64(50<<20))
 	}
-	for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus"} {
+
+	// 預設的副檔名白名單**只有圖片**。這一份清單必須與後端的 validForumImageFileName
+	// 相同（見 config.go 那一處的理由）；音訊在預設值裡是刻意**不**存在的：
+	// 那六種副檔名在後端永遠不認得，所以「能存、掛不上、也刪不掉」。
+	// 這一支斷言把那個方向釘住 —— 若哪天有人把音訊加回預設值，這裡會紅并要求
+	// 同時在 docs/KNOWN_ISSUES.md 裡寫出「後端認得它們嗎」。
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".webp"} {
 		if !isAllowedExt(ext, cfg.Upload.AllowedFiles) {
 			t.Errorf("預設 allowed_files 缺少 %s", ext)
 		}
+	}
+	for _, ext := range []string{".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus", ".svg", ".html"} {
+		if isAllowedExt(ext, cfg.Upload.AllowedFiles) {
+			t.Errorf("預設 allowed_files 多了 %s —— 後端不認得它，那是一個存得下但永遠用不到的檔案", ext)
+		}
+	}
+
+	// 圖片正規化的兜底值必須是「有限」的那一個：0 在這四個欄位上都不是「不設上限」，
+	// 而是「沒設定」。特別是 jpeg_quality：0 會被 jpeg.Encode 夾到 **1**（最差的那一個），
+	// 因此一個「沒設定」的部署會產出品質 1 的圖 —— 沒有任何錯誤。
+	p := cfg.imagePolicy()
+	if !p.Reencode {
+		t.Error("空設定檔把圖片正規化關掉了 —— 那個預設值應該是「開」（EXIF 的 GPS 會被移除）")
+	}
+	if p.MaxWidth != 2048 || p.MaxHeight != 2048 {
+		t.Errorf("輸出尺寸上限 = %dx%d，want 2048x2048", p.MaxWidth, p.MaxHeight)
+	}
+	if p.MaxSourcePixels != 24_000_000 {
+		t.Errorf("來源解析度上限 = %d，want 24000000（那是解壓炸彈的記憶體上限）", p.MaxSourcePixels)
+	}
+	if p.JPEGQuality < 50 || p.JPEGQuality > 100 {
+		t.Errorf("JPEG 品質 = %d，不在 50–100 這個「看得出差異」的區間裡", p.JPEGQuality)
 	}
 
 	if cfg.Logger.Level != "info" {
@@ -185,6 +213,11 @@ presign_expire_seconds = 120
 token = "configured-token"
 max_size = 1048576
 allowed_files = [".png", ".webp"]
+reencode = false
+max_width = 1600
+max_height = 1200
+max_source_pixels = 8000000
+jpeg_quality = 70
 
 [cors]
 allowed_origins = ["https://forum.example.com"]
@@ -243,6 +276,23 @@ write_burst = 2
 		t.Errorf("upload.allowed_files = %v", cfg.Upload.AllowedFiles)
 	}
 
+	// 正規化的四個鍵必須能被寫出來並原樣帶出來。這裡的 reencode = **false** 是刻意選的：
+	// 這一支測試走的是 TOML 路徑，而 *bool 的「明確 false」只有走這條路徑才驗得到
+	// （直接構造 Config 的測試裡 nil 與 false 是兩個不同的值，见 TestApplyDefaultsPreservesExplicitValues）。
+	normalized := cfg.imagePolicy()
+	if normalized.Reencode {
+		t.Error("TOML 裡寫了 reencode = false，卻被解成開啟")
+	}
+	if normalized.MaxWidth != 1600 || normalized.MaxHeight != 1200 {
+		t.Errorf("輸出尺寸上限 = %dx%d，want 1600x1200", normalized.MaxWidth, normalized.MaxHeight)
+	}
+	if normalized.MaxSourcePixels != 8_000_000 {
+		t.Errorf("來源解析度上限 = %d，want 8000000", normalized.MaxSourcePixels)
+	}
+	if normalized.JPEGQuality != 70 {
+		t.Errorf("JPEG 品質 = %d，want 70", normalized.JPEGQuality)
+	}
+
 	if len(cfg.CORS.AllowedOrigins) != 1 || cfg.CORS.AllowedOrigins[0] != "https://forum.example.com" {
 		t.Errorf("cors.allowed_origins = %v", cfg.CORS.AllowedOrigins)
 	}
@@ -293,6 +343,10 @@ func TestApplyDefaultsPreservesExplicitValues(t *testing.T) {
 			Token:        "tok",
 			MaxSize:      1,
 			AllowedFiles: []string{".png"},
+			// 明確關掉正規化。這是這個模組裡唯一用 *bool 的欄位，而它存在的理由就是
+			// 這一支測試要驗的東西：「明確關掉」不能被兜底值蓋成「開」
+			// （bool 的零值是 false＝「明確關掉」與「沒設定」在同一個值上）。
+			Reencode: imagePolicyEnabled(false),
 		},
 		CORS: CORSPolicy{
 			AllowedOrigins: []string{"https://only.example"},
@@ -334,6 +388,13 @@ func TestApplyDefaultsPreservesExplicitValues(t *testing.T) {
 	if cfg.Upload.Token != "tok" || cfg.Upload.MaxSize != 1 || len(cfg.Upload.AllowedFiles) != 1 {
 		t.Errorf("upload 被改寫: %+v", cfg.Upload)
 	}
+	// 這一條是 *bool 那條取捨的**全部**價值：若兜底值把「明確關掉」蓋成「開」，
+	// 那個部署會以為自己關掉了正規化，而 EXIF（含 GPS）仍然被移除 —— 而
+	// main.go 的啟動警告會說「normalization enabled」，那是一條**對的**日誌
+	// 對應一個錯的预期。這比「沒設定」更糟，因為它看起來像被驗證過了。
+	if cfg.imagePolicy().Reencode {
+		t.Error("reencode=false 被兜底值蓋成開啟 —— 這個設定值語意失效")
+	}
 	if cfg.CORS.AllowedOrigins[0] != "https://only.example" || cfg.CORS.AllowedMethods[0] != "GET" || cfg.CORS.AllowedHeaders[0] != "Range" {
 		t.Errorf("cors 被改寫: %+v", cfg.CORS)
 	}
@@ -345,6 +406,66 @@ func TestApplyDefaultsPreservesExplicitValues(t *testing.T) {
 	}
 	if !cfg.RateLimit.Enabled || cfg.RateLimit.MediaRate != 1 || cfg.RateLimit.MediaBurst != 2 || cfg.RateLimit.WriteRate != 3 || cfg.RateLimit.WriteBurst != 4 {
 		t.Errorf("ratelimit 被改寫: %+v", cfg.RateLimit)
+	}
+}
+
+// imagePolicyEnabled 產生 UploadConfig.Reencode 的那個 *bool。
+//
+// 用函式而不是直接取字面量的位址（&false 在 Go 裡不合法）：這個欄位需要**兩種**顯式的值
+// —— 「明確關掉」與「明確開啟」—— 而「沒設定」（nil）是第三種。三者必須都能被寫出來，
+// 否則這個 *bool 的意義（見 config.go）在測試裡就只剩兩種可驗證的形状。
+//
+// 它放在這裡而不是 server_test.go，因為這個欄位的語意屬於 config.go；server_test.go
+// 與 config_extra_test.go 都在同一個 package main 裡，因此都能用到它。
+func imagePolicyEnabled(enabled bool) *bool { return &enabled }
+
+// TestImagePolicyFromZeroConfigIsUsable 守住「直接建立的 Config 也能得到可用的政策」。
+//
+// server_test.go 的 testConfig 是直接構造 Config 而不是經過 loadConfig/applyDefaults，
+// 因此 imagePolicy 必須自己處理零值。這裡的斷言不是「與 applyDefaults 一致」而是
+// 「每個值都在可用的範圍內」，因為可用的定義在 imagePolicy 這一邊。
+//
+// 最關鍵的一條是 jpeg_quality：零值經過 jpeg.Encode 會被夾到 **1**（最差的那一個，
+// 不是「用預設」）。若 imagePolicy 不處理 0，那些測試會產出品質 1 的圖片，
+// 而沒有任何錯誤或日誌會說這件事。
+func TestImagePolicyFromZeroConfigIsUsable(t *testing.T) {
+	p := (&Config{}).imagePolicy()
+	if !p.Reencode {
+		t.Error("零值 Config 的正規化是關的 —— 預設應該是開（EXIF 的 GPS 該被移除）")
+	}
+	if p.MaxWidth <= 0 || p.MaxHeight <= 0 {
+		t.Errorf("輸出尺寸上限 = %dx%d，必须是正數（0 會讓每一張圖被縮成 0）", p.MaxWidth, p.MaxHeight)
+	}
+	if p.MaxSourcePixels <= 0 {
+		t.Errorf("來源解析度上限 = %d，必须是正數（0 會被 normalizeImage 當成「不設上限」）", p.MaxSourcePixels)
+	}
+	if p.JPEGQuality < 1 || p.JPEGQuality > 100 {
+		t.Errorf("JPEG 品質 = %d，不在 1–100 內；jpeg.Encode 會把 <1 的值夾到 1", p.JPEGQuality)
+	}
+}
+
+// TestImagePolicyClampsAbsurdValues 守住「設定值超出範圍時被夾而不是被照單全收」。
+//
+// 這一支的意義是 main.go 的啟動摘要（imagePolicyWarning）印的是**生效的**值：
+// 若這裡不夾，那行日誌會寫「JPEG 品質 200」而編碼器實際用的是 100 ——
+// 那條日誌就變成一件不實的事，而它是維運唯一能看到「現在用什麼政策」的地方。
+func TestImagePolicyClampsAbsurdValues(t *testing.T) {
+	cfg := &Config{Upload: UploadConfig{
+		Reencode:        imagePolicyEnabled(true),
+		MaxWidth:        -5,
+		MaxHeight:       0,
+		MaxSourcePixels: -1,
+		JPEGQuality:     500,
+	}}
+	p := cfg.imagePolicy()
+	if p.MaxWidth <= 0 || p.MaxHeight <= 0 {
+		t.Errorf("負/零的尺寸上限沒有被夾: %dx%d", p.MaxWidth, p.MaxHeight)
+	}
+	if p.MaxSourcePixels <= 0 {
+		t.Errorf("負的來源解析度上限沒有被夾: %d", p.MaxSourcePixels)
+	}
+	if p.JPEGQuality != 100 {
+		t.Errorf("JPEG 品質 = %d，want 被夾到 100（設定裡寫 500，而編碼器只用 100）", p.JPEGQuality)
 	}
 }
 

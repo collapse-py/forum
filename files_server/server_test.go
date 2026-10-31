@@ -31,8 +31,10 @@ Phase 3.4 把它排在 S3 路徑之前，理由也正是這個 —— 它的爆�
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -94,7 +96,17 @@ func testConfig(t *testing.T, baseDir string) *Config {
 		Upload: UploadConfig{
 			Token:        "test-upload-token",
 			MaxSize:      50 << 20,
+			// 音訊副檔名刻意留在這份測試用的設定裡：預設值（config.go）現在只有圖片，
+			// 而「白名單裡非圖片的副檔名原樣存檔」那條分支（server.go 的 handleUpload）
+			// 需要有東西才測得到。沒有這六項，那條分支在 CI 裡是死代碼。
 			AllowedFiles: []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus"},
+			// 圖片正規化的值逐項顯式給：這些測試要的是「這個上限造成這個行為」，
+			// 而 Config.imagePolicy 的兜底值（見 config.go）會讓「哪一層生效」多一個變數。
+			Reencode:        imagePolicyEnabled(true),
+			MaxWidth:        2048,
+			MaxHeight:       2048,
+			MaxSourcePixels: 24_000_000,
+			JPEGQuality:     85,
 		},
 		CORS: CORSPolicy{
 			AllowedOrigins: []string{"*"},
@@ -228,7 +240,10 @@ func TestUploadRequiresToken(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := multipartUpload(t, "/upload", "", "photo.jpg", "image/jpeg", []byte("fake-jpeg-bytes"))
+			// 一份真的 JPEG：token 的分支在讀本文之前就決定，因此失敗的cases不需要真圖，
+			// 但 200 的那兩個需要 —— 從前這裡送 `[]byte("fake-jpeg-bytes")` 也能拿到 200，
+			// 因為那時候副檔名是唯一的事實（見 imagepolicy.go 檔頭第 1 點）。
+			req := multipartUpload(t, "/upload", "", "photo.jpg", "image/jpeg", sampleJPEG(t, 24, 16))
 			tc.setToken(req)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -259,7 +274,7 @@ func TestUploadAllowsEverythingWhenNoTokenConfigured(t *testing.T) {
 	cfg.Upload.Token = "" // 刻意留空
 	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
 
-	req := multipartUpload(t, "/upload", "", "photo.jpg", "image/jpeg", []byte("fake-jpeg-bytes"))
+	req := multipartUpload(t, "/upload", "", "photo.jpg", "image/jpeg", sampleJPEG(t, 24, 16))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -339,31 +354,267 @@ func TestUploadRejectsDisallowedExtensions(t *testing.T) {
 
 // TestUploadAcceptsAllowedExtensions 守住白名單不會過度拒絕。
 //
-// 沒有這一支的話，「白名單只剩 .jpg」也能通過上一支 —— 而那會讓所有音訊
-// 上傳失敗，而症狀是使用者看到「上傳失敗」而沒有人知道是白名單被改小了。
+// 沒有這一支的話，「白名單只剩 .jpg」也能通過上一支 —— 而那會讓所有其他格式的上傳
+// 失敗，而症狀是使用者看到「上傳失敗」而沒有人知道是白名單被改小了。
+//
+// 每一種圖片都要送**它自己那份位元組**：內容現在決定能不能存（imagepolicy.go 檔頭第 1 點），
+// 因此送一份假位元組給 .webp 會得到 400，而那個 400 測的是另一件事。音訊那幾項送假位元組
+// 是刻意的：它們不走正規化，因此沒有「內容必須是某種圖片」這個條件。
 func TestUploadAcceptsAllowedExtensions(t *testing.T) {
 	base := t.TempDir()
 	cfg := testConfig(t, base)
 	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
 
-	allowed := []string{
-		"a.jpg", "a.jpeg", "a.png", "a.gif", "a.webp",
-		"a.mp3", "a.wav", "a.ogg", "a.m4a", "a.flac", "a.opus",
-		// 大寫副檔名必須被接受（resolveDir 會轉小寫）。
-		"A.JPG", "Photo.PNG",
+	allowed := []struct {
+		name  string
+		image []byte
+	}{
+		{"a.jpg", sampleJPEG(t, 20, 14)},
+		{"a.jpeg", sampleJPEG(t, 20, 14)},
+		{"a.png", samplePNG(t, 20, 14)},
+		{"a.gif", sampleGIF(t, 12, 12, 2)},
+		{"a.webp", syntheticWebP(t, 320, 240)},
+		// 大寫副檔名必須被接受（resolveDir 與 newFileNameForExt 都會轉小寫）。
+		{"A.JPG", sampleJPEG(t, 20, 14)},
+		{"Photo.PNG", samplePNG(t, 20, 14)},
 		// 副檔名在檔名的中間（多一個點）。
-		"my.photo.v2.png",
+		{"my.photo.v2.png", samplePNG(t, 20, 14)},
+		// 音訊：不走正規化，原樣存（見 server.go 的 handleUpload）。論壇目前掛不上它們
+		// —— 後端的 validForumImageFileName 只認圖片 —— 這條保留的是「白名單裡非圖片的
+		// 副檔名不會被內容判斷擋掉」，見 docs/KNOWN_ISSUES.md。
+		{"a.mp3", []byte("ID3\x03\x00\x00\x00\x00\x00")},
+		{"a.wav", []byte("RIFF\x00\x00\x00\x00WAVE")},
+		{"a.ogg", []byte("OggS\x00\x01")},
+		{"a.m4a", []byte("ftypM4A\x00\x00\x00\x00")},
+		{"a.flac", []byte("fLaC\x00\x00\x00\x00")},
+		{"a.opus", []byte("OggS\x00\x02")},
 	}
-	for _, name := range allowed {
-		t.Run(name, func(t *testing.T) {
-			req := multipartUpload(t, "/upload", "test-upload-token", name, "image/jpeg", []byte("bytes"))
+	for _, tc := range allowed {
+		t.Run(tc.name, func(t *testing.T) {
+			req := multipartUpload(t, "/upload", "test-upload-token", tc.name, "application/octet-stream", tc.image)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusOK {
-				t.Errorf("狀態碼 = %d，want 200（%s 應該被接受）", rec.Code, name)
+				t.Errorf("狀態碼 = %d，want 200（%s 應該被接受）：%s", rec.Code, tc.name, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestUploadRejectsNonImageContentUnderImageExtension 守住決定 1 在 HTTP 層的那一個。
+//
+// 這是這個功能上線前最安靜的缺口：一個叫 photo.jpg 的 HTML 檔會被存進儲存，掛在
+// /files/<uuid>.jpg 上，而後端會把它寫進貼文的 image_url。它沒有任何錯誤、沒有任何
+// 回應上的差別 —— 因此它必須被釘住，而不是靠「前端只讓選圖片」那一道（後端的路由
+// 可以被直接呼叫，前端那一道不是防線）。
+func TestUploadRejectsNonImageContentUnderImageExtension(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	for _, tc := range []struct {
+		name    string
+		content []byte
+	}{
+		{"photo.jpg（內容是 HTML）", []byte("<!DOCTYPE html><script>alert(1)</script>")},
+		{"photo.png（內容是腳本）", []byte("document.location='http://evil.example'")},
+		{"photo.gif（內容是假位元組）", []byte("fake-jpeg-bytes")},
+		{"photo.webp（內容是 ZIP）", []byte("PK\x03\x04\x00\x00\x00\x00\x00\x00")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := multipartUpload(t, "/upload", "test-upload-token", tc.name, "image/jpeg", tc.content)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("狀態碼 = %d，want 400：%s", rec.Code, rec.Body.String())
+			}
+			// 被拒的上傳不能留下檔案 —— 與 TestUploadRequiresToken 同一個道理：
+			// 攻擊者不該能「被擋下但仍然消耗磁碟」。
+			if files := countFiles(t, filepath.Join(base, "files")); files != 0 {
+				t.Errorf("被拒絕的請求仍然寫入了 %d 個檔案", files)
+			}
+		})
+	}
+}
+
+// TestUploadStoresNoEXIF 是隱私那條的端到端版本：走真實的 /upload，讀磁碟上的檔案。
+//
+// 為什麼要端到端：imagepolicy_test.go 那支測的是 normalizeImage 的輸出，而這一條測的是
+// 「寫進磁碟的那份」—— 中間隔著 newFileNameForExt 與 saveFile。若有人把正規化的結果
+// 丟掉而存了原始位元組（例如在重構中改回 `saveFile(..., file)`），只有這一條會紅。
+func TestUploadStoresNoEXIF(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	withGPS := insertJPEGEXIF(t, sampleJPEG(t, 40, 30), "Exif\x00\x00GPSLocation\x00Tokyo\x00")
+	req := multipartUpload(t, "/upload", "test-upload-token", "IMG_0001.jpg", "image/jpeg", withGPS)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("狀態碼 = %d，want 200：%s", rec.Code, rec.Body.String())
+	}
+
+	stored := listFiles(t, filepath.Join(base, "files"))
+	if len(stored) != 1 {
+		t.Fatalf("儲存了 %d 個檔案，want 1", len(stored))
+	}
+	data, err := os.ReadFile(filepath.Join(base, "files", stored[0]))
+	if err != nil {
+		t.Fatalf("讀取儲存的檔案失敗: %v", err)
+	}
+	for _, marker := range []string{"Exif", "GPSLocation", "Tokyo"} {
+		if bytes.Contains(data, []byte(marker)) {
+			t.Errorf("磁碟上的檔案還留下 %q —— GPS 就在 EXIF 裡，而這個站的核心立論是匿名性", marker)
+		}
+	}
+	// 原始檔名（IMG_0001）不能出現在檔名裡：這是 UUID 命名的第二個理由（見 storage.go）。
+	if strings.Contains(stored[0], "IMG_0001") {
+		t.Errorf("檔名 %q 洩漏了上傳者給的檔名", stored[0])
+	}
+}
+
+// TestUploadExtensionFollowsDetectedContent 守住「副檔名由內容產生」。
+//
+// 這一條的失效方式是「存一份被誤標的檔案」：叫 a.png 的 JPEG 若保留 .png 的檔名，
+// FileServer 會依副檔名回 Content-Type=image/png，而瀏覽器拿到的是 JPEG ——
+// 症狀是那一張圖在某些瀏覽器上永遠不顯示，而沒有任何错误（Content-Type 是「伺服器說的」，
+// 所以日誌裡看不出任何不對）。
+func TestUploadExtensionFollowsDetectedContent(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	req := multipartUpload(t, "/upload", "test-upload-token", "mislabelled.png", "image/png", sampleJPEG(t, 30, 20))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("狀態碼 = %d，want 200：%s", rec.Code, rec.Body.String())
+	}
+
+	url := extractURL(t, rec.Body.String())
+	if !strings.HasSuffix(url, ".jpg") {
+		t.Errorf("網址 %q 的副檔名不是 .jpg —— 內容是 JPEG，副檔名必須跟著內容", url)
+	}
+	stored := listFiles(t, filepath.Join(base, "files"))
+	if len(stored) != 1 || !strings.HasSuffix(stored[0], ".jpg") {
+		t.Errorf("磁碟上的檔名 %v 應該以 .jpg 結尾", stored)
+	}
+}
+
+// TestUploadRejectsContentTypeNotInWhitelist 守住「白名單是对內容型別的白名單」。
+//
+// 一份設定檔 `allowed_files = [".png"]` 的部署，上传一份 JPEG（檔名也寫 .png）必須被拒：
+// 輸出副檔名 .jpg 不在白名單裡。放行它的後果是「存得下、但這個部署宣稱只接受 PNG」——
+// 而 resolveDir 的注解說的是「副檔名也等於允許的 URL 前綴」，兩者必須一致。
+func TestUploadRejectsContentTypeNotInWhitelist(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	cfg.Upload.AllowedFiles = []string{".png"}
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	req := multipartUpload(t, "/upload", "test-upload-token", "photo.png", "image/png", sampleJPEG(t, 24, 16))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("狀態碼 = %d，want 400（JPEG 的內容不能存成這個部署只放行的 PNG）：%s", rec.Code, rec.Body.String())
+	}
+	if files := countFiles(t, filepath.Join(base, "files")); files != 0 {
+		t.Errorf("被拒絕的請求仍然寫入了 %d 個檔案", files)
+	}
+}
+
+// TestUploadDownscalesStoredFile 守住尺寸收斂在 HTTP 層的效果。
+//
+// 斷言的是「儲存的檔案 DecodeConfig 出來不超過上限」而不是檔案大小：大小取決於內容
+// 與品質，而「動態一頁十張原檔」這個成本是**尺寸**造成的。
+func TestUploadDownscalesStoredFile(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	cfg.Upload.MaxWidth = 400
+	cfg.Upload.MaxHeight = 300
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	req := multipartUpload(t, "/upload", "test-upload-token", "big.jpg", "image/jpeg", sampleJPEG(t, 1200, 800))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("狀態碼 = %d，want 200：%s", rec.Code, rec.Body.String())
+	}
+
+	stored := listFiles(t, filepath.Join(base, "files"))
+	if len(stored) != 1 {
+		t.Fatalf("儲存了 %d 個檔案，want 1", len(stored))
+	}
+	data, err := os.ReadFile(filepath.Join(base, "files", stored[0]))
+	if err != nil {
+		t.Fatalf("讀取儲存的檔案失敗: %v", err)
+	}
+	cfgs, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("儲存的檔案不是可讀的圖片: %v", err)
+	}
+	if cfgs.Width > 400 || cfgs.Height > 300 {
+		t.Errorf("儲存的尺寸 = %dx%d，超過設定給的 400x300", cfgs.Width, cfgs.Height)
+	}
+}
+
+// TestUploadRejectsSourceAbovePixelCap 守住解壓炸彈在 HTTP 層的出口。
+//
+// 這一條用一個**小**檔案加一個小的 max_source_pixels：證明的順序是「上限在存檔之前生效」，
+// 而不是「上限的值是 24M」—— 後者已經由 imagepolicy_test.go 那支釘住了。
+func TestUploadRejectsSourceAbovePixelCap(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	cfg.Upload.MaxSourcePixels = 200 // 100x100 的圖是 10000 px，遠超過這個測試用的上限
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	req := multipartUpload(t, "/upload", "test-upload-token", "wide.jpg", "image/jpeg", sampleJPEG(t, 100, 100))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("狀態碼 = %d，want 400（來源 10000 px 超過 max_source_pixels=200）：%s", rec.Code, rec.Body.String())
+	}
+	if files := countFiles(t, filepath.Join(base, "files")); files != 0 {
+		t.Errorf("被拒絕的請求仍然寫入了 %d 個檔案 —— 那是「拒收但仍然消耗磁碟」的形狀", files)
+	}
+}
+
+// TestUploadReencodeDisabledStoresOriginal 是 reencode=false 的 HTTP 層版本。
+//
+// 它存在的理由與 main.go 的 imagePolicyWarning 同一個：那個設定值的後果必須可觀察，
+// 否則「我關掉了它」與「我忘了開啟它」在系統裡是同一個狀態（見 config.go 對 *bool 的說明）。
+func TestUploadReencodeDisabledStoresOriginal(t *testing.T) {
+	base := t.TempDir()
+	cfg := testConfig(t, base)
+	cfg.Upload.Reencode = imagePolicyEnabled(false)
+	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
+
+	original := insertJPEGEXIF(t, sampleJPEG(t, 30, 20), "Exif\x00\x00GPSLocation\x00")
+	req := multipartUpload(t, "/upload", "test-upload-token", "keep.jpg", "image/jpeg", original)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("狀態碼 = %d，want 200：%s", rec.Code, rec.Body.String())
+	}
+
+	stored := listFiles(t, filepath.Join(base, "files"))
+	if len(stored) != 1 {
+		t.Fatalf("儲存了 %d 個檔案，want 1", len(stored))
+	}
+	data, err := os.ReadFile(filepath.Join(base, "files", stored[0]))
+	if err != nil {
+		t.Fatalf("讀取儲存的檔案失敗: %v", err)
+	}
+	if !bytes.Equal(data, original) {
+		t.Error("reencode=false 卻改寫了檔案 —— 這個設定值的語意是「原樣存檔」")
+	}
+	if !bytes.Contains(data, []byte("GPSLocation")) {
+		t.Error("reencode=false 卻剝掉了 EXIF —— 那表示啟動警告說的是一件不會發生的事")
 	}
 }
 
@@ -381,7 +632,7 @@ func TestUploadStoresUnderUUIDName(t *testing.T) {
 	// 這個檔名同時帶著路徑穿越、絕對路徑與隱私資訊三種問題。
 	const hostile = "../../../etc/passwd.jpg"
 
-	req := multipartUpload(t, "/upload", "test-upload-token", hostile, "image/jpeg", []byte("bytes"))
+	req := multipartUpload(t, "/upload", "test-upload-token", hostile, "image/jpeg", sampleJPEG(t, 24, 16))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -423,14 +674,17 @@ func TestTwoUploadsDoNotOverwriteEachOther(t *testing.T) {
 	cfg := testConfig(t, base)
 	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 1})
 
-	// 同一個檔名上傳兩次，內容不同。
+	// 同一個檔名上傳兩次，內容是兩張**不同的**圖。
+	// 從前這裡送的是 "first-image"/"second-image" 兩段文字 —— 那在內容被驗證之前
+	// 也是合法的「圖片」，所以這條測試當時測的是「檔名不覆蓋」而不是一切。
 	urls := make([]string, 0, 2)
-	for i, content := range []string{"first-image", "second-image"} {
-		req := multipartUpload(t, "/upload", "test-upload-token", "same-name.jpg", "image/jpeg", []byte(content))
+	images := [][]byte{sampleJPEG(t, 40, 30), sampleJPEG(t, 30, 40)}
+	for i, content := range images {
+		req := multipartUpload(t, "/upload", "test-upload-token", "same-name.jpg", "image/jpeg", content)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("第 %d 次上傳狀態碼 = %d", i, rec.Code)
+			t.Fatalf("第 %d 次上傳狀態碼 = %d：%s", i, rec.Code, rec.Body.String())
 		}
 		urls = append(urls, extractURL(t, rec.Body.String()))
 	}
@@ -439,16 +693,24 @@ func TestTwoUploadsDoNotOverwriteEachOther(t *testing.T) {
 		t.Fatalf("兩次上傳得到相同的網址 %q —— 第二次覆蓋了第一次", urls[0])
 	}
 
-	// 兩張圖都必須還在，且內容各自正確。
+	// 兩張圖都必須還在，且各自是**可讀的**圖片、尺寸各自正確。
+	// 斷言尺寸而不是「位元組等於原檔」：存下來的是重新編碼過的檔案（見 imagepolicy.go），
+	// 因此「等於原檔」現在是一件不會發生的事 —— 而「兩張圖都還在且各自正確」才是
+	// 這條測試真正要守的性質。
 	for i, u := range urls {
 		data, err := os.ReadFile(filepath.Join(base, filepath.FromSlash(u)))
 		if err != nil {
 			t.Errorf("讀取 %s 失敗: %v", u, err)
 			continue
 		}
-		want := []string{"first-image", "second-image"}[i]
-		if string(data) != want {
-			t.Errorf("%s 的內容 = %q，want %q", u, data, want)
+		cfgs, _, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			t.Errorf("%s 不是可讀的圖片: %v", u, err)
+			continue
+		}
+		want := []image.Point{{X: 40, Y: 30}, {X: 30, Y: 40}}[i]
+		if cfgs.Width != want.X || cfgs.Height != want.Y {
+			t.Errorf("%s 的尺寸 = %dx%d，want %dx%d（第一張被第二張蓋掉了？）", u, cfgs.Width, cfgs.Height, want.X, want.Y)
 		}
 	}
 }
@@ -861,7 +1123,7 @@ func TestMediaTokenOnlyAffectsFilesPath(t *testing.T) {
 	handler, _ := newTestServer(t, cfg, &fakeTokenStore{found: 0}) // 任何 token 都查不到
 
 	// 沒有 media token，但有 upload token 的上傳應該成功。
-	req := multipartUpload(t, "/upload", "test-upload-token", "photo.jpg", "image/jpeg", []byte("bytes"))
+	req := multipartUpload(t, "/upload", "test-upload-token", "photo.jpg", "image/jpeg", sampleJPEG(t, 20, 12))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
