@@ -116,25 +116,39 @@ export function AdminShell({ active, pageTitle, children }: AdminShellProps) {
       </a>
 
       <div className="admin-app">
-        <aside className={`rail${railOpen ? ' is-open' : ''}`} id="rail" aria-label={t('admin.railLabel')}>
-          <a className="rail__brand" href="/forum" aria-label={t('admin.railBrandAria', { site: SITE_NAME })}>
-            <span className="rail__mark" aria-hidden="true">
+        <header className="topbar">
+          <a className="topbar__brand" href="/forum" aria-label={t('admin.railBrandAria', { site: SITE_NAME })}>
+            <span className="topbar__mark" aria-hidden="true">
               {SITE_MARK}
             </span>
-            <span className="rail__brand-text">
+            <span className="topbar__brand-text">
               <strong>{SITE_SHORT_NAME}</strong>
               <small>{t('admin.consoleName')}</small>
             </span>
           </a>
 
-          <nav className="rail__nav" aria-label={t('admin.railNavLabel')}>
-            <p className="rail__label">{t('admin.railGovernance')}</p>
+          <button
+            className="topbar__menu"
+            type="button"
+            aria-label={t('admin.topbarMenu')}
+            aria-controls="admin-nav"
+            aria-expanded={railOpen}
+            onClick={() => setRailOpen((open) => !open)}
+          >
+            <Icon name="menu" />
+          </button>
+
+          <nav
+            className={`topbar__nav${railOpen ? ' is-open' : ''}`}
+            id="admin-nav"
+            aria-label={t('admin.railNavLabel')}
+          >
             {navItems().map((item) => {
               const isActive = item.route === active;
               return (
                 <a
                   key={item.route}
-                  className={`rail__link${isActive ? ' is-active' : ''}`}
+                  className={`topbar__nav-link${isActive ? ' is-active' : ''}`}
                   data-nav={item.route}
                   href={item.route}
                   aria-current={isActive ? 'page' : undefined}
@@ -142,12 +156,8 @@ export function AdminShell({ active, pageTitle, children }: AdminShellProps) {
                 >
                   <Icon name={item.icon} />
                   <span>{item.label}</span>
-                  {/*
-                    用戶數只有 /admin 會算，這裡一律渲染節點、由 userCount 決定
-                    內容；條件式渲染會讓它在兩種狀態間移動 DOM 節點。
-                  */}
                   {item.route === '/admin' ? (
-                    <span className="rail__count" hidden={userCount === null}>
+                    <span className="topbar__nav-count" hidden={userCount === null}>
                       {formatNumber(userCount)}
                     </span>
                   ) : null}
@@ -156,65 +166,33 @@ export function AdminShell({ active, pageTitle, children }: AdminShellProps) {
             })}
           </nav>
 
-          <div className="rail__foot">
-            <p className="rail__session">
-              <span className="rail__pulse" aria-hidden="true" />
-              {t('admin.railMode')}
-            </p>
-            <a className="rail__exit" href="/forum">
-              <Icon name="home" />
-              {t('admin.railExit')}
+          <div className="topbar__actions">
+            <span className="status-pill">
+              <i aria-hidden="true" />
+              {t('admin.statusOnline')}
+            </span>
+            <LanguageSwitcher variant="admin" />
+            <a className="topbar__link" href="/forum">
+              {t('admin.topbarForum')}
             </a>
-            <button className="rail__exit" type="button" disabled={loggingOut} onClick={() => void handleLogout()}>
+            <button className="topbar__link" type="button" disabled={loggingOut} onClick={() => void handleLogout()}>
               <Icon name="logout" />
               {t('auth.logout')}
             </button>
           </div>
-        </aside>
-        {/*
-          scrim 在 900px 以上是 display:none（style.css），因此 closed 時
-          直接用 hidden 拿掉節點；open 時加 is-open 讓它變成可點擊的遮罩。
-        */}
-        <div
-          className={`rail__scrim${railOpen ? ' is-open' : ''}`}
-          id="rail-scrim"
-          hidden={!railOpen}
-          onClick={() => setRailOpen(false)}
-        />
+        </header>
 
-        <div className="viewport">
-          <header className="topbar">
-            <button
-              className="topbar__menu"
-              type="button"
-              aria-label={t('admin.topbarMenu')}
-              aria-controls="rail"
-              aria-expanded={railOpen}
-              onClick={() => setRailOpen((open) => !open)}
-            >
-              <Icon name="menu" />
-            </button>
-            <p className="topbar__crumb">
-              <span>{SITE_SHORT_NAME}</span>
-              <i>/</i>
-              <strong>{pageTitle}</strong>
-            </p>
-            <div className="topbar__actions">
-              <span className="status-pill">
-                <i aria-hidden="true" />
-                {t('admin.statusOnline')}
-              </span>
-              <LanguageSwitcher variant="admin" />
-              <a className="topbar__link" href="/forum">
-                {t('admin.topbarForum')}
-              </a>
-            </div>
-          </header>
-
-          <main className="canvas" id="main">
-            {children}
-          </main>
+        <div className="topbar__titlebar">
+          <p className="topbar__crumb">
+            <span>{SITE_SHORT_NAME}</span>
+            <i>/</i>
+            <strong>{pageTitle}</strong>
+          </p>
         </div>
+
+        <main className="canvas" id="main">
+          {children}
+        </main>
       </div>
     </>
   );
