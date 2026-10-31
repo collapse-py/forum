@@ -77,3 +77,11 @@ deploy/settings.conf
 # 部署細節，不應進版本庫（與 config.conf 同一個道理）。要交付時手動複製
 # reports/audit-report.md。
 audit-workspace/
+
+# Capacitor Android 本機產物與設定。
+frontend/android/app/build/
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/android/app/google-services.json
+frontend/android/.idea/
+*.apk

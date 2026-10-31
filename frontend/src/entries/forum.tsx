@@ -11,6 +11,8 @@ import { createRoot } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 
 import { FeedPage } from '../forum/FeedPage';
+import { initNativePush } from '../native/push';
+void initNativePush();
 
 const root = document.getElementById('root');
 if (!root) throw new Error('[FORUM] /forum 缺少 #root 掛載點。');
