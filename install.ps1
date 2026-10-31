@@ -19,5 +19,6 @@ if (-not (Test-Path $adb)) {
 if (-not (Test-Path $adb)) { throw "adb not found" }
 
 & $adb devices
+& $adb uninstall com.forum.app 2>$null
 & $adb install -r $apk
 & $adb shell monkey -p com.forum.app -c android.intent.category.LAUNCHER 1
