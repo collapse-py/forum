@@ -14,9 +14,13 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void onPageLoaded(WebView view) {
                 view.evaluateJavascript(
-                    "(function(){var s=document.createElement('style');" +
-                    "s.innerHTML='.install-app-button,.install-app-hint{display:none !important;}';" +
-                    "if(document.head)document.head.appendChild(s);})()",
+                    "(function(){" +
+                    "function remove(){try{document.querySelectorAll('.install-app-button,.install-app-hint').forEach(function(e){e.remove();});}catch(e){}}" +
+                    "remove();" +
+                    "if(window.__installObserver) return;" +
+                    "if(document.body){window.__installObserver=new MutationObserver(remove);window.__installObserver.observe(document.body,{childList:true,subtree:true});}" +
+                    "setTimeout(remove,500);setTimeout(remove,1500);" +
+                    "})()",
                     null
                 );
             }
