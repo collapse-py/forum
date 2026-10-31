@@ -18,6 +18,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Capacitor } from '@capacitor/core';
 
+import { startNativeGoogleLogin } from '../native/auth';
+
 import { logout, readJSONObject } from '../core';
 import { scheduleWebFonts } from '../fonts';
 import { ForumGlyph, type ForumGlyphName } from '../icons';
@@ -274,7 +276,12 @@ export function ForumNav({ auth, labels = NO_LABELS, loginReturn, install, showA
         {showAccount ? <span className="user-state">{authLabel(auth, labels)}</span> : null}
         {install ? <InstallButton onInstall={install.requestInstall} standalone={install.standalone} /> : null}
         {showAccount && !auth.loggedIn ? (
-          <a className="login-link" href={`/auth/google?return=${encodeURIComponent(loginReturn)}`}>
+          <a className="login-link" href={`/auth/google?return=${encodeURIComponent(loginReturn)}`} onClick={(e) => {
+          if (Capacitor.isNativePlatform()) {
+            e.preventDefault();
+            void startNativeGoogleLogin(loginReturn);
+          }
+        }}>
             {t('auth.googleLogin')}
           </a>
         ) : null}

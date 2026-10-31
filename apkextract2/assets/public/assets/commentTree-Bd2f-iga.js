@@ -1,0 +1,1 @@
+function r(n){const o=new Map;for(const e of n)o.set(e.id,{comment:e,replies:[]});const s=[];for(const e of n){const t=o.get(e.id);if(!t)continue;const c=Number(e.parentId)||0,i=c>0?o.get(c):void 0;i?i.replies.push(t):s.push(t)}return s}export{r as b};

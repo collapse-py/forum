@@ -698,6 +698,7 @@ func (s *Server) Handler() http.Handler {
 	// 用會放行 GET 的版本會讓限流形同不存在（見該函式的說明）。
 	mux.HandleFunc("/auth/google", s.rateLimitAllMethods(s.authRateLimiter, s.handleGoogleLogin))
 	mux.HandleFunc("/auth/callback", s.rateLimitAllMethods(s.authRateLimiter, s.handleGoogleCallback))
+	mux.HandleFunc("/auth/handoff", s.rateLimitAllMethods(s.authRateLimiter, s.requireTrustedOrigin(s.handleAuthHandoff)))
 	// 登出是「改變伺服器端狀態」的動作，因此掛 requireTrustedOrigin 做
 	// 跨站請求偽造防護：即使攻擊者能讓 victim's 瀏覽器送出 POST，
 	// 來源網域不在 TrustedOrigins 就會被擋下。

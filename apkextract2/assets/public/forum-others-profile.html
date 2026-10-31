@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>公開個人資料｜{{FORUM_NAME}}</title>
+    <!--
+      RSS 2.0 訂閱連結（後端 /feed.xml）。放在公開頁的殼層，讓瀏覽器與閱讀器
+      在這一頁就能發現它 —— 訂閱的是全站動態，不是這一頁的內容。
+    -->
+    <link rel="alternate" type="application/rss+xml" title="{{FORUM_NAME}}" href="/feed.xml" />
+    <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
+    <link rel="icon" href="/assets/logo-MxZlYyVC.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/logo-MxZlYyVC.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <style>
+      /*
+       * 他人的公開個人資料（/forum/others-profile）樣式
+       *
+       * 共用層在 /style.css：公開頁殼層（導覽列、底部導覽）加上這一頁與
+       * /forum/profile 共用的 .profile-* 外框，以及後臺 design tokens。
+       * 本區塊只放唯讀的公開內容 —— 這一頁沒有表單、沒有編輯鈕，因此
+       * /forum/profile 那一整套編輯樣式不該出現在這裡。
+       *
+       * html:root 必須在這裡重新宣告：--line 與 --accent 兩邊同名不同值。
+       * 寫成 html:root 而不是 :root，是為了用多一個元素選擇器贏過 style.css
+       * 第 4 節的 :root —— Vite 建置時會把 <link> 移到 <head> 最後，因此不能
+       * 靠「<style> 在 <link> 之後」取勝。理由見 style.css 的檔頭說明。
+       */
+      html:root {
+        --bg: #fff;
+        --line: #e7e7e7;
+        --text: #101010;
+        --muted: #777;
+        --accent: #111;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        color: var(--text);
+        background: var(--bg);
+        font-family: Inter, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      }
+
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+      }
+
+      .public-profile {
+        padding: 22px 0;
+      }
+
+      .public-profile-name {
+        margin-bottom: 12px;
+        font-size: 22px;
+        font-weight: 800;
+      }
+
+      .public-profile p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.7;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      /* --- 貼文區 -------------------------------------------------------------
+       * .feed 與 .post 都在 style.css 第 3 節（貼文卡是 /forum、/forum/following
+       * 與這一頁共用的），因此這裡只需要把這一段與上面的個人資料卡分隔開。
+       *
+       * 分隔用一條 hairline + 上方留白，而不是 .profile-panel 的卡片外框：
+       * 貼文在這裡是「這個人在論壇上的活動」，與上面那張「這個人的資料」是
+       * 兩件事，卡成同一張會讓人誤以為貼文也是一個欄位。
+       * ------------------------------------------------------------------ */
+      .public-profile-posts {
+        margin-top: 34px;
+        padding-top: 26px;
+        border-top: 1px solid var(--line);
+      }
+
+      .public-profile-posts .eyebrow {
+        margin-bottom: 4px;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/forumOthersProfile-CdzwK0VN.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/LanguageSwitcher-CLSWNHtw.js">
+    <link rel="modulepreload" crossorigin href="/assets/useMediaTokenRelease-DEMwEL_o.js">
+    <link rel="modulepreload" crossorigin href="/assets/commentTree-Bd2f-iga.js">
+    <link rel="modulepreload" crossorigin href="/assets/useReport-D1ss14fE.js">
+    <link rel="modulepreload" crossorigin href="/assets/shell-R-GKopUN.js">
+    <link rel="modulepreload" crossorigin href="/assets/useFeed-BsaSosh8.js">
+    <link rel="stylesheet" crossorigin href="/assets/LanguageSwitcher-DcHFaKH-.css">
+  </head>
+  <body>
+    <!-- 見 forum.html：整頁由 src/entries/forum-others-profile.tsx 掛載。 -->
+    <div id="root"></div>
+  </body>
+</html>

@@ -12,6 +12,9 @@
 import { useEffect, useState } from 'react';
 
 import { ForumGlyph } from '../icons';
+import { Capacitor } from '@capacitor/core';
+
+import { startNativeGoogleLogin } from '../native/auth';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher';
 import { t, usePageTitle } from '../i18n';
 import { SITE_MARK, SITE_NAME, SITE_SHORT_NAME } from '../site';
@@ -40,7 +43,12 @@ export function LoginPage() {
         </a>
         <div className="nav-actions">
           <InstallButton onInstall={install.requestInstall} standalone={install.standalone} />
-          <a className="login-link" href={oauthHref}>
+          <a className="login-link" href={oauthHref} onClick={(e) => {
+            if (Capacitor.isNativePlatform()) {
+              e.preventDefault();
+              void startNativeGoogleLogin(loginReturn);
+            }
+          }}>
             {t('auth.googleLogin')}
           </a>
           {/* 這一頁不用 ForumNav（它沒有導覽列可借），因此語言切換器要自己放進去：
@@ -60,7 +68,12 @@ export function LoginPage() {
           <h1 id="login-title">{t('login.title')}</h1>
           <p>{t('login.body', { site: SITE_NAME })}</p>
           <div className="login-gate-actions">
-            <a className="google-btn login-gate-button" href={oauthHref}>
+            <a className="google-btn login-gate-button" href={oauthHref} onClick={(e) => {
+              if (Capacitor.isNativePlatform()) {
+                e.preventDefault();
+                void startNativeGoogleLogin(loginReturn);
+              }
+            }}>
               <span className="google-btn__mark" aria-hidden="true">
                 G
               </span>

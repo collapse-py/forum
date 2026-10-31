@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>個人資料｜{{FORUM_NAME}}</title>
+    <!--
+      RSS 2.0 訂閱連結（後端 /feed.xml）。放在公開頁的殼層，讓瀏覽器與閱讀器
+      在這一頁就能發現它 —— 訂閱的是全站動態，不是這一頁的內容。
+    -->
+    <link rel="alternate" type="application/rss+xml" title="{{FORUM_NAME}}" href="/feed.xml" />
+    <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
+    <link rel="icon" href="/assets/logo-MxZlYyVC.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/logo-MxZlYyVC.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <style>
+      /*
+       * 自己的個人資料（/forum/profile）樣式
+       *
+       * 共用層在 /style.css：公開頁殼層（導覽列、底部導覽、膠囊按鈕、
+       * 狀態列）加上這一頁與 /forum/others-profile 共用的 .profile-* 外框，
+       * 以及後臺 design tokens。本區塊只放「編輯」這件事本身：唯讀檢視、
+       * 表單、取消鈕與說明文字。
+       *
+       * html:root 必須在這裡重新宣告：--line 與 --accent 兩邊同名不同值。
+       * 寫成 html:root 而不是 :root，是為了用多一個元素選擇器贏過 style.css
+       * 第 4 節的 :root —— Vite 建置時會把 <link> 移到 <head> 最後，因此不能
+       * 靠「<style> 在 <link> 之後」取勝。理由見 style.css 的檔頭說明。
+       */
+      html:root {
+        --bg: #fff;
+        --line: #e7e7e7;
+        --text: #101010;
+        --muted: #777;
+        --accent: #111;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        color: var(--text);
+        background: var(--bg);
+        font-family: Inter, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      }
+
+      /* .eyebrow 兩套設計系統同名不同義，因此不放在 style.css。 */
+      .eyebrow {
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+      }
+
+      /* --- 未登入 ------------------------------------------------------------- */
+      .profile-login-prompt {
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .profile-login-prompt p {
+        margin: 0 0 16px;
+      }
+
+      /* --- 唯讀檢視 ----------------------------------------------------------- */
+      .profile-edit-button {
+        margin-left: auto;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 8px 16px;
+        color: var(--text);
+        background: #fff;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .profile-edit-button:hover {
+        border-color: var(--text);
+      }
+
+      .profile-view {
+        display: grid;
+        gap: 24px;
+      }
+
+      .profile-view-row {
+        display: grid;
+        gap: 8px;
+        padding-bottom: 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .profile-view-label {
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .profile-view-row strong,
+      .profile-view-row p {
+        margin: 0;
+        color: var(--text);
+        font-size: 16px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      /* --- 個人頁入口連結（我的追蹤／我的通知） --------------------------------
+       * 上面兩個 block 是「資料欄」（標題在上、值在下），這幾個是「前往另一頁
+       * 的連結」。刻意不做成資料欄的樣子：它們沒有值可顯示（不顯示追蹤人數的
+       * 理由見 src/forum/ProfilePage.tsx），硬做成「標題＋空值」只會像一格
+       * 填錯了的欄位。
+       *
+       * 因此走「旁邊導覽列」的樣子：文字靠左、箭頭靠右、整列可點。字級與字重
+       * 對齊上面兩欄的值（16px），但加重到 700，讓它在同一個 block 裡讀起來
+       * 是一個動作而不只是一段文字。
+       * ------------------------------------------------------------------ */
+      .profile-entry-link {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        /* 負邊距讓 hover 的底色補滿整欄：.profile-panel 只有上下 padding
+           （左右是 0），所以這 16px 正好抵掉 .profile-main 的 16px，列看起來
+           是一整條，而不是一個浮在文字中間的小方塊。 */
+        margin-inline: -16px;
+        padding: 14px 16px;
+        border-radius: 12px;
+        color: var(--text);
+        font-size: 16px;
+        font-weight: 700;
+        text-decoration: none;
+        /* transition 在公開頁是首度使用：style.css 第 1 節那條全域的
+           prefers-reduced-motion 規則會在使用者要求減少動態時把它壓到 0.01ms，
+           所以不需要在這裡另外判斷。 */
+        transition: background-color 140ms var(--ease);
+      }
+
+      .profile-entry-link:hover {
+        background: #f7f7f7;
+      }
+
+      /* 箭頭改用內聯 SVG（icons.tsx 的 ForumGlyph），取代過去的 Material Symbols
+         字型 —— 那是一個 493 KiB 的第三方字檔，而這一頁只用到一個 chevron。 */
+      .profile-entry-link .forum-glyph {
+        color: var(--muted);
+        width: 22px;
+        height: 22px;
+      }
+
+      /* RTL：chevron_right 是固定朝右的字形，不會跟著 dir 翻面。與 style.css
+         RTL 節「▸ 這個字形本身方向固定，展開/收起的三角要在 RTL 換成 ◂」是同一個
+         問題，這裡用旋轉解決而不是換字形（換字形要改 React 端的內容，會讓這個
+         方向判斷散到兩處）。 */
+      [dir="rtl"] .profile-entry-link .forum-glyph {
+        transform: rotate(180deg);
+      }
+
+      /* --- 編輯表單 -----------------------------------------------------------
+       * 這裡的 input / textarea 是有框的輸入框，與 /forum/new 那種「只有底線」
+       * 的寫作區是不同控件，因此各自帶自己的框線樣式。
+       * ------------------------------------------------------------------ */
+      .profile-panel form {
+        display: block;
+      }
+
+      .profile-panel label {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .profile-panel input {
+        display: block;
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 13px 14px;
+        color: var(--text);
+        background: #fff;
+        font: inherit;
+        font-size: 16px;
+        outline: none;
+      }
+
+      .profile-panel input:focus {
+        border-color: var(--accent);
+      }
+
+      .profile-panel textarea {
+        display: block;
+        width: 100%;
+        min-height: 130px;
+        margin-top: 20px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 13px 14px;
+        color: var(--text);
+        background: #fff;
+        font: inherit;
+        font-size: 15px;
+        line-height: 1.6;
+        outline: none;
+        resize: vertical;
+      }
+
+      .profile-panel textarea:focus {
+        border-color: var(--accent);
+      }
+
+      .profile-hint {
+        margin: 9px 0 20px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+       /* --- 頭像 -----------------------------------------------------------
+        * 與上面兩個欄位不同的地方只有一個：它的「值」是一顆圓，因此橫向排布才不會
+        * 把表單拉得過長。標題用 <span> 而不是 <label>：這一格沒有單一輸入框可以
+        * 指（真正的控制項是下面那顆「選擇圖片」的 <label htmlFor>），掛一個指不到
+        * 任何東西的 for 只會讓讀屏唸出一個沒反應的欄位名稱。
+        * ------------------------------------------------------------------ */
+      .profile-avatar-field {
+        margin-top: 20px;
+      }
+
+      .profile-avatar-field-label {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .profile-avatar-editor {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      /* 編輯中的頭像比標題列那顆小一級：它旁邊還有兩個按鈕，而同一個 64px 圓在
+         兩個地方用同樣的尺寸會讓這一格看起來比暱稱與簡介都「重」。 */
+      .profile-avatar--editor {
+        width: 56px;
+        height: 56px;
+        font-size: 19px;
+      }
+
+      .profile-avatar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* 「選擇圖片」沿用 .image-upload-label 的膠囊外框（/forum/new 的同一顆），
+         選擇器在這裡重寫而不是共用 class：兩頁的 <style> 互相看不到對方。 */
+      .profile-avatar-choose {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 7px 12px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .profile-avatar-choose:hover {
+        border-color: var(--text);
+        color: var(--text);
+      }
+
+      /* 上傳中把膠囊壓暗：它此刻不可按，而看起來仍可按會讓人反覆點。
+         掛 class 而不是用 :has(.profile-avatar-input:disabled)：後者要
+         Chrome 105 / Safari 15.4 / Firefox 121 之後才認得，而這裡要的只是一個
+         上傳中的視覺提示 —— 不支援的瀏覽器會得到一顆看起來可以按但按了沒反應的
+         膠囊（input 仍然 disabled），不是壞掉。 */
+      .profile-avatar-choose.is-uploading {
+        opacity: 0.6;
+        cursor: progress;
+      }
+
+      .profile-avatar-remove {
+        border: 0;
+        border-radius: 999px;
+        padding: 7px 12px;
+        color: #d33;
+        background: transparent;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .profile-avatar-remove:hover {
+        background: #fdecec;
+      }
+
+      /* hidden 而不是 display:none：上面 .profile-panel input（0,1,1）的權重贏過
+         .profile-avatar-input（0,1,0），只有元素上的 hidden 帶的 UA !important 留得
+         住它。真正的控制項是 <label htmlFor>，與 /forum/new 同一個寫法。 */
+      .profile-avatar-input {
+        display: none;
+      }
+
+      .profile-form-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      /* 「取消」沿用 .logout-button 的膠囊外框，但 .logout-button 預設是
+         display: none（登出鈕由 class 決定顯示），因此這裡把它打開。
+         選擇器多帶一層 .profile-form-actions：style.css 的 .logout-button
+         同優先級，而 Vite 會把它的 <link> 移到 <head> 最後，因此必須靠
+         選擇器本身贏過順序。 */
+      .profile-form-actions .profile-cancel-button {
+        display: inline-block;
+      }
+
+      /* --- 我的貼文 -----------------------------------------------------------
+       * .feed 與 .post 都在 style.css 第 3 節（貼文卡是 /forum、/forum/following
+       * 與 /forum/others-profile 共用的），因此這裡只需要把這一段與上面的個人
+       * 資料卡分隔開 —— 與 .public-profile-posts 完全同樣的處理，理由見
+       * forum-others-profile.html 的註解。
+       *
+       * 上面留白比 .public-profile-posts 多：這一頁的卡片是可編輯的（表單很高），
+       * 貼文區緊接著表單會看起來像表單的一部分。
+       * ------------------------------------------------------------------ */
+      .profile-posts {
+        margin-top: 34px;
+        padding-top: 40px;
+        border-top: 1px solid var(--line);
+      }
+
+      .profile-posts .eyebrow {
+        margin-bottom: 4px;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/forumProfile-BmgwMn_n.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/LanguageSwitcher-CLSWNHtw.js">
+    <link rel="modulepreload" crossorigin href="/assets/useMediaTokenRelease-DEMwEL_o.js">
+    <link rel="modulepreload" crossorigin href="/assets/commentTree-Bd2f-iga.js">
+    <link rel="modulepreload" crossorigin href="/assets/useReport-D1ss14fE.js">
+    <link rel="modulepreload" crossorigin href="/assets/shell-R-GKopUN.js">
+    <link rel="modulepreload" crossorigin href="/assets/useFeed-BsaSosh8.js">
+    <link rel="stylesheet" crossorigin href="/assets/LanguageSwitcher-DcHFaKH-.css">
+  </head>
+  <body>
+    <!-- 見 forum.html：整頁由 src/entries/forum-profile.tsx 掛載。 -->
+    <div id="root"></div>
+  </body>
+</html>

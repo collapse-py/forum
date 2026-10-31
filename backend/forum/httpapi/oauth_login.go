@@ -76,6 +76,9 @@ type oauthState struct {
 	ReturnPath string `json:"return_path"`
 	// CodeVerifier 是 PKCE 的原文，只送給 Google 的 token 端點，絕不出現在網址或 cookie。
 	CodeVerifier string `json:"code_verifier"`
+	// Native 標記這個登入流程是由 Capacitor 原生殼發起：完成後不導回網頁，
+	// 而是把 session 交給 app 的 deep link（見 handleGoogleCallback）。
+	Native bool `json:"native"`
 }
 
 // oauthStateKey 把 nonce 組成本功能專屬的 Redis key。
@@ -138,6 +141,8 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	if !auth.IsSafeReturnPath(returnPath) {
 		returnPath = "/"
 	}
+	// native：由 Capacitor 原生殼發起的登入，完成後走 deep link handoff 而非網頁 redirect。
+	native := r.URL.Query().Get("native") == "1" || r.URL.Query().Get("native") == "true"
 
 	nonce, err := newOAuthNonce()
 	if err != nil {
@@ -152,7 +157,7 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, err := json.Marshal(oauthState{ReturnPath: returnPath, CodeVerifier: verifier})
+	payload, err := json.Marshal(oauthState{ReturnPath: returnPath, CodeVerifier: verifier, Native: native})
 	if err != nil {
 		// 兩個字串欄位不可能讓 Marshal 失敗；走到這裡代表程式被改壞了，不是使用者問題。
 		logger.ErrorfContext(r.Context(), "[AUTH] state 序列化失敗: %v", err)
@@ -252,6 +257,24 @@ func (s *Server) clearOAuthStateCookie(w http.ResponseWriter) {
 // 攻擊者就能靠回應時間逐段推出一個還沒用過的 nonce。
 // 兩者皆為空時不算相符 —— 沒有 cookie 的回呼（舊版流程、或被人直接貼網址）
 // 在這裡一律被擋掉。
+// handoffTTL 是原生殼登入 handoff code 的存續時間。短壽命 + 一次性，降低被竊取後
+// 冒用的窗口。
+const handoffTTL = 2 * time.Minute
+
+const handoffKeyPrefix = "FORUM:oauth:handoff:"
+
+func handoffKey(code string) string {
+	return handoffKeyPrefix + code
+}
+
+func newHandoffCode() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
 func matchesOAuthState(state, cookieValue string) bool {
 	if state == "" || cookieValue == "" {
 		return false

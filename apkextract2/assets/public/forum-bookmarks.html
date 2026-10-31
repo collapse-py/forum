@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      站名佔位符由後端在送出時換成設定檔的值（backend/forum/httpapi/site.go，
+      對應 FORUM_NAME / FORUM_SHORT_NAME）。前端 src/site.ts 在模組層讀下面這
+      兩個 meta 標記，因此第一次繪製就是正確站名，不會先畫出預設值再換掉。
+      佔位符必須留在樣式區塊之外：各頁的內嵌樣式是被 CSP 以 SHA-256 授權的，
+      區塊內容只要一個位元組不同，整頁就會沒有版面。這段註解因此刻意不寫出
+      樣式標籤本身 —— 雜湊是純文字掃描，註解裡出現標籤字面量會被當成開標籤。
+    -->
+    <meta name="forum-name" content="{{FORUM_NAME}}" />
+    <meta name="forum-short-name" content="{{FORUM_SHORT_NAME}}" />
+    <title>收藏｜{{FORUM_NAME}}</title>
+    <!--
+      RSS 2.0 訂閱連結（後端 /feed.xml）。放在公開頁的殼層，讓瀏覽器與閱讀器
+      在這一頁就能發現它 —— 訂閱的是全站動態，不是這一頁的內容。
+    -->
+    <link rel="alternate" type="application/rss+xml" title="{{FORUM_NAME}}" href="/feed.xml" />
+    <link rel="manifest" href="/forum-manifest.json?v=202609190349" />
+    <link rel="icon" href="/assets/logo-MxZlYyVC.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/logo-MxZlYyVC.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <style>
+      /*
+       * 收藏（/forum/bookmarks）樣式
+       *
+       * 共用層在 /style.css：公開頁殼層、貼文卡與留言串（第 3 節 —— 這一頁
+       * 與 /forum 渲染同一支 PostCard，因此那些規則必須是共用的）、.back-link、
+       * .forum-main、.empty / .loading / .feed-status。本區塊只放這一頁自己
+       * 渲染的東西：標題與頁面外框。
+       *
+       * html:root 必須在這裡重新宣告：--line 與 --accent 兩邊同名不同值。
+       * 寫成 html:root 而不是 :root，是為了用多一個元素選擇器贏過 style.css
+       * 第 4 節的 :root —— Vite 建置時會把 <link> 移到 <head> 最後，因此不能
+       * 靠「<style> 在 <link> 之後」取勝。理由見 style.css 的檔頭說明。
+       */
+      html:root {
+        --bg: #fff;
+        --line: #e7e7e7;
+        --text: #101010;
+        --muted: #777;
+        --accent: #111;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        color: var(--text);
+        background: var(--bg);
+        font-family: Inter, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      }
+
+      /*
+       * 頁面外框。與 .new-post-main / .post-page-main / .profile-main /
+       * .notification-main / .following-main 同一組邊界（28px / 16px / 100px）：
+       * 這一頁是同一家族的「有標題的內容頁」。
+       *
+       * 橫向的 16px 不能省 —— .forum-shell 與 .forum-main 都沒有橫向內距，而
+       * 貼文卡自己的左右內距是給卡片內容的。少了它，返回連結、標題與卡片會
+       * 貼齊螢幕邊緣（手機上最明顯）。16px 也讓標題與上方導覽列的標誌左緣
+       * 對齊：.forum-nav 在 640px 以下是 padding: 10px 16px。
+       */
+      .bookmarks-main {
+        padding: 28px 16px 100px;
+      }
+
+      /* 標題。與通知頁的 .notification-title 同一組字級與間隔 —— 兩頁是同一種
+         「清單頁的標題」，長得不一樣只會讓人以為其中一頁壞了。 */
+      .bookmarks-title {
+        margin: 0 0 18px;
+        color: var(--text);
+        font-size: 28px;
+        font-weight: 900;
+        letter-spacing: -0.02em;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/forumBookmarks-D8zQtKJR.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/LanguageSwitcher-CLSWNHtw.js">
+    <link rel="modulepreload" crossorigin href="/assets/useMediaTokenRelease-DEMwEL_o.js">
+    <link rel="modulepreload" crossorigin href="/assets/commentTree-Bd2f-iga.js">
+    <link rel="modulepreload" crossorigin href="/assets/useReport-D1ss14fE.js">
+    <link rel="modulepreload" crossorigin href="/assets/shell-R-GKopUN.js">
+    <link rel="modulepreload" crossorigin href="/assets/useFeed-BsaSosh8.js">
+    <link rel="stylesheet" crossorigin href="/assets/LanguageSwitcher-DcHFaKH-.css">
+  </head>
+  <body>
+    <!-- 見 forum.html：整頁由 src/entries/forum-bookmarks.tsx 掛載。 -->
+    <div id="root"></div>
+  </body>
+</html>

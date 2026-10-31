@@ -18,10 +18,13 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"forum/forum/auth"
 	"forum/forum/logger"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -108,7 +111,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 簽發 Redis session token。失敗代表 Redis 不可用，此時寧可回 500 讓
+// 簽發 Redis session token。失敗代表 Redis 不可用，此時寧可回 500 讓
 	// 使用者重試，也不要發出一個無法驗證的空 session。
 	token, err := s.sessions.Create(email, isAdmin)
 	if err != nil {
@@ -118,6 +121,30 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	// cookie 為 HttpOnly + SameSite=Lax + Path=/，由 session.Manager 設定；
 	// HttpOnly 讓 cookie 無法被 JavaScript 讀取，降低 XSS 盜用風險。
 	s.sessions.SetCookie(w, token)
+
+	// Capacitor 原生殼發起的登入：把 session 交給 app 的 deep link，而不是導回網頁。
+	// 網頁流程的 cookie 存在系統瀏覽器裡，app 的 WebView 讀不到，因此要用一次性
+	// handoff code 讓 app 自己來取 cookie。
+	if oauthStateValue.Native {
+		code, err := newHandoffCode()
+		if err != nil {
+			logger.ErrorfContext(r.Context(), "[AUTH] 產生 handoff code 失敗: %v", err)
+			internalError(w, "unable to complete Google login")
+			return
+		}
+		if s.mediaRedis == nil {
+			internalError(w, "unable to complete Google login")
+			return
+		}
+		if err := s.mediaRedis.Set(context.Background(), handoffKey(code), token, handoffTTL).Err(); err != nil {
+			logger.ErrorfContext(r.Context(), "[AUTH] 寫入 handoff 失敗: %v", err)
+			internalError(w, "unable to complete Google login")
+			return
+		}
+		http.Redirect(w, r, "com.forum.app://auth/callback?code="+url.QueryEscape(code), http.StatusSeeOther)
+		return
+	}
+
 	// 目標路徑是「發起登入時」存進 Redis 的那個值（見 httpapi/oauth_login.go），
 	// 上面已用 IsSafeReturnPath 再查一次，因此不會是外部網址。
 	http.Redirect(w, r, returnPath, http.StatusSeeOther)
@@ -165,4 +192,42 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		"ok":      loggedIn,
 		"isAdmin": isAdmin,
 	})
+}
+
+// handleAuthHandoff 讓 Capacitor 原生殼用一次性 handoff code 取得 session cookie。
+// code 只能用一次、短壽命；呼叫成功後把 token 寫進 WebView 的 cookie jar。
+func (s *Server) handleAuthHandoff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	// 兼容 query string（方便除錯），主要走 JSON body。
+	if r.URL.Query().Get("code") != "" {
+		body.Code = r.URL.Query().Get("code")
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(w, "登入流程已失效，請重新登入")
+			return
+		}
+	}
+	code := body.Code
+	if code == "" {
+		badRequest(w, "登入流程已失效，請重新登入")
+		return
+	}
+	if s.mediaRedis == nil {
+		internalError(w, "unable to complete Google login")
+		return
+	}
+	token, err := s.mediaRedis.GetDel(r.Context(), handoffKey(code)).Result()
+	if err != nil {
+		logger.WarnfContext(r.Context(), "[AUTH] handoff code 無效或已用過: %v", err)
+		badRequest(w, "登入流程已失效，請重新登入")
+		return
+	}
+	s.sessions.SetCookie(w, token)
+	writeOK(w, map[string]bool{"ok": true})
 }

@@ -12,7 +12,9 @@ import { I18nProvider } from '../i18n';
 
 import { FeedPage } from '../forum/FeedPage';
 import { initNativePush } from '../native/push';
+import { initNativeAuth } from '../native/auth';
 void initNativePush();
+void initNativeAuth();
 
 const root = document.getElementById('root');
 if (!root) throw new Error('[FORUM] /forum 缺少 #root 掛載點。');
