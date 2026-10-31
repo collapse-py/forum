@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 import { logout, readJSONObject } from '../core';
 import { scheduleWebFonts } from '../fonts';
@@ -103,7 +104,7 @@ let serviceWorkerRegistered = false;
  * 讓管理頁面多一層沒有預存收益的 networkFirst。
  */
 function registerServiceWorker(): void {
-  if (serviceWorkerRegistered || !('serviceWorker' in navigator)) return;
+  if (Capacitor.isNativePlatform() || serviceWorkerRegistered || !('serviceWorker' in navigator)) return;
   serviceWorkerRegistered = true;
   navigator.serviceWorker.register(SERVICE_WORKER_URL).catch((error: unknown) => {
     console.warn('Service worker registration failed:', error);
@@ -143,7 +144,8 @@ export function usePwaInstall(): PwaInstall {
   useEffect(() => {
     registerServiceWorker();
     setStandalone(
-      window.matchMedia('(display-mode: standalone)').matches ||
+      Capacitor.isNativePlatform() ||
+        window.matchMedia('(display-mode: standalone)').matches ||
         (navigator as Navigator & { standalone?: boolean }).standalone === true,
     );
 
